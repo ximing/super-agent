@@ -14,8 +14,8 @@ test('cloud PostgreSQL: tenant RLS, pairing, durable dispatch, replay accounting
   const app=await buildApp({databaseUrl:databaseUrl!,jwtSecret:'cloud-integration-secret-at-least-32-bytes',allowDevAuth:true,runScheduler:false});
   const call=async(method:string,path:string,token?:string,payload?:unknown,extra:Record<string,string>={})=>app.inject({method:method as any,url:`/v1${path}`,headers:{...(token?{authorization:`Bearer ${token}`} : {}),...extra},...(payload!==undefined?{payload}: {})});
   try{
-    const a=(await call('POST','/auth/dev',undefined,{email:`a-${randomUUID()}@example.com`})).json();
-    const b=(await call('POST','/auth/dev',undefined,{email:`b-${randomUUID()}@example.com`})).json();
+    const loginA=await call('POST','/auth/dev',undefined,{email:`a-${randomUUID()}@example.com`});assert.equal(loginA.statusCode,200,'Cloud test login A must succeed before authorization checks');const a=loginA.json();
+    const loginB=await call('POST','/auth/dev',undefined,{email:`b-${randomUUID()}@example.com`});assert.equal(loginB.statusCode,200,'Cloud test login B must succeed before authorization checks');const b=loginB.json();
     assert.ok(a.access_token);assert.notEqual(a.user.tenant_id,b.user.tenant_id);
     const keys=generateKeyPairSync('ed25519');
     const pair=(await call('POST','/device-pairings',undefined,{name:'Cloud integration Mac',public_key:keys.publicKey.export({type:'spki',format:'pem'}).toString()})).json();
@@ -66,7 +66,7 @@ test('cloud PostgreSQL: tenant RLS, pairing, durable dispatch, replay accounting
 test('cloud PostgreSQL: human-control expiry releases the browser and uncertain runs block redispatch', {skip:!databaseUrl,timeout:120000},async()=>{
   const app=await buildApp({databaseUrl:databaseUrl!,jwtSecret:'cloud-browser-control-test-at-least-32-bytes',allowDevAuth:true,runScheduler:false});
   try{
-    const session=(await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`control-${randomUUID()}@example.com`}})).json(),tenant=session.user.tenant_id,headers={authorization:`Bearer ${session.access_token}`};
+    const login=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`control-${randomUUID()}@example.com`}});assert.equal(login.statusCode,200,'Cloud control test login must succeed before creating fixtures');const session=login.json(),tenant=session.user.tenant_id,headers={authorization:`Bearer ${session.access_token}`};
     const fixture=await app.control.store.tenant(tenant,async tx=>{
       const device=await tx.put('devices',{name:'Control lease fixture',last_seen_at:new Date().toISOString(),capabilities:{generation:1,engines:[{engine:'codex',ready:true,models:['fixture']}],slots:{worker:1}}});
       const task=await app.control.service.createTask(tx,{goal:'Paused browser fixture',engine:'codex',device_id:device.id});
@@ -123,7 +123,8 @@ test('cloud PostgreSQL: Recall actor bindings are encrypted, tenant scoped and c
   }) as typeof fetch;
   const app=await buildApp({databaseUrl:databaseUrl!,jwtSecret:'cloud-recall-integration-secret-at-least-32-bytes',allowDevAuth:true,runScheduler:false,recallFetch});
   try{
-    const a=(await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`recall-a-${randomUUID()}@example.com`}})).json(),b=(await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`recall-b-${randomUUID()}@example.com`}})).json();
+    const loginA=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`recall-a-${randomUUID()}@example.com`}}),loginB=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`recall-b-${randomUUID()}@example.com`}});
+    assert.equal(loginA.statusCode,200,'Recall test login A must succeed before memory checks');assert.equal(loginB.statusCode,200,'Recall test login B must succeed before memory checks');const a=loginA.json(),b=loginB.json();
     const headersA={authorization:`Bearer ${a.access_token}`},headersB={authorization:`Bearer ${b.access_token}`};
     assert.equal((await app.inject({method:'GET',url:'/v1/memories',headers:headersB})).statusCode,503);
     const saved=await app.inject({method:'PUT',url:'/v1/settings/memory',headers:headersA,payload:{url:'https://recall.aimo.plus',token:'mock-alice-pat'}});assert.equal(saved.statusCode,200);assert.equal(saved.json().configured,true);assert.ok(!saved.body.includes('mock-alice-pat'));assert.ok(!saved.body.includes('ciphertext'));

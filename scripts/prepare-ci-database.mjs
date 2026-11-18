@@ -33,6 +33,9 @@ if (!urls[0].username || !urls[1].username || urls[0].username === urls[1].usern
 for (let index = 0; index < keys.length; index++) {
   const value = urls[index].href;
   if (/[\r\n]/.test(value)) throw new Error('Invalid environment value');
+  // Register the rewritten secret with the Actions command parser before any
+  // later step displays its environment. This command is masked by the runner.
+  console.log(`::add-mask::${value}`);
   appendFileSync(process.env.GITHUB_ENV, `${keys[index]}=${value}\n`, { mode: 0o600 });
 }
 console.log('Dedicated cloud test database TLS configured.');

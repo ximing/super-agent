@@ -70,7 +70,7 @@ export class Auth {
       const email=typeof payload.email==='string'?payload.email:`${payload.sub}@oidc.invalid`;
       stage='session_create';
       return this.session(await this.user(issuer,payload.sub,email,typeof payload.name==='string'?payload.name:email));
-    }catch(e){const value=e as {name?:unknown;code?:unknown};this.config.oidcDiagnostic?.({stage,name:typeof value.name==='string'?value.name.slice(0,80):'UnknownError',code:typeof value.code==='string'&&/^[\w-]{1,100}$/.test(value.code)?value.code:null});if(e instanceof ApiError)throw e;throw new ApiError(401,'oidc_invalid','身份服务凭证无效或不可用');}
+    }catch(e){const value=e as {name?:unknown;code?:unknown};this.config.oidcDiagnostic?.({stage,name:typeof value.name==='string'?value.name.slice(0,80):'UnknownError',code:typeof value.code==='string'&&/^[\w-]{1,100}$/.test(value.code)?value.code:null});if(e instanceof ApiError||stage==='session_create')throw e;throw new ApiError(401,'oidc_invalid','身份服务凭证无效或不可用');}
   }
   async refresh(body:Doc):Promise<Doc>{
     const replacement=randomBytes(32).toString('base64url');

@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit';
 import { randomUUID } from 'node:crypto';
 import { Decimal } from 'decimal.js';
 import { Auth, type Config, type Principal, text, uuid, expires, now } from './auth.js';
-import { Store, Tx, ApiError, type Doc } from './store.js';
+import { Store, Tx, ApiError, isDatabaseUnavailable, type Doc } from './store.js';
 import { Service, ACTIVE, engine, matchVersion, safeMoney, redactView } from './service.js';
 import { signObject } from './objects.js';
 import { AgentRecallAdapter } from './recall.js';
@@ -29,9 +29,10 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   const principals=new WeakMap<FastifyRequest,Principal>();
   const authenticate=async(r:FastifyRequest):Promise<Principal>=>{const cached=principals.get(r);if(cached)return cached;const p=await auth.principal(r.headers.authorization);principals.set(r,p);return p;};
   await app.register(cors,{origin:false});
-  await app.register(rateLimit,{hook:'preHandler',max:(_r,key)=>key.startsWith('principal:')?1200:60,timeWindow:60000,keyGenerator:async r=>{if(r.headers.authorization){try{const p=await authenticate(r);return`principal:${p.type}:${p.id}`;}catch{/* Invalid tokens share the anonymous IP bucket, never self-declared claims. */}}return`anonymous:${r.ip}`;}});
+  await app.register(rateLimit,{hook:'preHandler',max:(_r,key)=>key.startsWith('principal:')?1200:60,timeWindow:60000,keyGenerator:async r=>{if(r.headers.authorization){try{const p=await authenticate(r);return`principal:${p.type}:${p.id}`;}catch(e){if(!(e instanceof ApiError&&e.status===401))throw e;/* Invalid tokens share the anonymous IP bucket, never self-declared claims. */}}return`anonymous:${r.ip}`;}});
   app.setErrorHandler((error,request,reply)=>{
     if(error instanceof ApiError)return reply.code(error.status).send({error:{code:error.code,message:error.message,retryable:error.retryable,request_id:request.id}});
+    if(isDatabaseUnavailable(error))return reply.code(503).send({error:{code:'database_unavailable',message:'数据服务暂时不可用，请稍后重试',retryable:true,request_id:request.id}});
     if((error as Doc).code==='22P02')return reply.code(422).send({error:{code:'invalid_id',message:'标识或参数格式无效',retryable:false,request_id:request.id}});
     if((error as Doc).code==='23505')return reply.code(409).send({error:{code:'conflict',message:'请求与已有记录冲突',retryable:false,request_id:request.id}});
     if((error as Doc).statusCode===429)return reply.code(429).send({error:{code:'rate_limited',message:'请求过于频繁',retryable:true,request_id:request.id}});

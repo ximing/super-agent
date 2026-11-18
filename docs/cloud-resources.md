@@ -47,7 +47,9 @@ curl --fail http://127.0.0.1:13011/ready
 
 反向代理通过 `222.128.65.91:13011` 接入 app 服务器，所以默认容器端口绑定支持独立 nginx 主机访问；防火墙只允许入口主机访问此业务端口。nginx 修改后先测试配置再 reload，最后验证 HTTPS `/ready`、`/v1/auth/config` 和未授权 API 拒绝访问。
 
-GitHub Actions 使用 secrets `TEST_DATABASE_URL`、`TEST_MIGRATION_DATABASE_URL` 和 `POSTGRES_CA_PEM`。CI 将 CA 写入 runner 临时目录并修正 URL 路径，不输出连接串。未配置时云端集成测试明确 skip，不能因此宣称已完成云端验收。`cloud-ci.yml` 包含 TypeScript、云库集成、Swift、Android APK 与原生 App 产物；`cloud-image.yml` 在云端构建并可手动发布 GHCR 镜像。当前尚待绑定真实 GitHub 仓库并执行 workflow。
+GitHub Actions 使用 secrets `TEST_DATABASE_URL`、`TEST_MIGRATION_DATABASE_URL` 和 `POSTGRES_CA_PEM`。CI 将 CA 写入 runner 临时目录并修正 URL 路径，在后续步骤使用前注册秘密遮罩，不向可见日志输出连接串。未配置时云端集成测试明确 skip，不能因此宣称已完成云端验收。`cloud-ci.yml` 包含 TypeScript、云库集成、Swift、Android APK 与原生 App 产物；`cloud-image.yml` 在云端构建并可手动发布 GHCR 镜像。公开仓库为 `ximing/super-agent`。
+
+已验证 GitHub 托管 US runner 到家中 PostgreSQL 建连出现 `ECONNRESET`。因此单测与原生构建继续在托管 runner，真实云库集成使用 app 业务机的独立 `super-agent-ci` 用户，标签 `super-agent-cloud`。无 sudo/Docker 权限，systemd 限制可写路径、2GB 内存和2核CPU；服务单元见 `infra/cloud/ci-runner.service`。公开 PR 不调度此 runner、不获得云库 secrets，只有本仓库 main push/手动 workflow 可以运行云库 job。该 runner 不在开发 Mac、不启动本地数据库或本机 Docker。
 
 记忆复用现有 `https://recall.aimo.plus`，没有新增 embedding、Redis、ES 或 pgvector 依赖。用户在原生设置中绑定自己的 Recall PAT；服务端加密保存，执行节点通过当前任务授权按需检索。`MEMORY_ENCRYPTION_KEY` 必须稳定、独立保管；轮换需要显式迁移或重新绑定。
 

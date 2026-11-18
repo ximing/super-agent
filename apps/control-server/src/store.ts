@@ -5,6 +5,12 @@ import { readFile } from 'node:fs/promises';
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public retryable = false) { super(message); }
 }
+export function isDatabaseUnavailable(error:unknown):boolean{
+  if(!error||typeof error!=='object')return false;
+  const value=error as {code?:unknown;message?:unknown};
+  return typeof value.code==='string'&&(['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','ENOTFOUND','EPIPE','57P01','57P02','57P03','53300'].includes(value.code)||/^08\w{3}$/.test(value.code))
+    ||typeof value.message==='string'&&/^(Connection terminated unexpectedly|Connection terminated due to connection timeout|timeout exceeded when trying to connect)$/i.test(value.message);
+}
 export const hash = (value: unknown): string => createHash('sha256').update(typeof value === 'string' ? value : stable(value)).digest('hex');
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;

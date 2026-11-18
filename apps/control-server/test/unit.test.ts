@@ -22,6 +22,20 @@ test('default server rejects unauthenticated data and does not enable developer 
   }finally{await app.close();}
 });
 
+test('database connection failure returns retryable 503 without logging users out or exposing connection details',async()=>{
+  const app=await buildApp({...config,allowDevAuth:true});
+  const auth=new Auth(app.control.store,config),tenant=randomUUID(),user=randomUUID();
+  const token=await auth.token({type:'client',tenant,sub:user,sid:randomUUID()});
+  app.control.store.pool.query=(async()=>{throw Object.assign(new Error('sensitive database endpoint must remain private'),{code:'ECONNRESET'});}) as any;
+  try{
+    const response=await app.inject({method:'GET',url:'/v1/tasks',headers:{authorization:`Bearer ${token}`}});
+    assert.equal(response.statusCode,503);assert.equal(response.json().error.code,'database_unavailable');assert.equal(response.json().error.retryable,true);
+    assert.ok(!response.body.includes('sensitive'));assert.ok(!response.body.includes('ECONNRESET'));
+    const login=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:'temporary-outage@example.com'}});assert.equal(login.statusCode,503);
+    const invalid=await app.inject({method:'GET',url:'/v1/tasks',headers:{authorization:'Bearer invalid-token'}});assert.equal(invalid.statusCode,401);
+  }finally{await app.close();}
+});
+
 test('JWT signature and run ticket bind tenant, device, run and current lease',async()=>{
   const store={} as Store,auth=new Auth(store,config),tenant=randomUUID(),device=randomUUID(),runId=randomUUID();
   const principal={type:'device' as const,tenant,id:device,device};

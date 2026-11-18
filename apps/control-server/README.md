@@ -53,7 +53,7 @@ OIDC_REDIRECT_URI=superagent://oauth/callback
 
 `pnpm --filter @super-agent/control-server test` 包含不依赖数据库的鉴权、Recall适配与费用口径单元测试。真实集成测试只有设置 `TEST_DATABASE_URL` 与独立 `TEST_MIGRATION_DATABASE_URL` 时运行，否则显式 skip/配置错误；这些 URL 必须指向用户提供的专用云端测试库。测试会迁移并创建独立随机用户记录，不会启动 Docker、本地 PostgreSQL 或生产替代仓库。根目录已配置文件时可用 `node --env-file=.env.test node_modules/tsx/dist/cli.mjs --test apps/control-server/test/*.test.ts`，不要打印该文件内容。
 
-已在用户专用云端测试库（非owner应用角色、独立owner迁移）和私有测试S3上通过16项测试：双用户RLS/接口隔离、设备签名和挑战重放、幂等任务派发、聊天确认后原子创建任务、费用回报去重/未知金额、会话撤销、人工接管过期释放、未知结果阻塞与核对恢复、S3签名上传/完成/私有下载及Recall独立账号绑定。Recall upstream测试使用mock，不读写用户真实记忆；加密与隔离则通过真实PG验证。
+已在用户专用云端测试库（非owner应用角色、独立owner迁移）和私有测试S3上通过17项测试：双用户RLS/接口隔离、设备签名和挑战重放、幂等任务派发、聊天确认后原子创建任务、费用回报去重/未知金额、会话撤销、数据库临时连接故障503且无效Token仍401、人工接管过期释放、未知结果阻塞与核对恢复、S3签名上传/完成/私有下载及Recall独立账号绑定。Recall upstream测试使用mock，不读写用户真实记忆；加密与隔离则通过真实PG验证。
 
 ## 目前限制
 
