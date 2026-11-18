@@ -21,13 +21,13 @@ import SuperAgentCore
             tokenEndpoint = discovery?["token_endpoint"] as? String
         }
         guard let authorizationEndpoint, let tokenEndpoint, let tokenURL = URL(string: tokenEndpoint), var components = URLComponents(string: authorizationEndpoint) else { throw URLError(.badURL) }
-        let redirect = config.redirectUri ?? "superagent://auth"
-        guard let callbackScheme = URL(string: redirect)?.scheme, callbackScheme != "http", callbackScheme != "https" else { throw APIError(status: 0, code: "oidc_redirect", message: "Mac 登录回调需要配置 superagent://auth") }
+        let redirect = config.redirectUri ?? "superagent://oauth/callback"
+        guard let callbackScheme = URL(string: redirect)?.scheme, callbackScheme != "http", callbackScheme != "https" else { throw APIError(status: 0, code: "oidc_redirect", message: "Mac 登录回调需要配置 superagent://oauth/callback") }
         let state = randomToken(); let verifier = randomToken() + randomToken()
         let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64URL
         components.queryItems = [
             URLQueryItem(name: "client_id", value: clientId), URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "redirect_uri", value: redirect), URLQueryItem(name: "scope", value: "openid profile email offline_access"),
+            URLQueryItem(name: "redirect_uri", value: redirect), URLQueryItem(name: "scope", value: "openid profile email"),
             URLQueryItem(name: "state", value: state), URLQueryItem(name: "nonce", value: randomToken()),
             URLQueryItem(name: "code_challenge", value: challenge), URLQueryItem(name: "code_challenge_method", value: "S256")
         ]

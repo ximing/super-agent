@@ -48,4 +48,22 @@ final class APIClientTests: XCTestCase {
         let summary = try decoder.decode(CostSummary.self, from: Data("{\"totals\":[],\"input_tokens\":200,\"output_tokens\":10,\"unknown_count\":1,\"request_count\":1,\"coverage\":0,\"as_of\":\"2026-11-18T00:00:00Z\"}".utf8))
         XCTAssertTrue(summary.totals.isEmpty); XCTAssertEqual(summary.unknownCount, 1)
     }
+    func testBodylessDeletePreservesAuthorizationAndVersionWithoutJSONContentType() async throws {
+        let client = makeClient(); try await client.setSession(session())
+        var called = false
+        StubProtocol.handler = { request in
+            called = true
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertNil(request.httpBody)
+            XCTAssertNil(request.httpBodyStream)
+            XCTAssertNil(request.value(forHTTPHeaderField: "Content-Type"))
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-access")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), "\"12\"")
+            return (204, Data())
+        }
+        let _: EmptyResponse = try await client.request("/memories/test-memory", method: "DELETE", version: 12)
+        XCTAssertTrue(called)
+    }
+
 }

@@ -7,6 +7,7 @@ import type { ToolDefinition } from './runtime.js';
 export * from './runtime.js';
 export { BrowserActor } from './browser.js';
 import { BrowserActor } from './browser.js';
+import { ArtifactTools } from './artifacts.js';
 
 type Args = Record<string, unknown>;
 const string = (a: Args, key: string, limit = 100_000): string => {
@@ -24,6 +25,7 @@ export interface BrokerOptions {
   ask: (text: string, options?: string[]) => Promise<string>;
   allowShell?: boolean;
   assistant?: boolean;
+  fetcher?: typeof fetch;
   signal: AbortSignal;
   onOperation?: (name: string, result: unknown) => void | Promise<void>;
   onUncertain?: (name: string) => void;
@@ -44,6 +46,9 @@ export class ToolBroker {
       { name: 'files_list', description: 'List a directory in the task workspace.', parameters: schema({ path: str }) },
       { name: 'files_read', description: 'Read a UTF-8 task workspace file, maximum 256 KB.', parameters: schema({ path: str }, ['path']) },
       { name: 'files_write', description: 'Create or replace a task workspace UTF-8 file, maximum 1 MB.', parameters: schema({ path: str, content: str }, ['path', 'content']) },
+      { name: 'artifacts_list', description: 'List attachments and completed artifacts belonging to this task, including user inputs and earlier runs.', parameters: schema({}) },
+      { name: 'artifacts_download', description: 'Download a task attachment into the task workspace, maximum 50 MB.', parameters: schema({ id: str, path: str }, ['id', 'path']) },
+      { name: 'artifacts_upload', description: 'Upload a task workspace file as a cloud artifact, maximum 50 MB.', parameters: schema({ path: str, name: str, mime: str }, ['path']) },
       { name: 'question_ask', description: 'Ask the user a necessary question and wait for the answer. Already authorized routine steps do not need reapproval.', parameters: schema({ text: str, options: { type: 'array', items: str, maxItems: 6 } }, ['text']) },
     ];
     if (this.options.allowShell) definitions.push({ name: 'shell_run', description: 'Run an authorized shell command in the task workspace. Never read/export credentials or launch detached background agents.', parameters: schema({ command: str }, ['command']) });
@@ -103,6 +108,9 @@ export class ToolBroker {
         const path = await this.path(string(args, 'path', 4096), true);
         await writeFile(path, content, { mode: 0o600 }); result = { written: true, bytes: Buffer.byteLength(content) }; break;
       }
+      case 'artifacts_list': result = await this.artifacts().list(); break;
+      case 'artifacts_download': result = await this.artifacts().download(args.id, string(args, 'path', 4096)); break;
+      case 'artifacts_upload': result = await this.artifacts().upload(string(args, 'path', 4096), args.name, args.mime); break;
       case 'question_ask': result = { answer: await this.options.ask(string(args, 'text', 4000), Array.isArray(args.options) ? args.options.map(String).slice(0, 6) : undefined) }; break;
       case 'shell_run': unsafeActionStarted = true; result = await this.shell(string(args, 'command', 16_000)); break;
       case 'tasks_list': result = await this.options.request('/tasks'); break;
@@ -114,6 +122,7 @@ export class ToolBroker {
     await this.options.onOperation?.(name, result);
     return result;
   }
+  private artifacts(): ArtifactTools { return new ArtifactTools({ resolvePath: (path, create) => this.path(path, create), request: this.options.request, signal: this.options.signal, assertActive: this.options.assertActive, fetcher: this.options.fetcher }); }
   private async path(path: string, create: boolean): Promise<string> {
     const root = await realpath(this.options.cwd), candidate = resolve(root, path);
     const rel = relative(root, candidate);

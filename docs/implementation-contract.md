@@ -11,6 +11,7 @@
 - POST `/messages {client_message_id,text,task_id?,execution_preference?:{engine,device_id,selection_mode:'pinned'}}` 返回 Message；全局 message 交主助理，若直接创建结构化 Task 可用下述路径。
 - POST `/tasks {title?,goal,engine,model_id?,device_id}` 返回 Task；明确客户端交办构成任务范围的授权来源。
 - GET `/tasks/:id`、`/tasks/:id/runs`；POST `/tasks/:id/actions {action:'pause'|'resume'|'cancel'|'switch'|'retry',target?:{engine,device_id,model_id?}}` 返回 `{action_id,status:'accepted'}`。
+- Run 列表的 `summary` 是短进度摘要，`result_text?:string|null` 返回该 run 最新完成检查点的完整报告；控制端详情优先显示完整结果，不把报告截为 500 字，不下发检查点内部绑定/工具元数据。
 - POST `/tasks/:id/inputs {text}`；POST `/questions/:id/answers {answer,version}`。
 - GET/PUT `/settings/execution` 使用 ExecutionSettings；用户只能选择自己的设备。
 - POST `/memories {title,content,type,site?}` 返回 Memory；PATCH/DELETE `/memories/:id`；教学输入可直接标 verified，节点提案为 candidate。
@@ -38,6 +39,9 @@
 - 自由聊天必须先确认：POST `/assistant/plans/:id/propose {items,summary}` 保存 `awaiting_confirmation`，不创建 Task；item 含目标、`deliverables:string[]`、引擎和设备。GET `/assistant/plans?state=awaiting_confirmation`；POST `/assistant/plans/:id/confirm` 或 `/reject {source_message_id}` 必须引用真实后续用户消息，由服务端校验并幂等创建任务。旧 commit 不能绕过确认。
 - GET `/assistant/context` 返回最近对话、未完成任务和待确认计划，规划时恢复上下文。唯一待确认计划可输入“确认/开始执行”，多个时输入“确认 <计划前8位>”；模型不能自己生成确认消息。
 - GET/POST `/schedules`、PATCH/DELETE `/schedules/:id` 管理定时关注。POST `{title,goal,engine,device_id,interval_minutes}`，最短 5 分钟；更新/删除带 If-Match。首版 `mode=remind_and_confirm`：定时提醒并形成待确认计划，用户确认后才执行。
+- 附件：GET `/artifacts?task_id=&run_id=`，POST `/artifacts/uploads {name,mime,size,task_id?}` -> `{artifact_id,upload_url,upload_headers,max_size,expires_at}`，签名 PUT 后 POST `/artifacts/:id/finalize {}`，GET `/artifacts/:id/download` -> `{url,name,mime,expires_at}`。设备携当前 run ticket，仅列出/下载当前 task 的用户输入和历史 run 产物；只能 finalize 本 run 上传。对象存储传输不带产品 Bearer，50 MiB 边界，禁止重定向。
+- Worker 统一工具增加 `artifacts_list`、`artifacts_download {id,path}`、`artifacts_upload {path,name?,mime?}`，所有本机文件受当前任务目录边界限制。
+- 原生接管文字输入 `type:'text'` 由服务端归一为 `type` 再发节点；两种名字均接受，帧与租约校验不变。
 - 服务端不包含模型客户端或模型凭据字段，模型请求直接来自 Mac。设备能力配置包括本机引擎可用模型；模型名不写死到任何客户端。
 
 ## 文件归属与开发规则

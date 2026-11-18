@@ -17,6 +17,7 @@ test('cloud PostgreSQL: tenant RLS, pairing, durable dispatch, replay accounting
     const loginA=await call('POST','/auth/dev',undefined,{email:`a-${randomUUID()}@example.com`});assert.equal(loginA.statusCode,200,'Cloud test login A must succeed before authorization checks');const a=loginA.json();
     const loginB=await call('POST','/auth/dev',undefined,{email:`b-${randomUUID()}@example.com`});assert.equal(loginB.statusCode,200,'Cloud test login B must succeed before authorization checks');const b=loginB.json();
     assert.ok(a.access_token);assert.notEqual(a.user.tenant_id,b.user.tenant_id);
+    app.control.store.tenants=async()=>[a.user.tenant_id,b.user.tenant_id];
     const keys=generateKeyPairSync('ed25519');
     const pair=(await call('POST','/device-pairings',undefined,{name:'Cloud integration Mac',public_key:keys.publicKey.export({type:'spki',format:'pem'}).toString()})).json();
     const claim=await call('POST','/device-pairings/claim',a.access_token,{code:pair.code});assert.equal(claim.statusCode,200);const device=claim.json().device_id;
@@ -34,6 +35,10 @@ test('cloud PostgreSQL: tenant RLS, pairing, durable dispatch, replay accounting
     await app.control.tick();const commands=(await call('GET','/node/commands',token)).json().items;assert.equal(commands.length,1);
     const command=commands[0],accepted=await call('POST',`/node/runs/${command.payload.run_id}/accept`,token,{command_id:command.payload.command_id,lease_epoch:command.payload.lease_epoch});assert.equal(accepted.statusCode,200);
     const run=accepted.json().run;
+    const fullResult='完整任务报告。'.repeat(400);
+    await app.control.store.tenant(a.user.tenant_id,async tx=>{await tx.put('checkpoints',{task_id:task.id,run_id:run.id,checkpoint:{completed:true,result_text:fullResult,binding:{internal_only:'not returned'}}});});
+    const resultRuns=(await call('GET',`/tasks/${task.id}/runs`,a.access_token)).json().items;
+    assert.equal(resultRuns[0].result_text,fullResult);assert.equal(resultRuns[0].checkpoint,undefined);assert.equal(resultRuns[0].binding,undefined);
     const message={protocol_version:'1.0',message_id:randomUUID(),kind:'usage.report',sent_at:new Date().toISOString(),payload:{device_id:device,run_id:run.id,lease_epoch:run.lease_epoch,producer_id:randomUUID(),producer_seq:'1',request_key:'request-1',usage_revision:1,engine:'codex',model_id:'integration-model',category:'worker',input_tokens:100,output_tokens:10,cached_input_tokens:0,reasoning_tokens:null,cost:{source:'estimated',quality:'final',amount:'0.1',currency:'USD',price_version_id:randomUUID()}}};
     const report=()=>call('POST','/node/reports',token,{messages:[message]});assert.equal((await report()).json().accepted.length,1);assert.equal((await report()).json().accepted.length,1);
     assert.equal((await call('GET','/costs/summary',a.access_token)).json().totals[0].amount,'0.1');assert.equal((await call('GET','/costs/summary',b.access_token)).json().request_count,0);
@@ -100,14 +105,36 @@ test('cloud PostgreSQL and private S3: authenticated artifact upload, finalize a
   let objectKey:string|undefined;
   try{
     const login=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`s3-${randomUUID()}@example.com`}});assert.equal(login.statusCode,200);const session=login.json(),headers={authorization:`Bearer ${session.access_token}`};
+    const keys=generateKeyPairSync('ed25519');
+    const pair=(await app.inject({method:'POST',url:'/v1/device-pairings',payload:{name:'Artifact fixture Mac',public_key:keys.publicKey.export({type:'spki',format:'pem'}).toString()}})).json();
+    const claim=await app.inject({method:'POST',url:'/v1/device-pairings/claim',headers,payload:{code:pair.code}});assert.equal(claim.statusCode,200);const deviceId=claim.json().device_id;
+    const challenge=(await app.inject({method:'POST',url:'/v1/devices/auth/challenge',payload:{device_id:deviceId}})).json();
+    const deviceAuth=await app.inject({method:'POST',url:'/v1/devices/auth/token',payload:{device_id:deviceId,nonce:challenge.nonce,signature:sign(null,Buffer.from(challenge.challenge),keys.privateKey).toString('base64')}});assert.equal(deviceAuth.statusCode,200);
+    const deviceHeaders={authorization:`Bearer ${deviceAuth.json().access_token}`};
+    assert.equal((await app.inject({method:'PUT',url:`/v1/devices/${deviceId}/capabilities`,headers:deviceHeaders,payload:{generation:1,engines:[{engine:'codex',ready:true,models:['fixture']}],tools:['files'],slots:{worker:1,browser:1}}})).statusCode,200);
+    const taskResponse=await app.inject({method:'POST',url:'/v1/tasks',headers,payload:{goal:'Read and publish controlled task artifacts',engine:'codex',device_id:deviceId}});assert.equal(taskResponse.statusCode,200);const task=taskResponse.json();
+    const foreignTask=(await app.inject({method:'POST',url:'/v1/tasks',headers,payload:{goal:'Separate task artifact scope',engine:'codex',device_id:deviceId}})).json();
+    app.control.store.tenants=async()=>[session.user.tenant_id];await app.control.tick();
+    const commands=(await app.inject({method:'GET',url:'/v1/node/commands',headers:deviceHeaders})).json().items;
+    const command=commands.find((c:any)=>c.payload.task_id===task.id)||commands[0];assert.ok(command);
+    const accept=await app.inject({method:'POST',url:`/v1/node/runs/${command.payload.run_id}/accept`,headers:deviceHeaders,payload:{command_id:command.payload.command_id,lease_epoch:command.payload.lease_epoch}});assert.equal(accept.statusCode,200);
+    const runHeaders={...deviceHeaders,'x-run-ticket':accept.json().run_ticket};assert.equal(accept.json().task.id,task.id);
     const content=Buffer.from(`super-agent integration ${randomUUID()}`);
-    const request=await app.inject({method:'POST',url:'/v1/artifacts/uploads',headers,payload:{name:'integration.txt',mime:'text/plain',size:content.length}});assert.equal(request.statusCode,200);const upload=request.json();
+    const request=await app.inject({method:'POST',url:'/v1/artifacts/uploads',headers,payload:{name:'integration.txt',mime:'text/plain',size:content.length,task_id:task.id}});assert.equal(request.statusCode,200);const upload=request.json();
     objectKey=`${session.user.tenant_id}/${upload.artifact_id}/content`;
     const put=await fetch(upload.upload_url,{method:'PUT',headers:upload.upload_headers,body:content});assert.ok(put.ok,`private test upload status ${put.status}`);
     const finalize=await app.inject({method:'POST',url:`/v1/artifacts/${upload.artifact_id}/finalize`,headers,payload:{}});assert.equal(finalize.statusCode,200);assert.equal(finalize.json().status,'ready');
     const download=await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers});assert.equal(download.statusCode,200);
     const actual=await fetch(download.json().url);assert.ok(actual.ok);assert.deepEqual(Buffer.from(await actual.arrayBuffer()),content);
     const unsigned=new URL(download.json().url);unsigned.search='';assert.notEqual((await fetch(unsigned)).status,200,'Private object must reject unsigned reads');
+    const workerList=await app.inject({method:'GET',url:'/v1/artifacts',headers:runHeaders});assert.equal(workerList.statusCode,200);assert.deepEqual(workerList.json().items.map((a:any)=>a.id),[upload.artifact_id]);assert.equal(workerList.json().items[0].object_key,undefined);
+    assert.equal((await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers:runHeaders})).statusCode,200,'Current worker can read user task input without a source run');
+    assert.equal((await app.inject({method:'GET',url:`/v1/artifacts?task_id=${foreignTask.id}`,headers:runHeaders})).statusCode,404);
+    const foreignUpload=await app.inject({method:'POST',url:'/v1/artifacts/uploads',headers,payload:{name:'foreign.txt',mime:'text/plain',size:1,task_id:foreignTask.id}});assert.equal(foreignUpload.statusCode,200);
+    assert.equal((await app.inject({method:'GET',url:`/v1/artifacts/${foreignUpload.json().artifact_id}/download`,headers:runHeaders})).statusCode,404,'Run ticket cannot read another task in the same tenant');
+    await app.control.store.tenant(session.user.tenant_id,async tx=>{const a=await tx.need('artifacts',upload.artifact_id);await tx.put('artifacts',{...a,run_id:randomUUID()});});
+    assert.equal((await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers:runHeaders})).statusCode,200,'A new run can read an earlier output for its own task');
+    assert.equal((await app.inject({method:'POST',url:`/v1/artifacts/${upload.artifact_id}/finalize`,headers:runHeaders,payload:{}})).statusCode,404,'A new run cannot finalize another run upload');
     const other=(await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`s3-other-${randomUUID()}@example.com`}})).json();
     assert.equal((await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers:{authorization:`Bearer ${other.access_token}`}})).statusCode,404);
   }finally{if(objectKey)await fetch(signObject(s3,'DELETE',objectKey),{method:'DELETE'});await app.close();}

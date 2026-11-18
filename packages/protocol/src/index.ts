@@ -11,7 +11,7 @@ export interface Capabilities { generation: number; engines: EngineCapability[];
 export interface Device { id: string; name: string; status: 'online' | 'offline' | 'busy'; last_seen_at: string | null; capabilities: Capabilities; version: number }
 export interface ExecutionSettings { default_engine: Engine; default_device_id: string | null; assistant_device_id: string | null; version: number }
 export interface Task { id: string; title: string; goal: string; status: TaskStatus; reason_code: string | null; engine: Engine; model_id: string | null; device_id: string | null; device_name?: string | null; current_run_id: string | null; created_at: string; updated_at: string; version: number }
-export interface Run { id: string; task_id: string; state: RunState; engine: Engine; device_id: string; model_id: string; lease_epoch: string; summary: string; created_at: string }
+export interface Run { id: string; task_id: string; state: RunState; engine: Engine; device_id: string; model_id: string; lease_epoch: string; summary: string; result_text?: string | null; created_at: string }
 export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; task_id: string | null; created_at: string }
 export interface Question { id: string; task_id: string; run_id: string; text: string; options: string[]; status: 'open' | 'answered' | 'cancelled'; version: number; created_at: string }
 export type MemoryType = 'preference' | 'website' | 'procedure' | 'project' | 'experience';

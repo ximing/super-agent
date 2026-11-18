@@ -95,7 +95,7 @@ test('cloud PostgreSQL + real NodeAgent: pair/sign, dispatch/accept, durable fak
     await client(app, owner.access_token, '/settings/memory', 'PUT', { url: 'https://recall.integration.invalid', token: 'test-only-memory-token' });
     const paired = await pairNode(app, owner, directory, fetcher);
     let executions = 0;
-    class CountedFake extends FakeRuntime { override execute(context: RuntimeContext) { executions++; return super.execute(context); } }
+    class CountedFake extends FakeRuntime { override async execute(context: RuntimeContext) { assert.equal(context.mcp,undefined,'Explicit FakeRuntime must not start a local tool server'); executions++; const attachments = await context.executeTool('artifacts_list',{}) as {items:unknown[]}; assert.equal(attachments.items.length,0); return super.execute(context); } }
     agent = new NodeAgent(paired.config, { api: paired.api, runtimeFactory: async () => new CountedFake(), log: () => {} });
     const task = await client<Task>(app, owner.access_token, '/tasks', 'POST', { goal: 'Read controlled release fixture', engine: 'grok', device_id: paired.config.device_id }, { 'idempotency-key': randomUUID() });
     await app.control.service.dispatchTenant(owner.user.tenant_id);
@@ -121,6 +121,7 @@ test('cloud PostgreSQL + real NodeAgent: pair/sign, dispatch/accept, durable fak
     assert.ok(requestLog.some(r => r.path === '/v1/devices/auth/token'));
     assert.ok(requestLog.some(r => r.path.endsWith('/accept')));
     assert.ok(requestLog.some(r => r.path === '/v1/node/memory/search'));
+    assert.ok(requestLog.some(r => r.path === '/v1/artifacts'));
     assert.ok(requestLog.some(r => r.path.endsWith('/checkpoint')));
     assert.doesNotMatch(JSON.stringify(requestLog), /BEGIN PRIVATE KEY|api_key|XAI_API_KEY|refresh_token/);
   } finally { if (agent) { await agent.stop(); agent.close(); } if (restarted) { await restarted.stop(); restarted.close(); } await app.close(); rmSync(directory, { recursive: true, force: true }); }
@@ -219,6 +220,9 @@ test('cloud view/control: pause before takeover, natural-pixel input, stale fram
     const mouse = calls.find(c=>c.action==='cdp'&&(c.args.params as Record<string,unknown>)?.type==='mousePressed');
     assert.ok(mouse); assert.equal((mouse.args.params as Record<string,unknown>).x,300); assert.equal((mouse.args.params as Record<string,unknown>).y,200);
     const stale = await app.inject({method:'POST',url:`/v1/views/${view.id}/inputs`,headers:{authorization:`Bearer ${owner.access_token}`},payload:{...frame,type:'click',x:600,y:400}}); assert.equal(stale.statusCode,409);
+    const typingFrame=await client<{frame_id:string;viewport_version:string}>(app,owner.access_token,`/runs/${runId}/frame`);
+    await client(app,owner.access_token,`/views/${view.id}/inputs`,'POST',{...typingFrame,type:'text',text:'Native client typing fixture'});
+    await agent.tick();assert.ok(calls.some(c=>c.action==='key_type'&&c.args.text==='Native client typing fixture'),'Native text input reaches the real node adapter');
     const denied = await app.inject({method:'GET',url:`/v1/runs/${runId}/frame`,headers:{authorization:`Bearer ${other.access_token}`}}); assert.equal(denied.statusCode,404);
     await client(app,owner.access_token,`/views/${view.id}/control`,'DELETE'); await agent.tick();
     const current = await client<{frame_id:string;viewport_version:string}>(app,owner.access_token,`/runs/${runId}/frame`);

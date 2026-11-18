@@ -12,12 +12,27 @@ pnpm --filter @super-agent/android test
 pnpm --filter @super-agent/android exec expo export --platform android --output-dir dist
 pnpm --filter @super-agent/android native:generate
 cd apps/android/android
-ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew :app:assembleDebug --no-daemon
+ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew :app:assembleRelease --no-daemon
+python3 - <<'PY_CHECK_APK'
+from pathlib import Path
+from zipfile import ZipFile
+apk = Path("app/build/outputs/apk/release/app-release.apk")
+with ZipFile(apk) as archive:
+    bundle = archive.read("assets/index.android.bundle")
+    assert len(bundle) > 8, "APK 缺少有效 JS bundle"
+    assert bundle[:8] == bytes.fromhex("c61fbc03c103191f"), "APK bundle 不是 Hermes 字节码"
+print("已验证独立 APK 内含 Hermes bundle:", apk)
+PY_CHECK_APK
+adb install -r app/build/outputs/apk/release/app-release.apk
 ```
+
+交付产物是 `android/app/build/outputs/apk/release/app-release.apk`，当前使用公开开发证书签名，仅作内部测试。`assembleRelease` 会通过 Expo `export:embed` 生成并打包 Hermes 字节码；上述 ZIP 检查用于确认 APK 包含 `assets/index.android.bundle`，并核验 Hermes 文件头。它不需要本机 Metro，业务功能仍连接云端 HTTPS API。正式发布前必须在 CI 换为用户自己的签名配置。
+
+`assembleDebug` 仅用于配合 Metro 的开发调试。当前 React Native 插件默认将 `debug`、`debugOptimized` 列为 debuggable variant，跳过 JS/assets 打包；该开发 APK 不能作为脱离开发电脑运行的交付物。独立安装验收应停止 Metro，断开 `adb reverse`，在 Android 上直接打开上述 release APK 并连接云端服务。
 
 `android/` 已生成原生工程，原生构建需要 JDK 17、对应 Android SDK、Gradle 和 Maven 网络。首次 Gradle 8.14.3 分发下载曾遇到读超时，wrapper 网络超时已调整为 60 秒，并固定官方 SHA-256。生成插件保留这些设置；普通 `build` 只导出 bundle，不自动重写原生工程。Hermes bundle 导出通过不等于已生成 APK；具体 APK 结果以 Gradle 命令实际输出为准。
 
-本机已实际运行 `:app:assembleDebug`：官方校验通过的 Gradle 8.14.3 启动后，Maven/plugin 依赖的 TLS 下载持续阻塞，线程栈停留在 `ExternalResourceArtifactResolver.downloadByUrl`，已停止该次单独 daemon。尚无经过验证的 APK；由仓库 CI 在联网环境继续原生构建。提交的 `android/app/debug.keystore` 是 React Native 公共开发模板（公开口令 `android`），只用于开发安装，不是私人发布证书；正式发布需要 CI 注入用户自己的签名配置。
+本机已实际运行 `:app:assembleDebug`：官方校验通过的 Gradle 8.14.3 启动后，Maven/plugin 依赖的 TLS 下载持续阻塞，线程栈停留在 `ExternalResourceArtifactResolver.downloadByUrl`，已停止该次单独 daemon。尚无经过验证的 APK；由仓库 CI 在联网环境继续原生构建。提交的 `android/app/debug.keystore` 是 React Native 公共开发模板（公开口令 `android`），只用于开发和明确标注的内部测试安装，不是私人发布证书；正式发布需要 CI 注入用户自己的签名配置。
 
 开发时可以使用 `pnpm --filter @super-agent/android start` 的 Metro；这不是服务端基础设施，不会启动数据库、控制服务或 Docker。生产 API、PostgreSQL、对象存储和 OIDC 由用户云端部署。
 
@@ -45,11 +60,9 @@ ANDROID_HOME="$HOME/Library/Android/sdk" ./gradlew :app:assembleDebug --no-daemo
 ## 已执行的验证
 
 - TypeScript 检查通过。
-- 4 项 Node API 客户端测试通过：URL 安全、会话刷新/幂等/版本、跨 origin 隔离、未知金额保留。
-- Metro 导出 Android Hermes bundle（752 modules）通过。
+- 5 项 Node API 客户端测试通过：URL 安全、会话刷新/幂等/版本、跨 origin 隔离、未知金额保留。
+- Metro 导出 Android Hermes bundle（763 modules，2.15 MB）通过。
 - SDK 包版本兼容性检查通过，原生工程 prebuild 通过。
 - APK 与云端真实交互、OIDC/Recall 和后台通知验收仍分别依赖原生构建网络及用户部署配置，不能用上述单元测试代替。
 
-## 已执行验证
-
-`typecheck`、4 项 API/会话单元测试及 Android Hermes bundle 导出均通过。真实 OIDC、每用户 Recall、S3、远程通知与云端任务联调需要对应云服务及正式签名配置，不由静态编译替代。
+OIDC 登录仅请求 `openid profile email`，默认回调为 `superagent://oauth/callback`。应用保存和刷新产品服务端会话，不申请 OIDC `offline_access` 长期权限。

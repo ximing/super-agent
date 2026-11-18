@@ -20,6 +20,7 @@ export interface NodeConfig {
   codex: { enabled: boolean; command: string; model: string; sandbox: 'workspace-write' | 'danger-full-access' };
   grok: { enabled: boolean; model: string; key_env: string; key_file?: string; keychain_service?: string; base_url: string };
   assistant: boolean;
+  proxy_url?: string;
 }
 export const defaultConfigPath = () => process.env.SUPER_AGENT_NODE_CONFIG ?? join(homedir(), '.super-agent', 'node.json');
 export async function loadConfig(path = defaultConfigPath()): Promise<NodeConfig> {

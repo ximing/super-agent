@@ -95,7 +95,13 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('GET','/tasks','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return items(limit(await tx.all('tasks'),query(r)));});
   route('POST','/tasks','client',async(r,p,tx)=>idempotent(r,p,tx,()=>service.createTask(tx,body(r))));
   route('GET','/tasks/:id','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return tx.need('tasks',uuid(params(r).id));});
-  route('GET','/tasks/:id/runs','client',async(r,_p,tx)=>{const t=await tx.need('tasks',uuid(params(r).id));return items((await tx.all('runs')).filter(run=>run.task_id===t.id).map(redactView));});
+  route('GET','/tasks/:id/runs','client',async(r,_p,tx)=>{
+    const t=await tx.need('tasks',uuid(params(r).id)),checkpoints=(await tx.all('checkpoints')).filter(c=>c.task_id===t.id);
+    return items((await tx.all('runs')).filter(run=>run.task_id===t.id).map(run=>{
+      const saved=checkpoints.filter(c=>c.run_id===run.id&&c.checkpoint?.completed===true).at(-1);
+      return{...redactView(run),result_text:typeof saved?.checkpoint.result_text==='string'?saved.checkpoint.result_text:null};
+    }));
+  });
   route('POST','/tasks/:id/actions','client',async(r,p,tx)=>idempotent(r,p,tx,()=>service.action(tx,uuid(params(r).id),body(r),r.headers['if-match'])));
   route('POST','/tasks/:id/inputs','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{const t=await tx.need('tasks',uuid(params(r).id)),content=text(body(r).text,'text');const message=await tx.put('messages',{role:'user',content,task_id:t.id,client_message_id:randomUUID()});if(t.current_run_id){const run=await tx.need('runs',t.current_run_id,true);await tx.put('runs',{...run,pending_inputs:[...(run.pending_inputs??[]),content]});}await tx.emit('message.created',message,t.id);return message;}));
   route('GET','/runs/:id/steps','client',async(r,_p,tx)=>{const run=await tx.need('runs',uuid(params(r).id));return items((await tx.all('steps')).filter(s=>s.run_id===run.id));});
@@ -181,10 +187,20 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   });
   route('GET','/artifacts/:id/download','either',async(r,p,tx)=>{
     if(!config.s3)throw new ApiError(503,'storage_not_configured','尚未配置云端对象存储');const artifact=await tx.need('artifacts',uuid(params(r).id));
-    if(p.type==='device'){const run=await runAuth(r,p,tx);if(artifact.run_id!==run.id)throw new ApiError(404,'not_found','文件不存在');}
+    if(p.type==='device'){const run=await runAuth(r,p,tx);if(artifact.task_id!==run.task_id)throw new ApiError(404,'not_found','文件不存在');}
     if(artifact.status!=='ready')throw new ApiError(409,'artifact_not_ready','文件尚未就绪');return{url:signObject(config.s3,'GET',artifact.object_key),expires_at:expires(300000),name:artifact.name,mime:artifact.mime};
   });
-  route('GET','/artifacts','client',async(r,_p,tx)=>{const q=query(r);if(q.task_id)await tx.need('tasks',uuid(q.task_id));if(q.run_id)await tx.need('runs',uuid(q.run_id));return items((await tx.all('artifacts')).filter(a=>(!q.task_id||a.task_id===q.task_id)&&(!q.run_id||a.run_id===q.run_id)).map(({object_key,...artifact})=>artifact));});
+  route('GET','/artifacts','either',async(r,p,tx)=>{
+    const q=query(r);let taskId=q.task_id?uuid(q.task_id):undefined;
+    if(p.type==='device'){
+      const run=await runAuth(r,p,tx);
+      if(taskId&&taskId!==run.task_id)throw new ApiError(404,'not_found','任务不存在');
+      taskId=run.task_id;
+    }
+    if(taskId)await tx.need('tasks',taskId);
+    if(q.run_id){const run=await tx.need('runs',uuid(q.run_id));if(taskId&&run.task_id!==taskId)throw new ApiError(404,'not_found','运行不存在');}
+    return items((await tx.all('artifacts')).filter(a=>(!taskId||a.task_id===taskId)&&(!q.run_id||a.run_id===q.run_id)).map(({object_key,...artifact})=>artifact));
+  });
 
   route('POST','/assistant/lease/claim','device',async(r,p,tx)=>{
     const settings=await service.settings(tx),old=await tx.get('assistant_leases',tx.tenant,true);
@@ -245,9 +261,10 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('POST','/views/:id/inputs','client',async(r,p,tx)=>{
     const view=await tx.need('views',uuid(params(r).id),true);if(view.client_session!==p.session||view.control_state!=='active'||Date.parse(view.control_expires_at)<Date.now())throw new ApiError(409,'control_not_active','请先等待接管完成');
     const frame=await tx.need('frames',view.run_id),b=body(r);if(frame.frame_id!==b.frame_id||frame.viewport_version!==b.viewport_version)throw new ApiError(409,'stale_frame','画面已更新，请刷新后操作');
-    if(!['click','scroll','type','keys'].includes(b.type))throw new ApiError(422,'invalid_input_type','输入类型无效');
+    const inputType=b.type==='text'?'type':b.type;
+    if(!['click','scroll','type','keys'].includes(inputType))throw new ApiError(422,'invalid_input_type','输入类型无效');
     if(b.type==='click'&&(!Number.isFinite(b.x)||!Number.isFinite(b.y)||b.x<0||b.y<0||b.x>=frame.width||b.y>=frame.height))throw new ApiError(422,'invalid_coordinates','输入坐标超出画面');
-    const input={frame_id:b.frame_id,viewport_version:b.viewport_version,type:b.type,x:b.x,y:b.y,text:typeof b.text==='string'?b.text.slice(0,10000):undefined,keys:typeof b.keys==='string'?b.keys.slice(0,100):undefined};await queueView(tx,view,'view.input',{input});await tx.put('views',{...view,control_expires_at:expires(60000),expires_at:expires(60000)});return{status:'accepted'};
+    const input={frame_id:b.frame_id,viewport_version:b.viewport_version,type:inputType,x:b.x,y:b.y,text:typeof b.text==='string'?b.text.slice(0,10000):undefined,keys:typeof b.keys==='string'?b.keys.slice(0,100):undefined};await queueView(tx,view,'view.input',{input});await tx.put('views',{...view,control_expires_at:expires(60000),expires_at:expires(60000)});return{status:'accepted'};
   });
   route('DELETE','/views/:id/control','client',async(r,p,tx)=>{const view=await tx.need('views',uuid(params(r).id));if(view.client_session!==p.session)throw new ApiError(404,'not_found','查看会话不存在');await tx.put('views',{...view,control_requested:false,control_state:'none'});await queueView(tx,view,'view.control',{enabled:false});return{status:'released',task_remains_paused:true};});
   route('POST','/tasks/:id/reconciliation','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task);const run=await tx.need('runs',task.current_run_id,true);if(!['lost','result_unknown'].includes(run.state))throw new ApiError(409,'reconciliation_not_required','当前执行不需要结果核对');const outcome=body(r).outcome;if(!['not_applied','applied','unknown'].includes(outcome))throw new ApiError(422,'invalid_outcome','需要明确核对结果');const note=text(body(r).note,'note',5000);if(outcome==='unknown')return{status:'still_unknown'};await tx.put('runs',{...run,state:outcome==='applied'?'succeeded':'paused',summary:note,reconciled_by:p.id,reconciled_at:now()});await service.releaseBudget(tx,run.id);const updated=await tx.put('tasks',{...task,status:outcome==='applied'?'awaiting_review':'paused',reason_code:null,pending_action:null,pending_target:null});await tx.emit('task.changed',updated,task.id,run.id);return updated;}));

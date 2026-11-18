@@ -1,0 +1,29 @@
+[Unit]
+Description=Private CI allowlisted TLS egress tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=super-agent-proxy
+Group=super-agent-proxy
+ExecStart=/usr/bin/python3 -B /opt/super-agent-ci-proxy/ci-egress-proxy.py
+WorkingDirectory=/opt/super-agent-ci-proxy
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ReadOnlyDirectories=/
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+LimitNOFILE=512
+TasksMax=128
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

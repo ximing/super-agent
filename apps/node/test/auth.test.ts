@@ -34,3 +34,11 @@ test('device authentication signs complete challenge and never sends its private
     await assert.rejects(initConfig('https://other.example', 'Other', configPath), /already exists/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('bodyless GET and DELETE omit JSON content type; requests with JSON bodies keep it', async () => {
+  const calls: RequestInit[] = [];
+  const api = new NodeApi({server_url:'https://control.example'} as never,(async(_input,init)=>{calls.push(init!);return new Response(null,{status:204});}) as typeof fetch);
+  await api.raw('/fixture');await api.raw('/fixture',undefined,{method:'DELETE'});await api.raw('/fixture',{});
+  assert.deepEqual(calls.map(call=>new Headers(call.headers).has('content-type')),[false,false,true]);
+  assert.deepEqual(calls.map(call=>call.method),['GET','DELETE','POST']);
+});

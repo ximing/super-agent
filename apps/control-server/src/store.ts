@@ -1,6 +1,13 @@
 import pg, { type PoolClient } from 'pg';
 import { randomUUID, createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+export const MIGRATION_LOCK_KEY = 787425192;
+const MIGRATION_SCHEMA = 'super_agent_private';
+const MIGRATION_TABLE = `${MIGRATION_SCHEMA}.schema_migrations`;
+const migrationsDirectory = new URL('../migrations/',import.meta.url);
+const tenantContext = new AsyncLocalStorage<boolean>();
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string, public retryable = false) { super(message); }
@@ -57,12 +64,52 @@ function row(raw:Doc):Doc{return {...raw.data,id:raw.id,version:raw.version,crea
 export class Store {
   pool:pg.Pool;
   constructor(url:string){this.pool=new pg.Pool({connectionString:url,max:12});}
-  async migrate():Promise<void>{
-    const sql=await readFile(new URL('../migrations/001_initial.sql',import.meta.url),'utf8');
-    const c=await this.pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(787425192)');await c.query(sql);await c.query('COMMIT');}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  async migrate(directory:URL=migrationsDirectory):Promise<void>{
+    const names=(await readdir(directory,{withFileTypes:true})).filter(f=>f.isFile()&&f.name.endsWith('.sql')).map(f=>f.name).sort();
+    if(!names.length)throw new Error('No SQL migrations found');
+    const migrations=await Promise.all(names.map(async name=>{const sql=await readFile(new URL(encodeURIComponent(name),directory),'utf8');return{name,sql,checksum:hash(sql)};}));
+    const c=await this.pool.connect();
+    try{
+      await c.query('BEGIN');
+      await c.query('SELECT pg_advisory_xact_lock($1)',[MIGRATION_LOCK_KEY]);
+      const catalog=await c.query(`SELECT pg_get_userbyid(n.nspowner) AS schema_owner,pg_get_userbyid(t.relowner) AS table_owner,t.oid AS table_id,current_user AS caller
+        FROM pg_namespace n LEFT JOIN pg_class t ON t.relnamespace=n.oid AND t.relname='schema_migrations' WHERE n.nspname=$1`,[MIGRATION_SCHEMA]);
+      const existing=catalog.rows[0];
+      if(existing&&(existing.schema_owner!==existing.caller||(existing.table_id&&existing.table_owner!==existing.caller)))throw new Error('Migration ledger requires its dedicated owner connection');
+      if(!existing||!existing.table_id){
+        if(!existing)await c.query(`CREATE SCHEMA ${MIGRATION_SCHEMA} AUTHORIZATION CURRENT_USER`);
+        await c.query(`REVOKE ALL ON SCHEMA ${MIGRATION_SCHEMA} FROM PUBLIC`);
+        await c.query(`CREATE TABLE ${MIGRATION_TABLE} (name text PRIMARY KEY,checksum text NOT NULL CHECK(checksum ~ '^[0-9a-f]{64}$'),applied_at timestamptz NOT NULL DEFAULT now())`);
+        // Cloud owners may have global default grants to service roles. Remove
+        // every non-owner grant, including direct grants outside the app group.
+        await c.query(`DO $$ DECLARE item record; recipient text; BEGIN
+          FOR item IN SELECT DISTINCT acl.grantee FROM pg_namespace n CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) acl WHERE n.nspname='${MIGRATION_SCHEMA}' AND acl.grantee<>n.nspowner LOOP
+            recipient:=CASE WHEN item.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(item.grantee)) END;
+            EXECUTE 'REVOKE ALL ON SCHEMA ${MIGRATION_SCHEMA} FROM '||recipient;
+          END LOOP;
+          FOR item IN SELECT DISTINCT acl.grantee FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace CROSS JOIN LATERAL aclexplode(COALESCE(t.relacl,acldefault('r',t.relowner))) acl WHERE n.nspname='${MIGRATION_SCHEMA}' AND t.relname='schema_migrations' AND acl.grantee<>t.relowner LOOP
+            recipient:=CASE WHEN item.grantee=0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(item.grantee)) END;
+            EXECUTE 'REVOKE ALL ON TABLE ${MIGRATION_TABLE} FROM '||recipient;
+          END LOOP;
+        END $$`);
+      }
+      const ledger=await c.query(`SELECT name,checksum FROM ${MIGRATION_TABLE} ORDER BY name`);
+      const applied=new Map<string,string>(ledger.rows.map(r=>[r.name,r.checksum]));
+      for(const name of applied.keys())if(!names.includes(name))throw new Error(`Applied migration is missing: ${name}`);
+      for(const migration of migrations)if(applied.has(migration.name)&&applied.get(migration.name)!==migration.checksum)throw new Error(`Applied migration checksum mismatch: ${migration.name}`);
+      for(const migration of migrations){
+        if(applied.has(migration.name))continue;
+        await c.query(migration.sql);
+        await c.query(`INSERT INTO ${MIGRATION_TABLE}(name,checksum) VALUES($1,$2)`,[migration.name,migration.checksum]);
+      }
+      await c.query('COMMIT');
+    }catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
   async tenant<T>(tenant:string,fn:(tx:Tx)=>Promise<T>):Promise<T>{
-    const c=await this.pool.connect();try{await c.query('BEGIN');await c.query('SET LOCAL ROLE super_agent_app');await c.query("SELECT set_config('app.tenant_id',$1,true)",[tenant]);const result=await fn(new Tx(c,tenant));await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+    if(tenantContext.getStore())throw new Error('Nested tenant transactions are not supported; reuse the current Tx');
+    return tenantContext.run(true,async()=>{
+      const c=await this.pool.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock_shared($1)',[MIGRATION_LOCK_KEY]);await c.query('SET LOCAL ROLE super_agent_app');await c.query("SELECT set_config('app.tenant_id',$1,true)",[tenant]);const result=await fn(new Tx(c,tenant));await c.query('COMMIT');return result;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+    });
   }
   async tenants():Promise<string[]>{const result=await this.pool.query('SELECT tenant_id FROM sa_users');return result.rows.map(r=>r.tenant_id);}
   async close():Promise<void>{await this.pool.end();}

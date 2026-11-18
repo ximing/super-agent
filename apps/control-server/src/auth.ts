@@ -1,6 +1,6 @@
 import { createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
-import { ApiError, Store, Tx, hash, type Doc } from './store.js';
+import { ApiError, Store, Tx, hash, MIGRATION_LOCK_KEY, type Doc } from './store.js';
 import type { S3Config } from './objects.js';
 
 export interface Config {
@@ -95,7 +95,7 @@ export class Auth {
   async claim(p:Principal,body:Doc):Promise<Doc>{
     this.client(p);const c=await this.store.pool.connect();
     try{
-      await c.query('BEGIN');await c.query("SELECT set_config('app.tenant_id',$1,true)",[p.tenant]);const result=await c.query('SELECT * FROM sa_pairings WHERE code=$1 AND expires_at>now() FOR UPDATE',[text(body.code,'code',100).toUpperCase()]);
+      await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock_shared($1)',[MIGRATION_LOCK_KEY]);await c.query("SELECT set_config('app.tenant_id',$1,true)",[p.tenant]);const result=await c.query('SELECT * FROM sa_pairings WHERE code=$1 AND expires_at>now() FOR UPDATE',[text(body.code,'code',100).toUpperCase()]);
       const pairing=result.rows[0];if(!pairing)throw new ApiError(404,'pairing_not_found','配对码无效或已过期');
       if(pairing.device_id){if(pairing.tenant_id!==p.tenant)throw new ApiError(409,'pairing_claimed','配对码已使用');await c.query('COMMIT');return{device_id:pairing.device_id};}
       const id=randomUUID(),data={id,name:pairing.name,last_seen_at:null,capabilities:{generation:1,engines:[],tools:[],slots:{browser:1,worker:1}}};

@@ -17,8 +17,8 @@ export const api = new APIClient(secureSessions, () => Crypto.randomUUID());
 export async function authenticateOIDC(config: AuthConfig) {
   if (!config.issuer || !config.client_id) throw new APIError(0, 'oidc_config', '服务器尚未配置 OIDC 登录服务');
   const discovery = await AuthSession.fetchDiscoveryAsync(config.issuer);
-  const redirectUri = config.redirect_uri ?? AuthSession.makeRedirectUri({scheme: 'superagent', path: 'auth'});
-  const request = new AuthSession.AuthRequest({clientId: config.client_id, redirectUri, scopes: ['openid', 'profile', 'email', 'offline_access'], responseType: AuthSession.ResponseType.Code, usePKCE: true});
+  const redirectUri = config.redirect_uri ?? 'superagent://oauth/callback';
+  const request = new AuthSession.AuthRequest({clientId: config.client_id, redirectUri, scopes: ['openid', 'profile', 'email'], responseType: AuthSession.ResponseType.Code, usePKCE: true});
   await request.makeAuthUrlAsync(discovery);
   const result = await request.promptAsync(discovery);
   if (result.type !== 'success' || !result.params.code) throw new APIError(0, 'login_cancelled', '登录未完成');

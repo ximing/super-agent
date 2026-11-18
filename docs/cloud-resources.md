@@ -45,11 +45,15 @@ docker compose --env-file .env up -d api
 curl --fail http://127.0.0.1:13011/ready
 ```
 
-反向代理通过 `222.128.65.91:13011` 接入 app 服务器，所以默认容器端口绑定支持独立 nginx 主机访问；防火墙只允许入口主机访问此业务端口。nginx 修改后先测试配置再 reload，最后验证 HTTPS `/ready`、`/v1/auth/config` 和未授权 API 拒绝访问。
+API 与 OIDC 的云容器端口均只绑定 app 的 `127.0.0.1`。独立 nginx 通过受限 SSH 隧道访问源站，不在公网链路明文发送登录、任务或画面数据；OpenResty 网络的宿主网关为已验证的 `192.168.0.1`。配置见 `origin-tunnel.service`、`origin-sshd.conf`、`api.nginx.conf`，SSH 私钥只留 nginx，目标 host key 固定校验，账户不能执行命令，转发端口有白名单。nginx 修改后先测试配置再 reload，最后验证 HTTPS `/ready`、`/v1/auth/config` 和未授权 API 拒绝访问。
 
 GitHub Actions 使用 secrets `TEST_DATABASE_URL`、`TEST_MIGRATION_DATABASE_URL` 和 `POSTGRES_CA_PEM`。CI 将 CA 写入 runner 临时目录并修正 URL 路径，在后续步骤使用前注册秘密遮罩，不向可见日志输出连接串。未配置时云端集成测试明确 skip，不能因此宣称已完成云端验收。`cloud-ci.yml` 包含 TypeScript、云库集成、Swift、Android APK 与原生 App 产物；`cloud-image.yml` 在云端构建并可手动发布 GHCR 镜像。公开仓库为 `ximing/super-agent`。
 
 已验证 GitHub 托管 US runner 到家中 PostgreSQL 建连出现 `ECONNRESET`。因此单测与原生构建继续在托管 runner，真实云库集成使用 app 业务机的独立 `super-agent-ci` 用户，标签 `super-agent-cloud`。无 sudo/Docker 权限，systemd 限制可写路径、2GB 内存和2核CPU；服务单元见 `infra/cloud/ci-runner.service`。公开 PR 不调度此 runner、不获得云库 secrets，只有本仓库 main push/手动 workflow 可以运行云库 job。该 runner 不在开发 Mac、不启动本地数据库或本机 Docker。
+
+app 到 GitHub Broker/AAD 的长 TLS 连接也实测出现 EOF/超时，而 nginx 线路稳定。云 runner 经现有 SSH 隧道的 loopback 反向端口使用 `ci-egress-proxy`：独立非 root、仅 CONNECT:443 域名白名单、拒绝私网/IP字面量、不解密 TLS、不记录请求数据，无公开代理端口。Node/npm Actions toolcache 从云端已拉取的官方 glibc Node 24 镜像预置，避免首次跨境大文件慢下载；没有在 Mac 拉取或保存服务器镜像。首个完整 Actions 检查已通过。
+
+迁移使用 `super_agent_private.schema_migrations` owner-only 账本，记录 SQL 文件名、SHA-256 和应用时间；再次迁移不重做 DDL，修改已应用 SQL 会明确失败，后续变更新增 SQL 文件。迁移独占 advisory 锁，租户与配对事务取共享锁，避免在线业务与 DDL 反向锁序。首次给旧服务补账本需要停止旧 API、备份、迁移、重启；本轮 test 首迁已按此执行并通过真实互斥/权限测试。生产不参与集成测试。
 
 记忆复用现有 `https://recall.aimo.plus`，没有新增 embedding、Redis、ES 或 pgvector 依赖。用户在原生设置中绑定自己的 Recall PAT；服务端加密保存，执行节点通过当前任务授权按需检索。`MEMORY_ENCRYPTION_KEY` 必须稳定、独立保管；轮换需要显式迁移或重新绑定。
 

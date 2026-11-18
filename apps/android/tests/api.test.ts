@@ -29,3 +29,10 @@ test('missing monetary values are preserved instead of synthesized as zero',asyn
   const client=new APIClient(store(),()=> 'id',transport);await client.configure('https://agent.example');await client.setSession(session);
   const summary=await client.request<{totals:unknown[];unknown_count:number}>('/costs/summary');assert.deepEqual(summary.totals,[]);assert.equal(summary.unknown_count,1);
 });
+
+test('bodyless DELETE is valid for Fastify JSON parsing and preserves authorization/version',async()=>{
+  let called=false;
+  const transport=(async(_url:unknown,init:RequestInit)=>{called=true;assert.equal(init.method,'DELETE');assert.equal(init.body,undefined);const headers=new Headers(init.headers);assert.equal(headers.get('Content-Type'),null);assert.equal(headers.get('Accept'),'application/json');assert.equal(headers.get('If-Match'),'"12"');assert.equal(headers.get('Authorization'),'Bearer test-access');return new Response(null,{status:204});}) as typeof fetch;
+  const client=new APIClient(store(),()=> 'id',transport);await client.configure('https://agent.example');await client.setSession(session);
+  await client.request('/memories/test-memory',{method:'DELETE',version:12});assert.equal(called,true);
+});

@@ -38,7 +38,7 @@ open 'build/Super Agent.app'
 
 ## 本机验证
 
-- `swift test`：4 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址和未知费用保留。
+- `swift test`：5 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留，以及无请求体 DELETE 不发送 JSON Content-Type。
 - `bash scripts/build-app.sh`：release 可执行应用已构建并进行本机签名。
 - 真实 OIDC、Recall 账号和云端端到端流程取决于用户部署的服务配置，不能由编译通过推定。
 
@@ -49,3 +49,5 @@ open 'build/Super Agent.app'
 ```
 
 该模式只渲染本应用未登录 NSView 并保存 PNG 后退出，不截取整张用户桌面。
+
+OIDC 登录仅请求 `openid profile email`，默认回调为 `superagent://oauth/callback`。应用保存和刷新产品服务端会话，不申请 OIDC `offline_access` 长期权限。

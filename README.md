@@ -26,7 +26,7 @@
 
 ## 开发与验证
 
-Node.js 24+、pnpm 10；Mac 原生构建需要 Xcode；Android 原生构建需要 JDK 17 与 Android SDK。
+Node.js 24.14+、pnpm 10；Mac 原生构建需要 Xcode；Android 原生构建需要 JDK 17 与 Android SDK。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -50,3 +50,5 @@ API：`https://super-agent.aimo.plus`；OIDC：`https://super-agent-auth.aimo.pl
 服务镜像在 GitHub Actions 云端 runner 构建；`cloud-image.yml` 默认只构建，手动勾选 publish 后才推送 GHCR。数据库、S3、OIDC 的服务凭据只配置到云端，执行 Mac 的模型账号不上传。
 
 首次部署和当前验证状态见 [实施状态](docs/implementation-status.md)、[云资源清单](docs/cloud-resources.md)；组件运行方法见各目录 README。完整设计入口：[docs](docs/README.md)。
+
+正式执行 Mac 的安装、配对和后台启动见[开始使用](docs/getting-started.md)。

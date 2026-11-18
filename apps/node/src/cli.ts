@@ -7,6 +7,8 @@ import { NodeAgent } from './agent.js';
 import { NodeApi } from './api.js';
 import { defaultConfigPath, initConfig, loadConfig, writeConfig } from './config.js';
 import { sleep } from '@super-agent/tool-broker/runtime';
+import { configureNetwork } from './network.js';
+import { ensureCsiStarted, launchAgentPlist } from './startup.js';
 
 const args = process.argv.slice(2);
 const option = (key: string): string | undefined => { const i = args.indexOf(key); return i >= 0 ? args[i + 1] : undefined; };
@@ -20,6 +22,7 @@ async function main(): Promise<void> {
   }
   if (command === 'pair') {
     const config = await loadConfig(configPath); if (config.device_id) throw new Error('This node is already paired');
+    await configureNetwork(config);
     const api = new NodeApi(config), pendingPath = join(config.data_dir, 'pairing-pending.json');
     let pairing: PairingStart | undefined;
     try { const saved = JSON.parse(await readFile(pendingPath, 'utf8')) as PairingStart; if (Date.parse(saved.expires_at) > Date.now()) pairing = saved; } catch { /* Start a fresh one-time pairing. */ }
@@ -36,7 +39,9 @@ async function main(): Promise<void> {
     throw new Error('Pairing is not claimed yet; run pair again to resume');
   }
   if (command === 'start') {
-    const config = await loadConfig(configPath), agent = new NodeAgent(config);
+    const config = await loadConfig(configPath);
+    await ensureCsiStarted(config.fake_runtime, { log: message => process.stderr.write(`${message}\n`) });
+    const agent = new NodeAgent(config);
     let stopping = false;
     const stop = () => { if (!stopping) { stopping = true; void agent.stop(); } };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
@@ -44,15 +49,13 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'probe') {
-    const agent = new NodeAgent(await loadConfig(configPath));
-    try { process.stdout.write(`${JSON.stringify(await agent.capabilities(), null, 2)}\n`); } finally { agent.close(); }
+    const config = await loadConfig(configPath), network = await configureNetwork(config), agent = new NodeAgent(config);
+    try { process.stdout.write(`${JSON.stringify({ ...await agent.capabilities(), network: { proxy_source: network.source, proxied: network.proxied } }, null, 2)}\n`); } finally { agent.close(); network.restore(); }
     return;
   }
   if (command === 'launchagent') {
-    const dir = option('--output') ?? join((await loadConfig(configPath)).data_dir, 'launchd'); await mkdir(dir, { recursive: true, mode: 0o700 });
-    const escape = (s: string) => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
-    const script = new URL('./cli.js', import.meta.url).pathname;
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>Label</key><string>com.superagent.node</string><key>ProgramArguments</key><array><string>${escape(process.execPath)}</string><string>${escape(script)}</string><string>start</string><string>--config</string><string>${escape(configPath)}</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>StandardOutPath</key><string>${escape(join(dir, 'node.log'))}</string><key>StandardErrorPath</key><string>${escape(join(dir, 'node-error.log'))}</string></dict></plist>\n`;
+    const dir = resolve(option('--output') ?? join((await loadConfig(configPath)).data_dir, 'launchd')); await mkdir(dir, { recursive: true, mode: 0o700 });
+    const plist = launchAgentPlist({ execPath: process.execPath, scriptUrl: new URL('./cli.js', import.meta.url), configPath, outputDir: dir, currentPath: process.env.PATH });
     const path = join(dir, 'com.superagent.node.plist'); await writeFile(path, plist, { mode: 0o600 });
     process.stdout.write(`LaunchAgent manifest written: ${path}\nReview/install as a user LaunchAgent. No system/root service or provider credentials are embedded.\n`); return;
   }

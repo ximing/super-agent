@@ -26,7 +26,7 @@ export class NodeApi {
   }
   async raw<T = Record<string, unknown>>(path: string, body?: unknown, options: { token?: string; runTicket?: string; assistantEpoch?: string; method?: string; idempotencyKey?: string } = {}): Promise<T> {
     const response = await this.fetcher(`${this.config.server_url}/v1${path}`, {
-      method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { 'content-type': 'application/json', ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...(options.runTicket ? { 'x-run-ticket': options.runTicket } : {}), ...(options.assistantEpoch ? { 'x-assistant-epoch': options.assistantEpoch } : {}), ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}) },
+      method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...(options.runTicket ? { 'x-run-ticket': options.runTicket } : {}), ...(options.assistantEpoch ? { 'x-assistant-epoch': options.assistantEpoch } : {}), ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) {

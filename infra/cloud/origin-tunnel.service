@@ -1,0 +1,19 @@
+[Unit]
+Description=Super Agent encrypted origin tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=super-agent-tunnel
+Group=super-agent-tunnel
+ExecStart=/usr/bin/ssh -NT -p 11022 -i /var/lib/super-agent-tunnel/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/var/lib/super-agent-tunnel/known_hosts -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 192.168.0.1:13010:127.0.0.1:13010 -L 192.168.0.1:13011:127.0.0.1:13011 -R 127.0.0.1:3128:127.0.0.1:3128 super-agent-proxy@222.128.65.91
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

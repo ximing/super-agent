@@ -3,6 +3,8 @@ import { createInterface } from 'node:readline';
 import { EventEmitter } from 'node:events';
 import type { RuntimeAdapter, RuntimeContext, RuntimeResult, UsageSample } from '@super-agent/tool-broker/runtime';
 import { abortError, checkAbort, sleep } from '@super-agent/tool-broker/runtime';
+import { managedCodexArgs, managedCompatibilityMessage, verifyManagedCli } from './managed.js';
+export { managedCodexArgs } from './managed.js';
 
 type Obj = Record<string, unknown>;
 interface RpcMessage { id?: number | string; method?: string; params?: Obj; result?: unknown; error?: { message?: string; code?: number } }
@@ -46,7 +48,15 @@ export class CodexRpc extends EventEmitter {
   }
 }
 
-export interface CodexOptions { command?: string; args?: string[]; timeoutMs?: number; maxRunMs?: number; sandbox?: 'workspace-write' | 'danger-full-access'; toolsMode?: 'dynamic' | 'mcp' }
+export interface CodexErrorInfo { code: string; http_status: number | null; will_retry: boolean }
+export function safeCodexError(params: Obj): CodexErrorInfo {
+  const info = (params.error as Obj | undefined)?.codexErrorInfo;
+  const known = new Set(['contextWindowExceeded', 'sessionBudgetExceeded', 'usageLimitExceeded', 'rateLimitExceeded', 'flexUnavailable', 'serverOverloaded', 'modelNotFound', 'policyCapacityUnavailable', 'cyberPolicy', 'misalignmentPolicyViolation', 'tooManyDenials', 'internalServerError', 'unauthorized', 'badRequest', 'threadRollbackFailed', 'sandboxError', 'other', 'inferenceHookDenied', 'httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected', 'responseTooManyFailedAttempts', 'activeTurnNotSteerable']);
+  const key = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info)[0] : undefined;
+  const rawStatus = key && info && typeof info === 'object' ? ((info as Obj)[key] as Obj | undefined)?.httpStatusCode : undefined;
+  return { code: key && known.has(key) ? key : 'unknown', http_status: typeof rawStatus === 'number' && Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : null, will_retry: params.willRetry === true };
+}
+export interface CodexOptions { command?: string; args?: string[]; timeoutMs?: number; maxRunMs?: number; sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; toolsMode?: 'dynamic' | 'mcp'; onProtocolEvent?: (method: string) => void; onErrorInfo?: (info: CodexErrorInfo) => void }
 export class CodexRuntime implements RuntimeAdapter {
   private rpc?: CodexRpc;
   private threadId?: string;
@@ -58,7 +68,12 @@ export class CodexRuntime implements RuntimeAdapter {
   async execute(context: RuntimeContext): Promise<RuntimeResult> {
     checkAbort(context.signal);
     this.context = context; this.stopRequested = false;
-    const rpc = this.rpc = new CodexRpc(this.options.command, this.options.args, this.options.timeoutMs);
+    const command = this.options.command ?? 'codex';
+    if (this.options.args === undefined) await verifyManagedCli(command);
+    const args = this.options.args ?? await managedCodexArgs({ cwd: context.cwd });
+    checkAbort(context.signal);
+    const rpc = this.rpc = new CodexRpc(command, args, this.options.timeoutMs);
+    let initialized = false;
     let text = '';
     let resolveDone!: (result: RuntimeResult) => void, rejectDone!: (error: Error) => void;
     const done = new Promise<RuntimeResult>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
@@ -69,8 +84,14 @@ export class CodexRuntime implements RuntimeAdapter {
     context.signal.addEventListener('abort', onAbort, { once: true });
     rpc.on('exited', () => rejectDone(new Error('codex_process_exited')));
     rpc.on('notification', (message: RpcMessage) => {
+      this.options.onProtocolEvent?.(message.method ?? 'unknown_notification');
       const params = message.params ?? {};
       if (params.threadId && this.threadId && params.threadId !== this.threadId) return;
+      if (message.method === 'error') {
+        const info = safeCodexError(params);
+        this.options.onErrorInfo?.(info);
+        if (!info.will_retry) rejectDone(new Error(`codex_error:${info.code}${info.http_status === null ? '' : `:http_${info.http_status}`}`));
+      }
       if (message.method === 'turn/started') this.turnId = String((params.turn as Obj | undefined)?.id ?? '');
       if (message.method === 'item/agentMessage/delta') text += String(params.delta ?? '');
       if (message.method === 'item/started') {
@@ -95,33 +116,38 @@ export class CodexRuntime implements RuntimeAdapter {
         const turn = params.turn as Obj | undefined;
         if (turn?.status === 'completed') resolveDone({ text, binding: { thread_id: this.threadId ?? '', turn_id: this.turnId ?? '' } });
         else if (turn?.status === 'interrupted') rejectDone(abortError());
-        else rejectDone(new Error(`codex_turn_failed:${String((turn?.error as Obj | undefined)?.message ?? 'unknown')}`));
+        else rejectDone(new Error(`codex_turn_failed:${safeCodexError({ error: turn?.error }).code}`));
       }
     });
-    rpc.on('request', (message: RpcMessage) => { void this.handleRequest(message, context).catch(error => { if (message.id !== undefined) rpc.reply(message.id, { success: false, contentItems: [{ type: 'inputText', text: (error as Error).message }] }); }); });
+    rpc.on('request', (message: RpcMessage) => { this.options.onProtocolEvent?.(message.method ?? 'unknown_request'); void this.handleRequest(message, context).catch(error => { if (message.id !== undefined) rpc.reply(message.id, { success: false, contentItems: [{ type: 'inputText', text: (error as Error).message }] }); }); });
     try {
       await rpc.request('initialize', { clientInfo: { name: 'super-agent-node', title: 'Personal Super-agent', version: '0.1.0' }, capabilities: { experimentalApi: true } });
+      initialized = true;
+      this.options.onProtocolEvent?.('initialize/completed');
       rpc.notify('initialized');
       const config: Obj = {};
       const params: Obj = { cwd: context.cwd, approvalPolicy: 'never', sandbox: this.options.sandbox ?? 'workspace-write', model: context.modelId || undefined,
         developerInstructions: `You are a local worker for the user's explicitly authorized task. Do not read or export model credentials, cookies or other secrets. Use the provided browser tools for browser operations so progress and control remain observable. Search memory before unfamiliar work. Stop at task scope boundaries. ${context.developerInstructions ?? ''}`, serviceName: 'personal-super-agent' };
       if (this.options.toolsMode === 'mcp' && context.mcp) {
-        config['mcp_servers.super_agent'] = { command: process.execPath, args: [context.mcp.script], env: { SUPER_AGENT_TOOL_URL: context.mcp.url, SUPER_AGENT_TOOL_TOKEN: context.mcp.token }, required: true };
+        config['mcp_servers.super_agent'] = { enabled: true, command: process.execPath, args: [context.mcp.script], env: { SUPER_AGENT_TOOL_URL: context.mcp.url, SUPER_AGENT_TOOL_TOKEN: context.mcp.token }, required: true };
         params.config = config;
       } else {
         params.dynamicTools = context.tools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.parameters }));
       }
       const result = await rpc.request<{ thread: { id: string } }>('thread/start', params);
       this.threadId = result.thread.id;
+      this.options.onProtocolEvent?.('thread/start/completed');
       await context.emit({ type: 'binding', binding: { thread_id: this.threadId } });
       checkAbort(context.signal);
       const prompt = context.checkpoint ? `${context.goal}\n\nContinue only unfinished work. Checkpoint:\n${JSON.stringify(context.checkpoint)}` : context.goal;
-      const started = await rpc.request<{ turn: { id: string } }>('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt }] });
+      const started = await rpc.request<{ turn: { id: string } }>('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt }], ...(this.options.reasoningEffort ? { effort: this.options.reasoningEffort } : {}) });
       this.turnId = started.turn.id;
+      this.options.onProtocolEvent?.('turn/start/completed');
       for (const input of this.pendingInputs.splice(0)) await this.steer(input);
       if (this.stopRequested) await this.stop();
       return await done;
-    } finally { clearTimeout(timer); context.signal.removeEventListener('abort', onAbort); await rpc.close(); this.rpc = undefined; }
+    } catch (error) { if (!initialized && this.options.args === undefined) throw new Error(managedCompatibilityMessage); throw error; }
+    finally { clearTimeout(timer); context.signal.removeEventListener('abort', onAbort); await rpc.close(); this.rpc = undefined; }
   }
   private async handleRequest(message: RpcMessage, context: RuntimeContext): Promise<void> {
     const params = message.params ?? {}, id = message.id!;

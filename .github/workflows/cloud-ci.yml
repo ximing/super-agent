@@ -1,7 +1,9 @@
 name: Cloud checks
 on:
   push:
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
   workflow_dispatch:
 permissions:
   contents: read
@@ -76,12 +78,23 @@ jobs:
       - run: npm install --global pnpm@10.30.3
       - run: pnpm install --frozen-lockfile
       - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew :app:assembleDebug --no-daemon
+      - run: ./gradlew :app:assembleRelease --no-daemon
         working-directory: apps/android/android
+      - name: Verify standalone embedded JavaScript
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          apk = next(Path('apps/android/android/app/build/outputs/apk/release').glob('*.apk'))
+          with ZipFile(apk) as archive:
+              assert archive.getinfo('assets/index.android.bundle').file_size > 1024
+              assert archive.read('assets/index.android.bundle')[:8] == bytes.fromhex('c61fbc03c103191f')
+          print('Standalone APK contains embedded application bundle; Metro is not required.')
+          PY
       - uses: actions/upload-artifact@v7
         with:
-          name: android-debug-apk
-          path: apps/android/android/app/build/outputs/apk/debug/*.apk
+          name: android-standalone-test-apk
+          path: apps/android/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
   macos:
     runs-on: macos-latest

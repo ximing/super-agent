@@ -1,0 +1,49 @@
+{
+  "checked_at": "2026-11-18T15:20:07.332Z",
+  "runtime": "real-local-codex",
+  "success": false,
+  "tool_calls": 0,
+  "fixture_read_succeeded": false,
+  "fixed_marker_matched": false,
+  "dynamic_tool_receipt_verified": false,
+  "model_turns_started": 1,
+  "protocol_methods": [
+    "initialize/completed",
+    "remoteControl/status/changed",
+    "thread/start/completed",
+    "thread/started",
+    "turn/start/completed",
+    "thread/status/changed",
+    "turn/started",
+    "account/updated",
+    "item/started",
+    "item/completed",
+    "error"
+  ],
+  "error_codes": [
+    {
+      "code": "responseStreamDisconnected",
+      "http_status": null,
+      "will_retry": true
+    },
+    {
+      "code": "responseStreamDisconnected",
+      "http_status": null,
+      "will_retry": true
+    },
+    {
+      "code": "responseStreamDisconnected",
+      "http_status": null,
+      "will_retry": true
+    }
+  ],
+  "usage_samples": 0,
+  "usage": null,
+  "duration_ms": 86098,
+  "total_budget_ms": 90000,
+  "default_model_selected": true,
+  "reasoning_effort": "low",
+  "failure": "structured_error_observed",
+  "temporary_fixture_removed": true,
+  "provider_credentials_uploaded": false
+}

@@ -15,7 +15,7 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${OIDC_ADMIN_PASSWORD:?Configure a random initial admin password}
       KC_HEALTH_ENABLED: "true"
     ports:
-      - "13010:8080"
+      - "127.0.0.1:13010:8080"
     volumes:
       - ./realms:/opt/keycloak/data/import:ro
       - ./certs:/opt/keycloak/conf/certs:ro

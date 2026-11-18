@@ -36,7 +36,7 @@ public struct AgentTask: Codable, Identifiable, Sendable {
 }
 public struct Run: Codable, Identifiable, Sendable {
     public let id: String; public let taskId: String; public let state: String; public let engine: Engine
-    public let deviceId: String; public let modelId: String; public let leaseEpoch: String; public let summary: String; public let createdAt: String
+    public let deviceId: String; public let modelId: String; public let leaseEpoch: String; public let summary: String; public let resultText: String?; public let createdAt: String
 }
 public struct Message: Codable, Identifiable, Sendable { public let id: String; public let role: String; public let content: String; public let taskId: String?; public let createdAt: String }
 public struct Question: Codable, Identifiable, Sendable { public let id: String; public let taskId: String; public let runId: String; public let text: String; public let options: [String]; public let status: String; public let version: Int; public let createdAt: String }

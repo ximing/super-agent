@@ -11,6 +11,7 @@
 | [实施计划](implementation-plan.md) | 开发顺序、验证门槛、交付范围和待核实项 |
 | [契约样例](contracts/README.md) | 调度、运行状态和费用上报的 JSON Schema 与样例 |
 | [云端资源清单](cloud-resources.md) | 用户部署资源、云端配置和禁止本地 Docker 的实施约束 |
+| [开始使用](getting-started.md) | 原生客户端、正式执行 Mac 安装、配对和后台启动 |
 
 ## 已确定的边界
 
@@ -26,7 +27,7 @@
 
 - 云端采用模块化单体，独立 API/Gateway 和后台 Job 进程，共用代码与 PostgreSQL；暂不拆微服务。
 - Node.js 受支持 LTS、TypeScript、Fastify 5；实施时锁定实测版本，不在设计阶段声称某版本已完成兼容。
-- PostgreSQL 18 与 pgvector；SQL migration 为数据定义依据，应用使用参数化查询。持久队列、outbox 和用量账本先放同库。
+- PostgreSQL 18；SQL migration 为数据定义依据，应用使用参数化查询。持久队列、outbox 和用量账本先放同库，记忆复用已有 agent-recall，不新增 pgvector 依赖。
 - 原生登录走 OIDC + PKCE，执行设备用独立密钥认证，Run 使用短期授权；模型密钥不进入这些协议。
 - 初版使用邀请开通作为可调整的默认值；OIDC 服务与 Android 推送提供方需在上线前选定。
 - 跨引擎/设备切换创建新 Run，通过结构化检查点交接；不迁移隐藏推理或供应商原生会话。

@@ -50,7 +50,7 @@ struct TaskDetailView: View {
                 Divider()
                 Text("运行记录").font(.headline)
                 if runs.isEmpty { Text("任务尚未开始执行。").foregroundStyle(.secondary) }
-                ForEach(runs) { run in HStack(alignment: .top, spacing: 12) { Image(systemName: "circle.dotted").foregroundStyle(Palette.blue); VStack(alignment: .leading, spacing: 6) { HStack { Text(run.engine.rawValue.capitalized).fontWeight(.medium); StatusLabel(value: run.state); Spacer(); Text(formatTime(run.createdAt)).font(.caption).foregroundStyle(.secondary) }; Text(run.summary.isEmpty ? run.modelId : run.summary).font(.callout).textSelection(.enabled) } }.padding(.vertical, 5) }
+                ForEach(runs) { run in HStack(alignment: .top, spacing: 12) { Image(systemName: "circle.dotted").foregroundStyle(Palette.blue); VStack(alignment: .leading, spacing: 6) { HStack { Text(run.engine.rawValue.capitalized).fontWeight(.medium); StatusLabel(value: run.state); Spacer(); Text(formatTime(run.createdAt)).font(.caption).foregroundStyle(.secondary) }; Text(run.resultText.flatMap { $0.isEmpty ? nil : $0 } ?? (run.summary.isEmpty ? run.modelId : run.summary)).font(.callout).textSelection(.enabled) } }.padding(.vertical, 5) }
                 if let runId = task.currentRunId { BrowserFrameView(runId: runId) }
                 TaskArtifactsView(taskId: task.id)
                 Divider()

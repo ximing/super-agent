@@ -6,6 +6,10 @@ on:
         description: Publish the reviewed image to GHCR
         type: boolean
         default: false
+      archive:
+        description: Export an image archive for direct cloud-to-cloud deployment
+        type: boolean
+        default: false
 permissions:
   contents: read
   packages: write
@@ -31,3 +35,14 @@ jobs:
         run: |
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_USER" --password-stdin
           docker push "$SERVER_IMAGE"
+      - name: Archive on cloud runner when requested
+        if: inputs.archive
+        run: docker save "$SERVER_IMAGE" | gzip > server-image.tar.gz
+      - uses: actions/upload-artifact@v7
+        if: inputs.archive
+        with:
+          name: server-image-${{ github.sha }}
+          path: server-image.tar.gz
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
