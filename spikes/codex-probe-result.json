@@ -1,0 +1,11 @@
+{
+  "checked_at": "2026-11-18T14:47:53.617Z",
+  "transport": "stdio",
+  "initialized": true,
+  "platform_family": "unix",
+  "configured_models_count": 10,
+  "read_only_thread_created_and_archived": true,
+  "dynamic_tool_definition_accepted": true,
+  "model_turn_started": false,
+  "provider_credentials_uploaded": false
+}

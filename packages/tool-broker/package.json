@@ -1,0 +1,6 @@
+{
+  "name": "@super-agent/tool-broker", "version": "0.1.0", "private": true, "type": "module",
+  "main": "dist/index.js", "types": "dist/index.d.ts", "exports": { ".": "./dist/index.js", "./runtime": "./dist/runtime.js", "./mcp": "./dist/mcp.js" },
+  "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "node --import tsx --test test/*.test.ts" },
+  "dependencies": { "@super-agent/protocol": "workspace:*" }
+}

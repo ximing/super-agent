@@ -1,0 +1,6 @@
+{
+  "name": "@super-agent/macos",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "build": "swift build", "test": "swift test", "app": "bash scripts/build-app.sh" }
+}

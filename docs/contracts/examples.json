@@ -1,0 +1,112 @@
+{
+  "run_start": {
+    "protocol_version": "1.0",
+    "message_id": "00000000-0000-4000-8000-000000000010",
+    "kind": "run.start",
+    "sent_at": "2026-11-18T12:00:00Z",
+    "payload": {
+      "command_id": "00000000-0000-4000-8000-000000000011",
+      "tenant_id": "00000000-0000-4000-8000-000000000012",
+      "task_id": "00000000-0000-4000-8000-000000000013",
+      "run_id": "00000000-0000-4000-8000-000000000014",
+      "device_id": "00000000-0000-4000-8000-000000000015",
+      "lease_epoch": "1",
+      "scope_version_id": "00000000-0000-4000-8000-000000000016",
+      "capability_generation": 3,
+      "runtime": {
+        "engine": "grok",
+        "model_id": "example-device-model",
+        "local_profile_id": "work"
+      },
+      "expires_at": "2026-11-18T12:01:00Z",
+      "lease_valid_for_ms": 45000,
+      "checkpoint_id": null,
+      "budget_grant_id": "00000000-0000-4000-8000-000000000017"
+    }
+  },
+  "command_ack": {
+    "protocol_version": "1.0",
+    "message_id": "00000000-0000-4000-8000-000000000018",
+    "kind": "command.ack",
+    "sent_at": "2026-11-18T12:00:01Z",
+    "payload": {
+      "command_id": "00000000-0000-4000-8000-000000000011",
+      "device_id": "00000000-0000-4000-8000-000000000015",
+      "status": "stored"
+    }
+  },
+  "run_state": {
+    "protocol_version": "1.0",
+    "message_id": "00000000-0000-4000-8000-000000000019",
+    "kind": "run.state",
+    "sent_at": "2026-11-18T12:00:02Z",
+    "payload": {
+      "device_id": "00000000-0000-4000-8000-000000000015",
+      "run_id": "00000000-0000-4000-8000-000000000014",
+      "lease_epoch": "1",
+      "producer_id": "00000000-0000-4000-8000-000000000020",
+      "producer_seq": "1",
+      "state": "running",
+      "summary": "正在读取发布平台记录"
+    }
+  },
+  "usage_report": {
+    "protocol_version": "1.0",
+    "message_id": "00000000-0000-4000-8000-000000000021",
+    "kind": "usage.report",
+    "sent_at": "2026-11-18T12:00:05Z",
+    "payload": {
+      "device_id": "00000000-0000-4000-8000-000000000015",
+      "run_id": "00000000-0000-4000-8000-000000000014",
+      "lease_epoch": "1",
+      "producer_id": "00000000-0000-4000-8000-000000000020",
+      "producer_seq": "2",
+      "request_key": "example:xai:request-1",
+      "usage_revision": 1,
+      "engine": "grok",
+      "model_id": "example-device-model",
+      "category": "worker",
+      "input_tokens": 1200,
+      "cached_input_tokens": 800,
+      "output_tokens": 300,
+      "reasoning_tokens": 100,
+      "cost": {
+        "source": "supplier_reported",
+        "quality": "final",
+        "amount": "0.0038",
+        "currency": "USD",
+        "price_version_id": null,
+        "supplier_cost_ticks": "38000000"
+      }
+    }
+  },
+  "codex_subscription_usage": {
+    "protocol_version": "1.0",
+    "message_id": "00000000-0000-4000-8000-000000000022",
+    "kind": "usage.report",
+    "sent_at": "2026-11-18T12:05:00Z",
+    "payload": {
+      "device_id": "00000000-0000-4000-8000-000000000015",
+      "run_id": "00000000-0000-4000-8000-000000000023",
+      "lease_epoch": "1",
+      "producer_id": "00000000-0000-4000-8000-000000000024",
+      "producer_seq": "1",
+      "request_key": "example:codex:turn-1",
+      "usage_revision": 1,
+      "engine": "codex",
+      "model_id": "example-device-model",
+      "category": "assistant",
+      "input_tokens": 2500,
+      "cached_input_tokens": null,
+      "output_tokens": 400,
+      "reasoning_tokens": null,
+      "cost": {
+        "source": "unavailable",
+        "quality": "missing",
+        "amount": null,
+        "currency": null,
+        "price_version_id": null
+      }
+    }
+  }
+}

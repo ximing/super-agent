@@ -1,0 +1,25 @@
+{
+  "name": "@super-agent/control-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/app.js",
+  "scripts": {
+    "dev": "tsx watch src/start.ts",
+    "start": "node dist/start.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@super-agent/protocol": "workspace:*",
+    "fastify": "^5.6.0",
+    "@fastify/cors": "^11.1.0",
+    "@fastify/rate-limit": "^10.3.0",
+    "pg": "^8.16.0",
+    "jose": "^6.1.0",
+    "decimal.js": "^10.6.0"
+  },
+  "devDependencies": { "@types/pg": "^8.15.0" }
+}

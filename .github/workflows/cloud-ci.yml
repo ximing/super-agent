@@ -1,0 +1,80 @@
+name: Cloud checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TEST_DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+      TEST_MIGRATION_DATABASE_URL: ${{ secrets.TEST_MIGRATION_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm install --global pnpm@10.30.3
+      - run: pnpm install --frozen-lockfile
+      - name: Prepare dedicated cloud test database TLS
+        env:
+          POSTGRES_CA_PEM: ${{ secrets.POSTGRES_CA_PEM }}
+        run: node scripts/prepare-ci-database.mjs
+      - run: pnpm --filter @super-agent/node... build
+      - run: pnpm --filter @super-agent/control-server build
+      - run: pnpm --filter @super-agent/android typecheck
+      - run: pnpm --filter @super-agent/protocol test
+      - run: pnpm --filter @super-agent/tool-broker test
+      - run: pnpm --filter @super-agent/runtime-codex test
+      - run: pnpm --filter @super-agent/runtime-grok test
+      - run: pnpm --filter @super-agent/node test
+      - run: pnpm --filter @super-agent/control-server test
+      - run: pnpm test:integration
+      - run: pnpm --filter @super-agent/android test
+      - run: pnpm --filter @super-agent/android build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-javascript-bundle
+          path: apps/android/dist
+          if-no-files-found: error
+  android-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: npm install --global pnpm@10.30.3
+      - run: pnpm install --frozen-lockfile
+      - uses: gradle/actions/setup-gradle@v6
+      - run: ./gradlew :app:assembleDebug --no-daemon
+        working-directory: apps/android/android
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-debug-apk
+          path: apps/android/android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: swift build --package-path apps/macos
+      - run: swift test --package-path apps/macos
+      - run: bash apps/macos/scripts/build-app.sh
+      - run: ditto -c -k --sequesterRsrc --keepParent 'apps/macos/build/Super Agent.app' super-agent-macos.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-app
+          path: super-agent-macos.zip
+          if-no-files-found: error

@@ -1,0 +1,79 @@
+import { randomUUID } from 'node:crypto';
+import type { RuntimeAdapter, RuntimeContext, RuntimeResult } from '@super-agent/tool-broker/runtime';
+import { checkAbort, sleep } from '@super-agent/tool-broker/runtime';
+type Obj = Record<string, unknown>;
+export interface GrokOptions { apiKey: string; baseUrl?: string; fetcher?: typeof fetch; maxRounds?: number; maxOutputTokens?: number; requestTimeoutMs?: number }
+
+/** Direct local API loop. The control server never sees the API key or proxies this request. */
+export class GrokRuntime implements RuntimeAdapter {
+  private controller?: AbortController;
+  private queuedInputs: string[] = [];
+  constructor(private readonly options: GrokOptions) {
+    if (!options.apiKey) throw new Error('Grok API key is not configured on this computer');
+    const url = new URL(options.baseUrl ?? 'https://api.x.ai/v1');
+    if (url.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Provider URL must use HTTPS');
+  }
+  async execute(context: RuntimeContext): Promise<RuntimeResult> {
+    checkAbort(context.signal);
+    this.controller = new AbortController();
+    const signal = AbortSignal.any([context.signal, this.controller.signal]);
+    const fetcher = this.options.fetcher ?? fetch;
+    const input: Obj[] = [{ role: 'system', content: `You are a local worker for the user's task. Use tools to perform authorized work, search memory for unfamiliar sites, and ask only for missing information or expanded scope. Do not read/export credentials. ${context.developerInstructions ?? ''}` },
+      { role: 'user', content: context.checkpoint ? `${context.goal}\nCheckpoint: ${JSON.stringify(context.checkpoint)}\nContinue unfinished steps, verify current environment before acting.` : context.goal }];
+    let previous: string | undefined;
+    for (let round = 0; round < (this.options.maxRounds ?? 80); round++) {
+      checkAbort(signal);
+      for (const text of this.queuedInputs.splice(0)) input.push({ role: 'user', content: text });
+      await context.emit({ type: 'progress', summary: `Grok 正在处理第 ${round + 1} 轮` });
+      const body: Obj = { model: context.modelId, input: previous ? input.splice(0) : input, tools: context.tools.map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters })), max_output_tokens: this.options.maxOutputTokens ?? 4096, store: true };
+      if (previous) body.previous_response_id = previous;
+      const response = await this.request(fetcher, body, signal);
+      const responseId = typeof response.id === 'string' ? response.id : `local-${randomUUID()}`;
+      await context.emit({ type: 'binding', binding: { response_id: responseId } });
+      const usage = (response.usage ?? {}) as Obj;
+      const inputDetails = (usage.input_tokens_details ?? usage.prompt_tokens_details ?? {}) as Obj;
+      const outputDetails = (usage.output_tokens_details ?? usage.completion_tokens_details ?? {}) as Obj;
+      const n = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+      await context.emit({ type: 'usage', usage: { request_key: `xai:${responseId}`, input_tokens: n(usage.input_tokens ?? usage.prompt_tokens), cached_input_tokens: n(inputDetails.cached_tokens), output_tokens: n(usage.output_tokens ?? usage.completion_tokens), reasoning_tokens: n(outputDetails.reasoning_tokens), ...(usage.cost_in_usd_ticks === undefined ? {} : { cost_ticks: String(usage.cost_in_usd_ticks) }) } });
+      const outputs = (response.output ?? []) as Obj[];
+      const calls = outputs.filter(o => o.type === 'function_call');
+      if (!calls.length) {
+        const text = outputs.filter(o => o.type === 'message').flatMap(o => (o.content ?? []) as Obj[]).filter(c => c.type === 'output_text').map(c => String(c.text ?? '')).join('\n') || String(response.output_text ?? '');
+        if (!text && response.status === 'incomplete') throw new Error('grok_output_incomplete');
+        await context.emit({ type: 'message', text }); return { text, binding: { response_id: responseId } };
+      }
+      previous = typeof response.id === 'string' ? response.id : undefined;
+      // The first input array is retained only for fallback if a provider omits response IDs.
+      if (previous) input.length = 0; else input.push(...outputs);
+      for (const call of calls) {
+        checkAbort(signal);
+        let result: unknown;
+        try {
+          const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments) as Obj : call.arguments as Obj;
+          if (!args || Array.isArray(args) || typeof args !== 'object') throw new Error('invalid_tool_arguments');
+          result = await context.executeTool(String(call.name), args);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          result = { error: (error as Error).message };
+        }
+        input.push({ type: 'function_call_output', call_id: String(call.call_id), output: JSON.stringify(result) });
+      }
+    }
+    throw new Error('grok_round_limit_reached');
+  }
+  private async request(fetcher: typeof fetch, body: Obj, signal: AbortSignal): Promise<Obj> {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const response = await fetcher(`${(this.options.baseUrl ?? 'https://api.x.ai/v1').replace(/\/$/, '')}/responses`, { method: 'POST', headers: { authorization: `Bearer ${this.options.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.any([signal, AbortSignal.timeout(this.options.requestTimeoutMs ?? 120_000)]) });
+      if ((response.status === 429 || response.status >= 500) && attempt < 3) { await response.body?.cancel(); await sleep(Math.min(20_000, 1000 * 2 ** attempt), signal); continue; }
+      if (!response.ok) {
+        await response.body?.cancel();
+        // Do not upload provider response bodies; they can echo credentials or user content.
+        throw new Error(`grok_http_${response.status}`);
+      }
+      return await response.json() as Obj;
+    }
+    throw new Error('grok_retry_exhausted');
+  }
+  async steer(text: string): Promise<void> { this.queuedInputs.push(text); }
+  async stop(): Promise<void> { this.controller?.abort(); }
+}

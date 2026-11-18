@@ -1,0 +1,16 @@
+.git
+node_modules
+**/node_modules
+**/dist
+**/.build
+**/.expo
+**/.gradle
+**/build
+.env
+.env.*
+*.sqlite*
+.super-agent
+.reports
+apps/macos
+apps/android
+apps/node

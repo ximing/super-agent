@@ -1,0 +1,22 @@
+# Execute only on app server (222.128.65.91:11022).
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: ${OIDC_DATABASE_JDBC_URL:?Configure dedicated cloud database}
+      KC_DB_USERNAME: ${OIDC_DATABASE_USER:?Configure dedicated role}
+      KC_DB_PASSWORD: ${OIDC_DATABASE_PASSWORD:?Configure secret on cloud host}
+      KC_HOSTNAME: https://super-agent-auth.aimo.plus
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${OIDC_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${OIDC_ADMIN_PASSWORD:?Configure a random initial admin password}
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "13010:8080"
+    volumes:
+      - ./realms:/opt/keycloak/data/import:ro
+      - ./certs:/opt/keycloak/conf/certs:ro
+    restart: unless-stopped

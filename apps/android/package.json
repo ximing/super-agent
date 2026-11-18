@@ -1,0 +1,33 @@
+{
+  "name": "@super-agent/android",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --android",
+    "android": "expo run:android",
+    "native:generate": "expo prebuild --platform android --no-install",
+    "build": "expo export --platform android --output-dir dist",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "ios": "expo run:ios"
+  },
+  "dependencies": {
+    "expo": "~54.0.0",
+    "expo-auth-session": "~7.0.0",
+    "expo-crypto": "~15.0.0",
+    "expo-secure-store": "~15.0.0",
+    "expo-web-browser": "~15.0.0",
+    "expo-notifications": "~0.32.0",
+    "expo-status-bar": "~3.0.0",
+    "expo-document-picker": "~14.0.8",
+    "expo-file-system": "~19.0.24",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-safe-area-context": "~5.6.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "typescript": "^5.9.3"
+  }
+}

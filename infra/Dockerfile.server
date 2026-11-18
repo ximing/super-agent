@@ -1,0 +1,14 @@
+FROM node:24-bookworm-slim AS build
+RUN corepack enable && corepack prepare pnpm@10.30.3 --activate
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY packages/protocol ./packages/protocol
+COPY apps/control-server ./apps/control-server
+COPY docs/contracts ./docs/contracts
+RUN pnpm install --frozen-lockfile --filter @super-agent/control-server...
+RUN pnpm --filter @super-agent/protocol build && pnpm --filter @super-agent/control-server build
+RUN mkdir -p /data/artifacts && chown -R node:node /data
+ENV NODE_ENV=production
+EXPOSE 8787
+USER node
+CMD ["pnpm", "--filter", "@super-agent/control-server", "start"]

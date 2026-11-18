@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://super-agent.example/contracts/device-message.v1.schema.json",
+  "title": "Super-agent device protocol v1: initial message subset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "message_id", "kind", "sent_at", "payload"],
+  "properties": {
+    "protocol_version": { "const": "1.0" },
+    "message_id": { "$ref": "#/$defs/uuid" },
+    "kind": { "enum": ["run.start", "command.ack", "run.state", "usage.report"] },
+    "sent_at": { "type": "string", "format": "date-time" },
+    "payload": { "type": "object" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": { "const": "run.start" },
+        "payload": { "$ref": "#/$defs/runStart" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "command.ack" },
+        "payload": { "$ref": "#/$defs/commandAck" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "run.state" },
+        "payload": { "$ref": "#/$defs/runState" }
+      }
+    },
+    {
+      "properties": {
+        "kind": { "const": "usage.report" },
+        "payload": { "$ref": "#/$defs/usageReport" }
+      }
+    }
+  ],
+  "$defs": {
+    "uuid": { "type": "string", "format": "uuid" },
+    "positiveSequence": { "type": "string", "pattern": "^[1-9][0-9]*$", "maxLength": 20 },
+    "nullableTokenCount": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "engine": { "enum": ["codex", "grok"] },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engine", "model_id", "local_profile_id"],
+      "properties": {
+        "engine": { "$ref": "#/$defs/engine" },
+        "model_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "local_profile_id": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "runStart": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "command_id", "tenant_id", "task_id", "run_id", "device_id",
+        "lease_epoch", "scope_version_id", "capability_generation", "runtime",
+        "expires_at", "lease_valid_for_ms", "checkpoint_id", "budget_grant_id"
+      ],
+      "properties": {
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "tenant_id": { "$ref": "#/$defs/uuid" },
+        "task_id": { "$ref": "#/$defs/uuid" },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "lease_epoch": { "$ref": "#/$defs/positiveSequence" },
+        "scope_version_id": { "$ref": "#/$defs/uuid" },
+        "capability_generation": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "runtime": { "$ref": "#/$defs/runtime" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "lease_valid_for_ms": { "type": "integer", "minimum": 1000, "maximum": 45000 },
+        "checkpoint_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "budget_grant_id": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "commandAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "device_id", "status"],
+      "properties": {
+        "command_id": { "$ref": "#/$defs/uuid" },
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "status": { "enum": ["stored", "duplicate", "rejected"] },
+        "reason_code": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "runState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device_id", "run_id", "lease_epoch", "producer_id", "producer_seq", "state", "summary"
+      ],
+      "properties": {
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "lease_epoch": { "$ref": "#/$defs/positiveSequence" },
+        "producer_id": { "$ref": "#/$defs/uuid" },
+        "producer_seq": { "$ref": "#/$defs/positiveSequence" },
+        "state": {
+          "enum": ["starting", "running", "waiting_input", "paused", "succeeded", "failed", "cancelled", "result_unknown"]
+        },
+        "summary": { "type": "string", "maxLength": 500 },
+        "reason_code": { "type": "string", "minLength": 1, "maxLength": 100 }
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "quality", "amount", "currency", "price_version_id"],
+      "properties": {
+        "source": { "enum": ["supplier_reported", "estimated", "unavailable"] },
+        "quality": { "enum": ["provisional", "final", "missing"] },
+        "amount": {
+          "type": ["string", "null"],
+          "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{1,10})?$",
+          "maxLength": 40
+        },
+        "currency": { "type": ["string", "null"], "pattern": "^[A-Z]{3}$" },
+        "price_version_id": { "anyOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "supplier_cost_ticks": { "type": ["string", "null"], "pattern": "^(0|[1-9][0-9]*)$", "maxLength": 30 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "unavailable" } } },
+          "then": {
+            "properties": {
+              "amount": { "type": "null" },
+              "quality": { "const": "missing" },
+              "supplier_cost_ticks": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "amount": { "type": "string" },
+              "currency": { "type": "string" },
+              "quality": { "enum": ["provisional", "final"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "source": { "const": "estimated" } } },
+          "then": { "properties": { "price_version_id": { "$ref": "#/$defs/uuid" } } }
+        }
+      ]
+    },
+    "usageReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device_id", "run_id", "lease_epoch", "producer_id", "producer_seq",
+        "request_key", "usage_revision", "engine", "model_id", "category",
+        "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "cost"
+      ],
+      "properties": {
+        "device_id": { "$ref": "#/$defs/uuid" },
+        "run_id": { "$ref": "#/$defs/uuid" },
+        "lease_epoch": { "$ref": "#/$defs/positiveSequence" },
+        "producer_id": { "$ref": "#/$defs/uuid" },
+        "producer_seq": { "$ref": "#/$defs/positiveSequence" },
+        "request_key": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "usage_revision": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+        "engine": { "$ref": "#/$defs/engine" },
+        "model_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "category": { "enum": ["assistant", "worker", "subagent", "proactive", "memory"] },
+        "input_tokens": { "$ref": "#/$defs/nullableTokenCount" },
+        "cached_input_tokens": { "$ref": "#/$defs/nullableTokenCount" },
+        "output_tokens": { "$ref": "#/$defs/nullableTokenCount" },
+        "reasoning_tokens": { "$ref": "#/$defs/nullableTokenCount" },
+        "cost": { "$ref": "#/$defs/cost" }
+      }
+    }
+  }
+}

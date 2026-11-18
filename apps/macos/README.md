@@ -1,0 +1,51 @@
+# Swift Mac 控制端
+
+原生 SwiftUI/AppKit 应用，最低 macOS 14。模型执行由独立 Mac 节点负责，关闭本窗口不会停止该节点。
+
+## 构建与运行
+
+```sh
+cd apps/macos
+swift test
+bash scripts/build-app.sh
+open 'build/Super Agent.app'
+```
+
+产物是本机架构的 `build/Super Agent.app`，当前脚本为 ad-hoc 本机签名。面向其他电脑分发时需由发布 CI 使用正式 Developer ID 签名并公证；此仓库不包含签名凭据。
+
+默认服务为 `https://super-agent.aimo.plus`，可在登录页改为自己的云端 HTTPS 域名。客户端不会启动服务端、数据库或 Docker。显式本机地址仅用于受控开发测试。
+
+## 已接入的功能
+
+- 云端登录配置；服务器显式开启的开发登录，或系统浏览器 OIDC Authorization Code + PKCE。
+- 产品会话保存在 Keychain，访问 Token 失效时串行刷新；重试复用同一幂等 ID，版本更新带 If-Match。
+- 统一对话、明确任务派发、引擎/模型/执行电脑选择、任务记录、补充要求、暂停/继续/切换/重试/取消。
+- 待处理问题与回答；设备配对认领、主助理/默认电脑设置。
+- 每用户 agent-recall URL 和访问令牌绑定；令牌使用 SecureField，只在保存时发送，成功后清空，不回显。读取、教学、纠错和删除沿用云端隔离 API。
+- 成本来源分类、今日/7天/本月/一年筛选、趋势、按电脑/引擎/任务下钻、预算设置。不可核算订阅金额不视为零。
+- 候选记忆显式审核发布；编辑后带版本提交 `status=verified`，刷新列表兼容 Recall 发布后的新 ID。
+- 定时关注规则的创建、启停和删除；周期仅提醒并准备目标，由用户确认后执行。
+- 任务附件和交付物：本机文件选择、对象存储签名上传、完成确认和保存下载；签名 URL 请求不附带产品 Token。
+- 不确定业务结果的人工核对：记录已生效、未生效或仍不确定，并附核对说明。
+- 最新浏览器画面、暂停接管、点击/输入/Enter。坐标为 **Frame 图片自然像素**，携带 frame_id 与 viewport_version；节点将其映射到当前 CSS 视口。
+- 原生系统提醒与 APNs 注册适配器。APNs 需要正式 entitlement、签名和服务端推送配置；ad-hoc 构建不能据此声称已验证关闭应用后的远程送达。
+
+## 视觉与交互
+
+墨蓝 `#182B45` 作为工作内容层级，工作蓝 `#315F9C` 标记当前控制，石板灰文字与浅灰画布承载后台状态。使用原生 SF 字体和窗口导航：左侧助理/任务/待处理/电脑/记忆/定时关注/成本，右侧完整工作区；状态、授权与费用来源在对应对象旁说明，不用演示数据填充空白。
+
+在云端 API 尚未配置或不可达时显示明确连接错误。只有 `/auth/config` 返回可用登录方式后才开放登录按钮。
+
+## 本机验证
+
+- `swift test`：4 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址和未知费用保留。
+- `bash scripts/build-app.sh`：release 可执行应用已构建并进行本机签名。
+- 真实 OIDC、Recall 账号和云端端到端流程取决于用户部署的服务配置，不能由编译通过推定。
+
+离线登录页截图（不会读取已登录内容或调用模型）：
+
+```sh
+'build/Super Agent.app/Contents/MacOS/SuperAgent' --smoke-screenshot "$PWD/build/login.png"
+```
+
+该模式只渲染本应用未登录 NSView 并保存 PNG 后退出，不截取整张用户桌面。

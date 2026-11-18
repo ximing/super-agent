@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "助理工作台",
+    "slug": "personal-super-agent",
+    "scheme": "superagent",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "light",
+    "android": {
+      "package": "com.superagent.control",
+      "permissions": ["INTERNET", "POST_NOTIFICATIONS"]
+    },
+    "plugins": ["expo-secure-store", "expo-web-browser", "expo-notifications", "./plugins/with-wrapper-integrity"],
+    "extra": { "eas": { "projectId": "" } }
+  }
+}

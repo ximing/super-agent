@@ -1,0 +1,27 @@
+{
+  "realm": "super-agent-test",
+  "enabled": true,
+  "displayName": "Super Agent",
+  "registrationAllowed": false,
+  "sslRequired": "external",
+  "clients": [
+    {
+      "clientId": "super-agent-native",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": ["superagent://oauth/callback"],
+      "defaultClientScopes": ["basic", "web-origins", "profile", "email", "roles"],
+      "attributes": {"pkce.code.challenge.method": "S256"},
+      "protocolMappers": [
+        {
+          "name": "super-agent-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {"included.custom.audience": "super-agent-api", "access.token.claim": "true", "id.token.claim": "false"}
+        }
+      ]
+    }
+  ]
+}
