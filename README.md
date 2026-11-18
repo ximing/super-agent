@@ -2,6 +2,8 @@
 
 多用户私人助理工作台。Swift Mac 与 React Native Android 控制端通过云端服务派活，用户自己的 Mac 执行 Codex/Grok、操作浏览器并按需使用云端记忆。
 
+已发布 [0.1.0 预览安装包](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1)，Mac Apple Silicon 与独立 Android APK 可下载；[主分支云端检查](https://github.com/ximing/super-agent/actions/runs/44344213897)全部通过。API 已部署到 `https://super-agent.aimo.plus`。
+
 ## 运行边界
 
 - 云端：PostgreSQL、私有 S3、OIDC、任务/设备/费用服务、GitHub Actions 构建。
