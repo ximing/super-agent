@@ -88,7 +88,7 @@ v0.2.1-preview.1已公开发布，但发布/验签不等同安装后的全部真
 
 ## 记忆、观察证据、运行预算
 
-状态：本轮先收紧三件正确性，再在现有任务、预算和 Recall 上补观察建议、记忆来源和接任检查。没有部署，没有改生产库，没有对公司 Recall 做写入，没有真实模型、真实网站、真机推送或长时间弱网验收。Android 图标和 `docs/design` 仍是其他工作区改动，本轮没有覆盖它们。
+状态：本轮先收紧三件正确性，再在现有任务、预算和 Recall 上补观察建议、记忆来源和接任检查。2026-11-19 已将控制服务镜像 `53f64cf` 部署到 `https://super-agent.aimo.plus`，并用本机 Grok CLI 跑通一条真实任务。没有改生产库结构，没有对公司 Recall 做写入，没有真实网站观察或真机点按。Android 图标和 `docs/design` 仍是其他工作区改动，本轮没有覆盖它们。
 
 已在服务端和协议里落地，并有单元测试或云 TEST：
 
@@ -116,7 +116,7 @@ Mac 的「关注规则」和 Android 的「关注」页可以创建观察规则�
 
 没有新增数据库迁移。001/002/003 未改。新字段放在既有 JSON 文档和事件流里。
 
-当次验证（专用云 `*_test`，没有生产库）：控制服务 `apps/control-server/test/*.test.ts` 为 80/80，0 skip，约 10.5 秒。跨组件 `pnpm test:integration` 为 7/7，0 skip，约 18 秒，包含第二台电脑派发和暂停接管。这两组都在补上测试心跳和带路径的 AbortError 之后通过。上一轮实测的 72/73 和 5/7 不再沿用。Node 35/35，tool-broker 17/17，runtime-grok 16/16，runtime-codex 7/7，protocol 4/4。Android 类型检查通过且 21/21。Mac `swift test` 29/29，应用目标已编译。没有部署，没有真实模型看图，没有真机点按观察规则。
+当次验证（专用云 `*_test`，没有生产库）：控制服务 `apps/control-server/test/*.test.ts` 为 80/80，0 skip，约 10.5 秒。跨组件 `pnpm test:integration` 为 7/7，0 skip，约 18 秒。Node 35/35，tool-broker 17/17，runtime-grok 16/16，runtime-codex 7/7，protocol 4/4。Android 21/21。Mac `swift test` 29/29。生产 API 已切换到镜像 `53f64cf`。本机 Grok CLI 在设备 `6ab0d35b-7634-454f-b828-11315466a39e` 上完成任务 `cc1f0153-b31b-4870-8e9f-273fb23943da`：工作区文件内容为 `VERIFY-GROK-OK`，费用来源为 unavailable 而不是 0，独立验收结论是 `needs_input`，观察规则随后给出一条待确认建议。没有真实网站观察，没有真机点按。
 
 所有本机模型 Key、数据库连接串、设备私钥和 OIDC 管理密码均不在仓库或本文件中。真实配置由被忽略的环境文件和云服务器配置持有。
 
