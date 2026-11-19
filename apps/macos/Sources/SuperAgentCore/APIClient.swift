@@ -45,6 +45,13 @@ public actor APIClient {
         let result: Session = try await request("/auth/exchange", method: "POST", body: ["access_token": .string(accessToken)], authenticated: false)
         try setSession(result); return result
     }
+    /// Read the current server version immediately before revoking; never trust an old UI snapshot.
+    public func revokeDevice(id: String) async throws {
+        let devices: Items<Device> = try await request("/devices")
+        guard let device = devices.items.first(where: { $0.id == id }) else { throw APIError(status: 404, code: "device_not_found", message: "电脑记录已变化，请刷新后重试") }
+        if device.revoked == true { return }
+        let _: JSONValue = try await request("/devices/\(id)", method: "DELETE", version: device.version)
+    }
     public func logout() async {
         let _: JSONValue? = try? await request("/auth/logout", method: "POST", body: [:])
         clearSession()

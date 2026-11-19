@@ -23,8 +23,8 @@ public struct Slots: Codable, Sendable { public let browser: Int; public let wor
 public struct Capabilities: Codable, Sendable { public let generation: Int; public let engines: [EngineCapability]; public let tools: [String]; public let slots: Slots }
 public struct Device: Codable, Identifiable, Sendable {
     public let id: String; public let name: String; public let status: String
-    public let lastSeenAt: String?; public let capabilities: Capabilities; public let version: Int
-    public func supports(_ engine: Engine) -> Bool { capabilities.engines.contains { $0.engine == engine && $0.ready } }
+    public let lastSeenAt: String?; public let capabilities: Capabilities; public let version: Int; public let revoked: Bool?
+    public func supports(_ engine: Engine) -> Bool { revoked != true && capabilities.engines.contains { $0.engine == engine && $0.ready } }
 }
 public struct ExecutionSettings: Codable, Sendable {
     public let defaultEngine: Engine; public let defaultDeviceId: String?; public let assistantDeviceId: String?; public let version: Int

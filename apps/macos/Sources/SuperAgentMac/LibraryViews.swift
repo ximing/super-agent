@@ -8,6 +8,7 @@ struct DevicesView: View {
     @State private var defaultDevice = ""
     @State private var assistant = ""
     @State private var engine: Engine = .codex
+    @State private var revoking: Device?
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
@@ -16,9 +17,13 @@ struct DevicesView: View {
                 if model.devices.isEmpty { EmptyState(icon: "desktopcomputer.badge.plus", title: "还没有连接执行电脑", detail: "在 Mac 安装并运行节点，用上面的配对码把它加入你的助理。") }
                 ForEach(model.devices) { device in
                     VStack(alignment: .leading, spacing: 14) {
-                        HStack { Label(device.name, systemImage: "desktopcomputer").font(.headline); Spacer(); StatusLabel(value: device.status) }
+                        HStack {
+                            Label(device.name, systemImage: "desktopcomputer").font(.headline); Spacer()
+                            if device.revoked == true { Label("已撤销", systemImage: "xmark.shield").font(.caption).foregroundStyle(.secondary) }
+                            else { StatusLabel(value: device.status); Button("撤销电脑", role: .destructive) { revoking = device }.disabled(model.busy) }
+                        }
                         HStack(alignment: .top, spacing: 30) { ForEach(device.capabilities.engines, id: \.engine) { capability in VStack(alignment: .leading, spacing: 5) { Label(capability.engine.rawValue.capitalized, systemImage: capability.ready ? "checkmark.circle.fill" : "exclamationmark.circle").foregroundStyle(capability.ready ? Color.green : Color.secondary); Text(capability.ready ? capability.models.joined(separator: "、") : capability.reason ?? "尚未配置").font(.caption).foregroundStyle(.secondary) } } }
-                        Text("工具：\(device.capabilities.tools.joined(separator: "、"))").font(.caption).foregroundStyle(.secondary)
+                        Text(device.revoked == true ? "云端执行权限已撤销；重新连接需要重新配对。" : "工具：\(device.capabilities.tools.joined(separator: "、"))").font(.caption).foregroundStyle(.secondary)
                     }.padding(20).background(.background, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary))
                 }
                 Divider()
@@ -32,9 +37,19 @@ struct DevicesView: View {
                 Button("保存默认设置") { Task { await model.saveSettings(engine: engine, device: defaultDevice, assistant: assistant) } }.disabled(model.busy)
             }.padding(28)
         }.onAppear { loadSettings() }.onChange(of: model.settings?.version) { _, _ in loadSettings() }
+        .confirmationDialog("撤销这台执行电脑？", isPresented: Binding(get: { revoking != nil }, set: { if !$0 { revoking = nil } }), titleVisibility: .visible) {
+            Button("撤销“\(revoking?.name ?? "此电脑")”", role: .destructive) {
+                guard let device = revoking, !model.busy else { return }
+                revoking = nil
+                Task { await model.revokeDevice(device.id) }
+            }.disabled(model.busy)
+            Button("取消", role: .cancel) { revoking = nil }
+        } message: {
+            Text("将撤销这台电脑的云端执行权限。正在运行的任务可能需要核对结果，重新连接需要重新配对。")
+        }
     }
     private func loadSettings() { engine = model.settings?.defaultEngine ?? .codex; defaultDevice = model.settings?.defaultDeviceId ?? ""; assistant = model.settings?.assistantDeviceId ?? "" }
-    private func devicePicker(_ selection: Binding<String>) -> some View { Picker("电脑", selection: selection) { Text("未设置").tag(""); ForEach(model.devices) { Text($0.name).tag($0.id) } }.labelsHidden() }
+    private func devicePicker(_ selection: Binding<String>) -> some View { Picker("电脑", selection: selection) { Text("未设置").tag(""); ForEach(model.devices.filter { $0.revoked != true }) { Text($0.name).tag($0.id) } }.labelsHidden() }
 }
 struct MemoriesView: View {
     @EnvironmentObject var model: WorkspaceModel

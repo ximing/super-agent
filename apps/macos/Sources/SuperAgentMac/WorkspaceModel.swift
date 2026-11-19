@@ -109,7 +109,7 @@ import SuperAgentCore
             if memorySettings?.configured == true { let memoryList: Items<Memory> = try await api.request("/memories"); memories = memoryList.items }
             else { memories = [] }
             settings = try await api.request("/settings/execution")
-            if selectedDevice.isEmpty { selectedDevice = settings?.defaultDeviceId ?? devices.first?.id ?? ""; selectedEngine = settings?.defaultEngine ?? .codex }
+            if selectedDevice.isEmpty { selectedDevice = settings?.defaultDeviceId ?? devices.first(where: { $0.revoked != true })?.id ?? ""; selectedEngine = settings?.defaultEngine ?? .codex }
             lastSync = Date(); error = nil
         } catch { self.error = error.localizedDescription }
     }
@@ -125,6 +125,7 @@ import SuperAgentCore
     func createTask(_ goal: String) async {
         await operation {
             guard !self.selectedDevice.isEmpty else { throw APIError(status: 0, code: "device_required", message: "先选择执行电脑；可以在电脑页认领已安装的节点") }
+            guard self.devices.first(where: { $0.id == self.selectedDevice })?.revoked != true else { throw APIError(status: 0, code: "device_revoked", message: "此电脑已撤销，请手动选择其他电脑") }
             var body: [String: JSONValue] = ["goal": .string(goal), "engine": .string(self.selectedEngine.rawValue), "device_id": .string(self.selectedDevice)]
             if !self.selectedModelId.isEmpty { body["model_id"] = .string(self.selectedModelId) }
             let _: AgentTask = try await self.api.request("/tasks", method: "POST", body: body)
@@ -134,6 +135,7 @@ import SuperAgentCore
     func action(_ action: String, task: AgentTask, targetEngine: Engine? = nil, targetDevice: String? = nil) async {
         await operation {
             var body: [String: JSONValue] = ["action": .string(action)]
+            if action == "switch", let device = targetDevice, self.devices.first(where: { $0.id == device })?.revoked == true { throw APIError(status: 0, code: "device_revoked", message: "此电脑已撤销，请手动选择其他电脑") }
             if action == "switch", let engine = targetEngine, let device = targetDevice { body["target"] = .object(["engine": .string(engine.rawValue), "device_id": .string(device)]) }
             let _: JSONValue = try await self.api.request("/tasks/\(task.id)/actions", method: "POST", body: body, version: task.version)
             await self.refresh()
@@ -144,6 +146,12 @@ import SuperAgentCore
     }
     func claim(_ code: String) async {
         await operation { let _: JSONValue = try await self.api.request("/device-pairings/claim", method: "POST", body: ["code": .string(code.trimmingCharacters(in: .whitespacesAndNewlines))]); await self.refresh() }
+    }
+    func revokeDevice(_ id: String) async {
+        guard !busy else { return }
+        busy = true; error = nil; defer { busy = false }
+        do { try await api.revokeDevice(id: id); await refresh() }
+        catch { self.error = error.localizedDescription }
     }
     func saveSettings(engine: Engine, device: String, assistant: String) async {
         await operation {

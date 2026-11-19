@@ -106,9 +106,9 @@ struct ExecutionPicker: View {
     var body: some View {
         HStack(spacing: 14) {
             Picker("引擎", selection: $model.selectedEngine) { ForEach(Engine.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) } }.frame(width: 160)
-            Picker("电脑", selection: $model.selectedDevice) { Text("选择执行电脑").tag(""); ForEach(model.devices) { device in Text("\(device.name)（\(AgentStatus.title(device.status))）").tag(device.id) } }.frame(maxWidth: 330)
-            Picker("模型", selection: $model.selectedModelId) { Text("本机默认").tag(""); ForEach(model.devices.first(where: { $0.id == model.selectedDevice })?.capabilities.engines.first(where: { $0.engine == model.selectedEngine })?.models ?? [], id: \.self) { Text($0).tag($0) } }.frame(maxWidth: 230)
-            if let device = model.devices.first(where: { $0.id == model.selectedDevice }), !device.supports(model.selectedEngine) { Label("此电脑尚未配置该引擎", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
+            Picker("电脑", selection: $model.selectedDevice) { Text("选择执行电脑").tag(""); ForEach(model.devices.filter { $0.revoked != true }) { device in Text("\(device.name)（\(AgentStatus.title(device.status))）").tag(device.id) } }.frame(maxWidth: 330)
+            Picker("模型", selection: $model.selectedModelId) { Text("本机默认").tag(""); ForEach(model.devices.first(where: { $0.id == model.selectedDevice && $0.revoked != true })?.capabilities.engines.first(where: { $0.engine == model.selectedEngine })?.models ?? [], id: \.self) { Text($0).tag($0) } }.frame(maxWidth: 230)
+            if let device = model.devices.first(where: { $0.id == model.selectedDevice }), !device.supports(model.selectedEngine) { Label(device.revoked == true ? "此电脑已撤销，请手动选择其他电脑" : "此电脑尚未配置该引擎", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
         }.onChange(of: model.selectedEngine) { _, _ in model.selectedModelId = "" }.onChange(of: model.selectedDevice) { _, _ in model.selectedModelId = "" }
     }
 }

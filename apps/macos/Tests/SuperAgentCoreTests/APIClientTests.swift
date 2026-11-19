@@ -66,4 +66,26 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(called)
     }
 
+    func testDeviceRevocationFetchesFreshVersionAndRejectsConflictingUpdate() async throws {
+        let client = makeClient(); try await client.setSession(session())
+        var calls = 0
+        StubProtocol.handler = { request in
+            calls += 1
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-access")
+            if request.httpMethod == "GET" {
+                XCTAssertEqual(request.url?.path, "/v1/devices")
+                return (200, Data("{\"items\":[{\"id\":\"test-device\",\"name\":\"Fixture\",\"status\":\"online\",\"last_seen_at\":null,\"capabilities\":{\"generation\":1,\"engines\":[],\"tools\":[],\"slots\":{\"browser\":1,\"worker\":1}},\"version\":42}]}".utf8))
+            }
+            XCTAssertEqual(request.httpMethod, "DELETE")
+            XCTAssertEqual(request.url?.path, "/v1/devices/test-device")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "If-Match"), "\"42\"")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Content-Type"))
+            XCTAssertNil(request.httpBody)
+            return (409, Data("{\"error\":{\"code\":\"version_conflict\",\"message\":\"Refresh required\"}}".utf8))
+        }
+        do { try await client.revokeDevice(id: "test-device"); XCTFail("Conflicting revocation must fail rather than silently retry") }
+        catch let error as APIError { XCTAssertEqual(error.status, 409); XCTAssertEqual(error.code, "version_conflict") }
+        XCTAssertEqual(calls, 2)
+    }
+
 }

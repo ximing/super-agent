@@ -17,6 +17,7 @@
 - **真实 Codex 推理与工具路径已验证**：本机既有系统代理下 28.476 秒完成 1 次受限只读工具、`item/tool/call` 回执与固定结果，输出 9 Token。此前直连的流中断及最终成功证据都保留在 `spikes/`，不把失败探测写成成功。
 - 节点自动继承本机代理（显式 env > 本机配置 > 系统），Node 24.14+ 原生 fetch 覆盖 Grok 路径；后台 PATH、已有 CSI 幂等启动、无正文 DELETE、附件传输边界均测试。当前开发机没有安装永久 Worker 自启动。
 - 公网 TEST 服务完成真实 OIDC → Ed25519 配对 → NodeAgent/SQLite/FakeRuntime → 实际 Recall 只读检索 → checkpoint/费用 → 重启去重及真实报告重放。四阶段全部通过，临时绑定/设备/会话/Keycloak 用户/本机身份均已清理。
+- 用户授权的当前 Mac 临时生产验收已通过：真实原生客户端认领 → 云端派发 → 前台 NodeAgent/SQLite → 本机 Codex `gpt-6.2-sol` 单回合 → 真实 ToolBroker `files_read` 一次 → 正确标记回传 → 客户端已完成与成本页。输入 15,706、缓存输入 15,488、输出 11 Token；订阅金额如实标未知。验收 driver 仅预置自建文件、限制工具/路径/次数，不以固定回答替代模型或 ToolBroker；没有访问业务网站。Run 成功后前台已停止，Mac 通过正常用户 API 撤销临时设备，未安装自启动。此证据不等于业务网站、Grok、浏览器或完整团队调度已通过验收。
 
 ## 云资源
 
@@ -28,8 +29,8 @@
 | `super-agent-test` / `super-agent-prod` S3 | 已创建/验证，Put/Get/Delete smoke test 通过 |
 | Recall | 每用户独立加密绑定、既有记录读取、候选审核发布与搜索适配已实现；真实账号绑定/列表与隔离测试已通过 |
 | OIDC | 云端 Keycloak、test/prod realms、native PKCE client、公网 HTTPS 与真实 Token/产品会话交换已验证 |
-| GitHub | [代码 61639c3 的完整检查](https://github.com/ximing/super-agent/actions/runs/44344213897)全绿；[同版本服务镜像](https://github.com/ximing/super-agent/actions/runs/44344248181)已由云 CI 发布 GHCR |
-| 安装包 | [v0.1.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1)已公开发布：Mac arm64 ZIP 与独立 Android APK |
+| GitHub | [代码 ffecb56 的完整检查](https://github.com/ximing/super-agent/actions/runs/44444519702)全绿；服务代码未变，[61639c3 服务镜像](https://github.com/ximing/super-agent/actions/runs/44344248181)仍为当前生产版本 |
+| 安装包 | [v0.1.1-preview.1 Mac 登录改进包](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.1)已由云 CI 构建并公开发布；Android 沿用 [v0.1.0-preview.1 APK](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1) |
 | API | `https://super-agent.aimo.plus` 已切换 `super_agent_prod` / prod S3 / prod OIDC，容器 healthy；生产角色非 superuser/非 BYPASSRLS，任务 FORCE RLS，未授权401、开发登录404 |
 | 本地 Docker | 用户确认全清后执行；当前 Colima 的容器/镜像/卷均为 0，默认 context 未发现第二个可用引擎 |
 
@@ -38,7 +39,7 @@
 ## 仍需验收
 
 - 正式执行 Mac 安装配对、目标 Android 真机操作；当前 Mac 生产账号已完成用户首次改密和登录，工作台现场已核对。
-- 真实节点连接云端 API 后的完整任务、跨电脑切换、浏览器画面与人工接管。
+- 长期安装节点的真实业务任务、跨电脑切换、浏览器画面与人工接管；当前临时 Mac 的单回合受限读文件链路已通过。
 - Grok 实际账号调用、业务网站样本、厂商推送和签名配置。
 
 ## 与完整产品目标的实现差距
@@ -55,7 +56,7 @@
 | 图片与画面 | 人可以看网页截图，模型用 DOM/文本工具操作 | 截图/图片的模型视觉输入链路；完整桌面、其他 App、视频、完整远程键鼠仍为后续范围 |
 | 跨机恢复 | 新 Run、检查点与同任务云附件可交接 | 完整环境预检、文件清单自动恢复、无人故障接任、可靠的原生会话恢复；重启后未知执行仍需核对 |
 | 进度展示 | 状态、Run 摘要、提问、画面和结果 | 工具步骤时间线、SubAgent 树及面向业务的阶段进度 |
-| 安装与管理 | CLI 安装、配对码、能力显示、手动 LaunchAgent | 图形化安装配置向导、后台服务管理、自动更新；客户端设备撤销和会话管理入口尚未接 API |
+| 安装与管理 | CLI 安装、配对码、能力显示、手动 LaunchAgent；Mac 设备撤销已接 API 并实测 | 图形化安装配置向导、后台服务管理、自动更新；Android 设备撤销和两端会话管理入口尚未接 API |
 | 关闭 App 后通知 | APNs/Expo 注册适配、运行中的轮询提醒 | 服务端通知生产/投递 outbox、重试和 APNs/FCM 发送闭环，不能归为只差厂商密钥 |
 
 另行区分：Grok 真实账号、公司网站、真实多 Mac 接续、Android 真机及长时间弱网运行是尚未完成的验收；正式签名/公证是发布配置工作。它们不等于上述未实现功能。
@@ -66,4 +67,4 @@
 
 所有本机模型 Key、数据库连接串、设备私钥和 OIDC 管理密码均不在仓库或本文件中。真实配置由被忽略的环境文件和云服务器配置持有。
 
-生产上线前已备份并由 owner 首迁；生产环境只进行健康、配置、角色与 RLS 的只读验证，没有将生产库用作集成测试。开发电脑未安装长期 Worker；用户将在当前验证后安装到独立 Mac。正式安装说明见 [开始使用](getting-started.md)。
+生产上线前已备份并由 owner 首迁；最初仅进行健康、配置、角色与 RLS 的只读验证，随后按用户明确授权进行了上述单个原生客户端真实任务验收，任务与用量保留在本人账号中，临时设备已撤销；没有将生产库用作自动化集成测试。开发电脑未安装长期 Worker；用户将在当前验证后安装到独立 Mac。正式安装说明见 [开始使用](getting-started.md)。

@@ -40,6 +40,7 @@ struct SchedulesView: View {
     private func load() async { do { let result: Items<Schedule> = try await model.api.request("/schedules"); rules = result.items } catch { model.error = error.localizedDescription } }
     private func create() async {
         await model.operation {
+            guard model.devices.first(where: { $0.id == model.selectedDevice })?.revoked != true else { throw APIError(status: 0, code: "device_revoked", message: "此电脑已撤销，请手动选择其他电脑") }
             guard let interval = Int(minutes), (5...525600).contains(interval) else { throw APIError(status: 0, code: "schedule_interval", message: "间隔应为 5–525600 的整数分钟") }
             let _: Schedule = try await model.api.request("/schedules", method: "POST", body: ["title": .string(title), "goal": .string(goal), "engine": .string(model.selectedEngine.rawValue), "device_id": .string(model.selectedDevice), "interval_minutes": .number(Double(interval))])
             editing = false; title = ""; goal = ""; await load()
