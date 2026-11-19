@@ -32,7 +32,7 @@
 - 节点 run 专用请求都发 `Authorization: Bearer <device token>` 加 `X-Run-Ticket: <run ticket>`；主助理请求加 `X-Assistant-Epoch`。
 - POST `/node/memory/search {query,limit?,types?,site?}` -> `{items:Memory[]}`；POST `/node/memory/read {id}` -> Memory；POST `/node/memory/proposals {title,content,type,site?,sources?}` -> Memory。
 - POST `/node/runs/:id/questions {text,options?}` -> Question；节点 renew control 可返回 `{action:'answer',text}`。
-- POST `/node/runs/:id/checkpoint {checkpoint}` 要求有效 Run ticket、epoch/租约且 Run 仍 active/stopping；首个 completed 内容 hash 冻结，同内容重放返回原 ID，不允许替换已交付快照；POST `/node/runs/:id/frames` body Frame；GET `/runs/:id/frame` 返回本人最新 Frame 或 404。
+- POST `/node/runs/:id/checkpoint {checkpoint}` 要求有效 Run ticket、epoch/租约且 Run 仍 active/stopping；首个 completed 内容 hash 冻结，同内容重放返回原 ID，不允许替换已交付快照；POST `/node/runs/:id/frames` body Frame；GET `/runs/:id/frame` 返回本人最新 Frame 或 404；授权Run有效时，即使首帧尚未产生，匹配当前登录session且未关闭的view也先提交30秒续期，再返回404。S3画面读取在租户事务外执行，返回Frame白名单，不返回object_key。
 - POST `/runs/:id/views {}` 开启按需采集，DELETE `/views/:id` 关闭；POST `/views/:id/control {}` 请求暂停与接管；POST `/views/:id/inputs {frame_id,viewport_version,type,x?,y?,text?,keys?}`；DELETE `/views/:id/control`。
 - 接管输入 x/y 为原始截图像素；节点按实际截图尺寸与 CSS viewport 换算。拒绝过期帧、错误 viewport_version、越界坐标和已改变的窗口尺寸。
 - 主助理：POST `/assistant/lease/claim {}`、`/assistant/lease/renew {epoch}` -> `{epoch,lease_valid_for_ms}`；GET `/assistant/inbox` -> `{items:Message[]}`；POST `/assistant/plans {source_message_id}`（或互斥的 `{source_event_id}`） -> `{id,state,tasks:Task[]}`；POST `/assistant/plans/:id/commit {items:[{item_key,title,goal,engine,device_id}]}`；POST `/assistant/messages {source_message_id,content,task_id?}`。

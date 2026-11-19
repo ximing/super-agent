@@ -291,7 +291,26 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     if(config.s3){const key=`frames/${tx.tenant}/${run.id}/${frame.frame_id}`;const upload=await fetch(signObject(config.s3,'PUT',key),{method:'PUT',headers:{'content-type':mime},body:bytes,signal:AbortSignal.timeout(10000)});if(!upload.ok)throw new ApiError(503,'frame_upload_failed','云端画面暂时无法保存',true);frame.object_key=key;frame.mime=mime;}else frame.image_base64=b.image_base64;
     await tx.put('frames',frame,run.id);return{status:'stored'};
   });
-  route('GET','/runs/:id/frame','client',async(r,p,tx)=>{const run=await tx.need('runs',uuid(params(r).id));for(const view of (await tx.all('views')).filter(v=>v.run_id===run.id&&v.client_session===p.session&&v.state!=='closed'))await tx.put('views',{...view,expires_at:expires(30000)});const frame=await tx.need('frames',run.id);if(frame.object_key){if(!config.s3)throw new ApiError(503,'storage_not_configured','云端画面存储配置不可用');const response=await fetch(signObject(config.s3,'GET',frame.object_key),{signal:AbortSignal.timeout(10000)});if(!response.ok)throw new ApiError(503,'frame_unavailable','云端画面暂时不可用',true);return{frame_id:frame.frame_id,width:frame.width,height:frame.height,captured_at:frame.captured_at,viewport_version:frame.viewport_version,tab_id:frame.tab_id,image_base64:Buffer.from(await response.arrayBuffer()).toString('base64')};}return frame;});
+  app.get('/v1/runs/:id/frame',async r=>{
+    const p=await authenticate(r);auth.client(p);
+    // A missing first frame is a normal poll result. Commit the viewer heartbeat
+    // before producing its 404, so waiting for the browser cannot expire capture.
+    const frame=await store.tenant(p.tenant,async tx=>{
+      const run=await tx.need('runs',uuid(params(r).id));
+      for(const view of (await tx.all('views')).filter(v=>v.run_id===run.id&&v.client_session===p.session&&v.state!=='closed'))await tx.put('views',{...view,expires_at:expires(30000)});
+      return tx.get('frames',run.id);
+    });
+    if(!frame)throw new ApiError(404,'not_found','画面不存在');
+    const result={frame_id:frame.frame_id,width:frame.width,height:frame.height,captured_at:frame.captured_at,viewport_version:frame.viewport_version,tab_id:frame.tab_id};
+    if(frame.object_key){
+      if(!config.s3)throw new ApiError(503,'storage_not_configured','云端画面存储配置不可用');
+      // Object network I/O must not hold the tenant transaction or its locks.
+      const response=await fetch(signObject(config.s3,'GET',frame.object_key),{signal:AbortSignal.timeout(10000)});
+      if(!response.ok)throw new ApiError(503,'frame_unavailable','云端画面暂时不可用',true);
+      return{...result,image_base64:Buffer.from(await response.arrayBuffer()).toString('base64')};
+    }
+    return{...result,image_base64:frame.image_base64};
+  });
   route('POST','/runs/:id/views','client',async(r,p,tx)=>{const run=await tx.need('runs',uuid(params(r).id));const view=await tx.put('views',{run_id:run.id,device_id:run.device_id,client_session:p.session,state:'viewing',expires_at:expires(30000),control_state:'none'});await queueView(tx,view,'view.start');return{id:view.id,state:view.state,poll_url:`/v1/runs/${run.id}/frame`};});
   route('DELETE','/views/:id','client',async(r,p,tx)=>{const view=await tx.need('views',uuid(params(r).id));if(view.client_session!==p.session)throw new ApiError(404,'not_found','查看会话不存在');await tx.put('views',{...view,state:'closed',control_requested:false,control_state:'none'});if(view.control_requested)await queueView(tx,view,'view.control',{enabled:false});await queueView(tx,view,'view.stop');return{status:'closed'};});
   route('POST','/views/:id/control','client',async(r,p,tx)=>{

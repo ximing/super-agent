@@ -1,14 +1,14 @@
 # 实施状态
 
-更新：2026-11-19。此文件区分代码、测试与部署，不将单元测试通过等同于生产就绪。**本批次团队 DAG、独立交付验收、证据快照、工具时间线及通知 outbox 已实现并通过云 TEST；尚未部署生产，当前生产仍为 61639c3 基线。**
+更新：2026-11-19。此文件区分代码、测试与部署，不将单元测试通过等同于生产就绪。**本批次团队 DAG、独立交付验收、证据快照、工具时间线及通知 outbox 已实现并通过云 TEST；已部署生产镜像 0211b3a9，002/003 迁移完成；真实业务与通知真机送达验收另列。**
 
 ## 当前已验证
 
 - 公共协议包可构建，状态迁移与金额/未知费用 4 项测试通过。
 - Mac 节点及两个 Runtime、ToolBroker 均可构建；已验证文件路径与符号链接越界、浏览器独占、Codex JSON-RPC、Grok 本地工具循环、取消、SQLite 去重与重启不重放。
 - 真实本机 Codex 0.170.0 只读探测通过：初始化、模型列表、只读 thread 创建/归档和 dynamicTools 定义接受；未因此启动付费模型回合。
-- 控制服务 typecheck/build 通过；最终服务端 **40/40、0 fail、0 skip**（25.35秒），显式加载专用云 TEST 配置，使用非 owner 应用角色/独立 owner 迁移及私有测试 S3。覆盖隔离、签名重放、目标确认、费用去重、撤销、Recall 隔离、接管、迁移 ledger/锁、DAG/独立验收/取消传播、不同 envelope 的取消复活与证据替换拒绝、真实对象冻结、通知 outbox/过时抑制/HTTP/API/慢 provider 不阻塞派发。数据库连接故障返回可重试503。
-- 最新跨组件云测试由协调者完整运行 **6/6 通过**；随后新增提案成功而usage传输503的持久化回归，定向 **1/1 通过**（合并7项套件尚待CI确认），使用真实 NodeAgent/SQLite/Fastify 与云 PG；模型使用明确 FakeRuntime，CSI 使用明确 mock。覆盖聊天确认/重启去重/澄清、暂停接管与自然像素换算，以及团队执行、独立 reviewer 和事件恢复路径；不将 FakeRuntime 写成真实 Grok 或业务验收。
+- 控制服务 typecheck/build 通过；首帧续期修复后服务端 **41/41、0 fail、0 skip**（28.18秒），显式加载专用云 TEST 配置，使用非 owner 应用角色/独立 owner 迁移及私有测试 S3。覆盖隔离、签名重放、目标确认、费用去重、撤销、Recall 隔离、接管、迁移 ledger/锁、DAG/独立验收/取消传播、不同 envelope 的取消复活与证据替换拒绝、真实对象冻结、通知 outbox/过时抑制/HTTP/API/慢 provider 不阻塞派发。数据库连接故障返回可重试503。
+- 跨组件云CI已完整 **7/7通过、0skip**（此前协调者完整6/6加新增usage传输503定向1/1也均通过），使用真实 NodeAgent/SQLite/Fastify 与云 PG；模型使用明确 FakeRuntime，CSI 使用明确 mock。覆盖聊天确认/重启去重/澄清、暂停接管与自然像素换算，以及团队执行、独立 reviewer 和事件恢复路径；不将 FakeRuntime 写成真实 Grok 或业务验收。
 - Android 最新 typecheck 与 **12/12 客户端测试**通过，覆盖设备撤销、步骤隐私、任务关系及交付证据；先前基础运行的5项 API/安全配置测试和763 modules Hermes JS 导出为历史证据。独立 release APK 已由最新 GHA 构建通过，CI 和下载后均核验内嵌 Hermes 字节码、不依赖 Metro，APK 签名校验通过；包约 56 MiB，Android 7+。内部测试签名与正式发布签名分开。
 - Swift 最新编译与 **17/17 测试**通过，覆盖登录回调、设备撤销、步骤、团队关系和交付核对；先前9项 XCTest、release appbundle 与本机签名为历史已通过证据。云 CI 最终安装包已在本机启动并保留产品登录会话，已撤销设备不会作为执行目标。正式分发签名/公证尚需用户 Apple 开发者配置。
 - 真实云端 OIDC S256 授权、callback state、Token 交换、JWT 签名/audience、产品会话与注销撤销通过；临时 Keycloak 测试用户已删除。已修复 Keycloak 26 client 默认 scope 缺 basic 导致无 sub 的配置问题。
@@ -20,7 +20,7 @@
 - 用户授权的当前 Mac 临时生产验收已通过：真实原生客户端认领 → 云端派发 → 前台 NodeAgent/SQLite → 本机 Codex `gpt-6.2-sol` 单回合 → 真实 ToolBroker `files_read` 一次 → 正确标记回传 → 客户端已完成与成本页。输入 15,706、缓存输入 15,488、输出 11 Token；订阅金额如实标未知。验收 driver 仅预置自建文件、限制工具/路径/次数，不以固定回答替代模型或 ToolBroker；没有访问业务网站。Run 成功后前台已停止，Mac 通过正常用户 API 撤销临时设备，未安装自启动。此为新增独立验收流程上线前的基础链路证据，不等于业务网站、Grok、浏览器或完整团队调度已通过验收。
 - 正式远程 Mac 已由用户批准配对并前台在线；原生工作台已核实保存默认 Grok、默认执行电脑与主助理电脑。用户明确批准将该 Mac 的 Recall 绑定导入本人生产账号，已显示连接；临时导入文件已删除、PAT 未进入仓库/日志。这些是配置与连接证据，真实 Grok 任务及新团队验收仍待上线后验证。
 
-主助理规划恢复新增保守边界：模型调用前先在本机journal持久记录running，usage回执实时落盘；失败保存通用回复并回执消费，不自动再次发起同一模型工作。重启发现未决running时要求用户明确重发，不因inbox重放或传输重试重复调用；空模型配置按configured-default记账。该路径已包含在协调者完整6项回归中；随后新增提案成功但usage传输503时先持久化再补传的定向回归1/1通过，未将两次运行冒充一次合并7项套件结果。
+主助理规划恢复新增保守边界：模型调用前先在本机journal持久记录running，usage回执实时落盘；失败保存通用回复并回执消费，不自动再次发起同一模型工作。重启发现未决running时要求用户明确重发，不因inbox重放或传输重试重复调用；空模型配置按configured-default记账。该路径已包含在协调者完整6项回归中；随后新增提案成功但usage传输503时先持久化再补传的定向回归1/1通过，最新云CI再完整运行7/7通过。
 
 ## 云资源
 
@@ -28,19 +28,26 @@
 | --- | --- |
 | `super_agent_test` / `super_agent_prod` | 已创建，每环境独立 owner/service；service 非 superuser、非 BYPASSRLS |
 | PostgreSQL TLS | 从已认证 SSH 获取证书并固定信任；连接验证通过，未关闭全局 TLS 校验 |
-| test 迁移与隔离测试 | 001/002/003 已由独立 owner 应用并冻结，40项服务端测试全通过；prod 不做自动化集成测试 |
+| 迁移与隔离 | TEST 001/002/003 已冻结、首帧修复后41项服务端测试通过；生产先备份并核对可恢复目录，再由独立 owner 应用002/003成功，未在prod运行集成测试 |
 | `super-agent-test` / `super-agent-prod` S3 | 已创建/验证，Put/Get/Delete smoke test 通过 |
 | Recall | 每用户独立加密绑定、既有记录读取、候选审核发布与搜索适配已实现；真实账号绑定/列表与隔离测试已通过 |
 | OIDC | 云端 Keycloak、test/prod realms、native PKCE client、公网 HTTPS 与真实 Token/产品会话交换已验证 |
-| GitHub | [代码 ba2dcc0 的完整检查](https://github.com/ximing/super-agent/actions/runs/44446095351)全绿；服务代码未变，[61639c3 服务镜像](https://github.com/ximing/super-agent/actions/runs/44344248181)仍为当前生产版本 |
+| GitHub | 实现提交0211b3a9（后续文档6ba4e91）；[Cloud checks](https://github.com/ximing/super-agent/actions/runs/44459686631)的TypeScript、cloud-integration、macOS、Android四job全部成功。CI日志确认跨组件完整7/7、0skip；服务端40项中39pass/1skip（CI未配置专用测试S3，真实对象case显式跳过），该发布基线本机显式云TEST+私有S3为40/40；首帧修复新增回归后本机云TEST为41/41，二者不混同 |
+| 生产镜像 | [云端镜像构建/发布及归档](https://github.com/ximing/super-agent/actions/runs/44459706033)成功，0211b3a9镜像云到云传输并校验归档SHA256后加载；生产容器healthy，无本地镜像构建/拉取 |
 | 安装包 | [v0.1.1-preview.2 Mac 登录与设备管理包](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.2)已由云 CI 构建并公开发布，本机实测会话恢复；Android 沿用 [v0.1.0-preview.1 APK](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1) |
-| 本批次团队/通知/内容冻结 | 代码、TEST schema 和回归完成；尚未部署生产，厂商推送凭据与真实设备送达未验收 |
-| API | `https://super-agent.aimo.plus` 已切换 `super_agent_prod` / prod S3 / prod OIDC，容器 healthy；生产角色非 superuser/非 BYPASSRLS，任务 FORCE RLS，未授权401、开发登录404 |
+| 本批次团队/通知/内容冻结 | 代码/TEST回归与生产部署完成；应用角色仍非superuser/非BYPASSRLS，Task/review/push FORCE RLS已核对。厂商推送凭据与实际设备送达未验收 |
+| API | `https://super-agent.aimo.plus` 已切换 `super_agent_prod` / prod S3 / prod OIDC，0211b3a9容器healthy；/ready为200，任务与通知设置无凭证为401、开发登录404；生产角色非superuser/非BYPASSRLS，Task/review/push FORCE RLS |
 | 本地 Docker | 用户确认全清后执行；当前 Colima 的容器/镜像/卷均为 0，默认 context 未发现第二个可用引擎 |
 
 现有 PostgreSQL 没有安装 vector 系统扩展。记忆已改为复用 agent-recall，不为此修改既有数据库服务或另建向量基础设施。
 
+## 首帧等待回归（生产0211b3a9之后）
+
+真实工作台验收发现：查看先于浏览器启动时，首次GET画面404导致同事务中的查看续期回滚，原30秒后订阅关闭。代码现将续期提交与缺帧404分开，并把S3下载移出事务；云TEST用可控时钟验证+20秒404续期、+35秒首帧仍接受，同时拒绝外租户续期及关闭会话重启。定向及完整回归均通过，完整服务端41/41、0skip，typecheck/build通过。该修复尚待新镜像发布，不把0211b3a9写成已包含修复。
+
 ## 仍需验收
+
+本批次新安装包尚未发布；当前公开安装包仍为上表预览版本。协调者正在用原生工作台验收正式Grok Worker，未收到最终结果前不记真实任务成功。
 
 - 正式执行 Mac 已完成配对和默认 Grok/电脑选择，尚需真实任务、长期后台运行与目标 Android 真机验收；当前 Mac 生产账号已完成首次改密和登录。
 - 长期安装节点的真实业务任务、跨电脑切换、浏览器画面与人工接管；当前临时 Mac 的单回合受限读文件链路已通过。
@@ -48,11 +55,11 @@
 
 ## 与完整产品目标的实现差距
 
-2026-11-19 按本批次源码与云 TEST 复核。下表“已实现”指当前代码，不表示旧生产镜像已包含；真实业务验收、部署和发布配置另列。
+2026-11-19 按本批次源码与云 TEST 复核。下表“已实现”指当前代码，本批次服务端已随0211b3a9上线；新客户端安装包发布、真实业务验收和厂商配置另列。
 
 | 能力 | 已有基础 | 尚未实现或尚未闭环 |
 | --- | --- | --- |
-| 多 Agent 团队 | 计划归属、父子 Task、依赖 DAG/拓扑放行、失败阻塞/取消传播、持久 Coordinator 事件与汇总/待确认再规划，云 TEST 已验证 | 生产部署及真实多 Mac 业务验收；Codex 原生 multi_agent 当前关闭，产品层 Task 图不冒充原生 Agent/Run 树 |
+| 多 Agent 团队 | 计划归属、父子 Task、依赖 DAG/拓扑放行、失败阻塞/取消传播、持久 Coordinator 事件与汇总/待确认再规划，云 TEST 已验证 | 真实多 Mac 业务验收；Codex 原生 multi_agent 当前关闭，产品层 Task 图不冒充原生 Agent/Run 树 |
 | 交付验收 | Run 完成→awaiting_review，独立只读 reviewer/人工逐条标准核对，固定 checkpoint 与不可旧 PUT 改写的产物，legacy 明确未验证 | 真实模型审核质量、公司网站业务状态的独立证据与人工验收；不能核实转 needs_input，不自动重做副作用 |
 | 主动性 | 固定间隔提醒、待确认方案；通知自身的时区/跨午夜/DST 静默时段已实现 | 网站/系统事件观察、条件触发、复杂日历/时区调度规则、个性化建议和持续偏好学习 |
 | 记忆学习与治理 | 本人 Recall 绑定、搜索/读写/版本、候选人工审核发布 | 自动复盘、结构化事实/推断与证据验证、冲突/过期处理、活跃 Run 知识失效广播、节点有界缓存与离线 stale；任务级记忆范围也未完整强制过滤 |
@@ -61,13 +68,13 @@
 | 跨机恢复 | 新 Run、检查点与同任务云附件可交接 | 完整环境预检、文件清单自动恢复、无人故障接任、可靠的原生会话恢复；重启后未知执行仍需核对 |
 | 进度展示 | 状态、摘要、提问、画面/结果、安全工具步骤时间线；团队与验收 DTO 已实现 | 新客户端安装包及真实团队展示验收；原生 SubAgent 树及更细业务阶段进度 |
 | 安装与管理 | CLI 安装、配对码、能力显示、手动 LaunchAgent；Mac 设备撤销已实测，Android 设备撤销已接API并通过客户端测试 | 图形化安装配置向导、后台服务管理、自动更新；两端会话管理入口及Android真机撤销验收 |
-| 关闭 App 后通知 | APNs/Expo 服务端发送、持久 outbox/claim、回执/退避/失效 token、账号转移/注销隔离与过时抑制已实现并通过云 TEST/传输 mock | 生产部署、真实厂商凭据/签名、Mac/Android 关闭应用与弱网送达；无独立直连 FCM/国内厂商适配，provider 接受不等于设备显示 |
+| 关闭 App 后通知 | APNs/Expo 服务端发送、持久 outbox/claim、回执/退避/失效 token、账号转移/注销隔离与过时抑制已实现并通过云 TEST/传输 mock | 真实厂商凭据/签名、Mac/Android 关闭应用与弱网送达；无独立直连 FCM/国内厂商适配，provider 接受不等于设备显示 |
 
 另行区分：Grok 真实账号、公司网站、真实多 Mac 接续、Android 真机及长时间弱网运行是尚未完成的验收；正式签名/公证是发布配置工作。它们不等于上述未实现功能。
 
 登录复测：本机 `ASWebAuthenticationSession` 请求已启动但未弹窗，系统交接根因尚未确认。Mac 新增显式“改用浏览器登录”，复用 PKCE 并严格校验、一次性消费回调；用户已沿此路径完成首次改密和生产登录，现场核对已进入真实工作台。新增阶段提示、取消与超时；此前连同设备撤销的9项Swift测试通过；本批次新增团队/验收等覆盖后为17/17。身份配置接口另曾出现 5 秒后返回不完整配置的间歇降级，仍需补可靠性处理；不将备用路径成功等同于原系统窗口问题已解决。
 
-首版定时关注支持创建/启停/删除，触发后提醒并准备待确认目标，确认后执行。应用前台用持久 REST 增量轮询；尚未实现 WSS；服务端厂商推送代码和 TEST 已完成，但生产部署及实际设备送达尚未验收，不声称应用关闭后已经可收到通知。
+首版定时关注支持创建/启停/删除，触发后提醒并准备待确认目标，确认后执行。应用前台用持久 REST 增量轮询；尚未实现 WSS；服务端厂商推送代码、TEST和生产部署已完成，但真实厂商配置及实际设备送达尚未验收，不声称应用关闭后已经可收到通知。
 
 所有本机模型 Key、数据库连接串、设备私钥和 OIDC 管理密码均不在仓库或本文件中。真实配置由被忽略的环境文件和云服务器配置持有。
 
