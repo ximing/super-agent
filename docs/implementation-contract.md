@@ -58,6 +58,14 @@
 - POST `/assistant/events/:id/complete {message?,review_id?,follow_up_plan_id?}` 原子消费事件并保存汇总；POST `/assistant/events/:id/usage` 使用实际 request_key/usage_revision 归因 review/assistant 成本，不伪造用户消息。
 - POST `/plans/:id/actions {action:'cancel'}` 带版本和幂等键；待确认方案原子退出 pending，旧确认也不能再创建任务。任务取消传播子树及依赖后继；Run 晚到的新 envelope 不能清除取消意图、重复提交交付或复活 Task。
 - 新附件经 staging PUT → HEAD + 条件 CopyObject → 随机独立 final key → 完整 XML/final HEAD 校验后 ready；旧 PUT 无法修改 final。列表、下载及 evidence 均投影 `integrity:'server_snapshot'|'legacy_unverified'`、`finalized_at`；ready 重放不复制，历史对象不静默改写。sha256 仍是客户端 claim。
+- 观察证据由 ToolBroker 上传，不由模型声明“已核实”。`evidence_kind` 为 `page_capture`、`screenshot` 或 `memory_retrieval`，`provenance` 只能是 `tool_broker`。网页证据含 `captured_at`、去掉用户信息和查询串的 `source_url`、正文或快照、截断与脱敏标志。截图证据不依赖 `POST /runs/:id/views`。记忆证据含查询、范围、版本和来源 ID，不复制无关记忆全文。自动验收若本 Run 有成功的 `browser_*` 或 `memory_*` 步骤，device reviewer 的 accept 必须引用已冻结的观察产物；否则 422。人工验收仍可使用检查点，但不能把工具成功当成业务成功。
+
+## 记忆范围与运行预算
+
+- `POST /tasks` 和已确认计划项可带 `memory_scope:{project,sites,global_preference,statuses,max_version}`。Worker 的 search/read 使用该范围；`sites` 为空时不能读取空站点记忆。全局偏好同时要求记忆 `scope_kind=global`（或适用性 global）以及执行设置 `memory_global_read=true`。Planner 带 `task_id` 时使用该任务范围，并可以看见 candidate；不带任务时只有上述全局偏好。用户自己的 `GET /memories/:id` 仍可管理本人记忆。
+- 任务成功写本地复盘候选，不自动 `verified`，不发布到 Recall。`POST /memories/:id/relations` 需要 If-Match，`relation` 为 `conflicts|supersedes|expires`，并用 `operation_key` 幂等。它只写产品侧关系。
+- 节点记忆缓存键包含范围指纹和 generation。离线、过期或失效结果带 `stale=true`、`fresh=false`，正文为空。
+- 预算预留继续使用 `budget_reservations`，`operation_key=reserve:<run id>`。相同 key 不第二次扣减。用量未知且设置了月额度时，新的美元准入返回 `budget_unknown`，不用 0 代替未知金额。没有配置美元额度时仍执行 Token、模型次数、工具步和运行时间限制。续租可返回 `control.action=pause` 和 `token_limit|time_limit|model_call_limit|tool_step_limit|budget_exhausted`。`dollar_cap` 固定为 `not_enforced`。已发出的 Codex 内部回合、Grok CLI 隐藏轮次和已提交的 Grok 请求不保证能收回。
 
 ## 通知接口
 

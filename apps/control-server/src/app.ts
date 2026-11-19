@@ -6,6 +6,9 @@ import { Decimal } from 'decimal.js';
 import { Auth, type Config, type Principal, text, uuid, expires, now } from './auth.js';
 import { Store, Tx, ApiError, isDatabaseUnavailable, type Doc } from './store.js';
 import { Service, ACTIVE, engine, matchVersion, safeMoney, redactView } from './service.js';
+import { plannerAccess, relateMemory, workerAccess } from './memory-governance.js';
+import { evaluateLimits, usageTotals } from './budget-control.js';
+import { DEFAULT_BUDGET_LIMITS } from '@super-agent/protocol';
 import { signObject } from './objects.js';
 import { AgentRecallAdapter } from './recall.js';
 import { PlanService } from './plans.js';
@@ -114,7 +117,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('PUT','/settings/execution','client',async(r,_p,tx)=>{
     const old=await service.settings(tx),b=body(r);if(old.version)matchVersion(r.headers['if-match'],old,b.version);
     for(const k of ['default_device_id','assistant_device_id'])if(b[k])await tx.need('devices',uuid(b[k],k));
-    const settings=await tx.put('settings',{default_engine:engine(b.default_engine??old.default_engine),default_device_id:b.default_device_id===undefined?old.default_device_id:b.default_device_id,assistant_device_id:b.assistant_device_id===undefined?old.assistant_device_id:b.assistant_device_id},tx.tenant);
+    const settings=await tx.put('settings',{default_engine:engine(b.default_engine??old.default_engine),default_device_id:b.default_device_id===undefined?old.default_device_id:b.default_device_id,assistant_device_id:b.assistant_device_id===undefined?old.assistant_device_id:b.assistant_device_id,memory_global_read:b.memory_global_read===undefined?old.memory_global_read===true:b.memory_global_read===true},tx.tenant);
     await tx.emit('settings.changed',settings);return settings;
   });
 
@@ -169,13 +172,16 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('GET','/memories/:id','client',async(r,_p,tx)=>recall.read(tx,uuid(params(r).id)));
   route('PATCH','/memories/:id','client',async(r,_p,tx)=>{const id=uuid(params(r).id),old=await recall.read(tx,id);matchVersion(r.headers['if-match'],old);const m=await recall.update(tx,id,body(r),old.version);await tx.emit('memory.changed',{id:m.id,previous_id:id,version:m.version});return m;});
   route('DELETE','/memories/:id','client',async(r,_p,tx)=>{const id=uuid(params(r).id),old=await recall.read(tx,id);matchVersion(r.headers['if-match'],old);await recall.remove(tx,id,old.version);await tx.emit('memory.changed',{id,deleted:true});return{status:'deleted'};});
+  route('POST','/memories/:id/relations','client',async(r,_p,tx)=>{const id=uuid(params(r).id),current=await recall.read(tx,id);matchVersion(r.headers['if-match'],current,body(r).version);await relateMemory(tx,id,body(r));const saved=await recall.read(tx,id);await tx.emit('memory.changed',{id:saved.id,version:saved.version,relation:true});return saved;});
 
   route('GET','/node/commands','device',async(_r,p,tx)=>items((await tx.all('commands')).filter(c=>c.device_id===p.device&&c.state==='pending'&&Date.parse(c.expires_at)>Date.now()).map(c=>({protocol_version:c.protocol_version,message_id:c.message_id,kind:c.kind,sent_at:c.sent_at,payload:c.payload}))));
   route('POST','/node/runs/:id/accept','device',(r,p,tx)=>service.accept(p,tx,uuid(params(r).id),body(r)));
   route('POST','/node/runs/:id/renew','device',async(r,p,tx)=>{
     const id=uuid(params(r).id),run=await tx.need('runs',id,true);if(run.device_id!==p.device||String(body(r).lease_epoch)!==String(run.lease_epoch)||!ACTIVE.includes(run.state)||Date.parse(run.lease_expires_at)<Date.now())throw new ApiError(409,'run_lease_invalid','执行租约已失效');
     const budget=await service.budget(tx);let control=run.control??null;
-    if(budget.monthly_limit_usd!==null&&new Decimal(budget.used_usd).gte(budget.monthly_limit_usd))control={action:'pause',reason:'budget_exhausted'};
+    if(budget.monthly_limit_usd!==null&&budget.unknown_count===0&&new Decimal(budget.used_usd).gte(budget.monthly_limit_usd))control={action:'pause',reason:'budget_exhausted'};
+    const grant=(await tx.all('budget_reservations')).find(reservation=>reservation.run_id===id&&reservation.status==='reserved'&&reservation.limits);
+    if(!control&&grant){const decision=evaluateLimits(grant.limits,usageTotals((await tx.all('usage_records')).filter(record=>record.run_id===id),(await tx.all('steps')).filter(step=>step.run_id===id),run.created_at));if(decision.stop)control={action:'pause',reason:decision.reason};}
     if(!control&&run.pending_inputs?.length)control={action:'input',text:run.pending_inputs[0]};
     const updated=await tx.put('runs',{...run,lease_expires_at:expires(45000),control:['answer','input','browser_input'].includes(control?.action)?null:control,pending_inputs:control?.action==='input'?(run.pending_inputs??[]).slice(1):run.pending_inputs});
     for(const reserve of (await tx.all('budget_reservations')).filter(x=>x.run_id===id&&x.status==='reserved'))await tx.put('budget_reservations',{...reserve,expires_at:expires(60000)});
@@ -199,19 +205,24 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     await graphLock(tx);const run=await runAuth(r,p,tx,uuid(params(r).id)),task=await tx.need('tasks',run.task_id,true);const b=body(r);const q=await tx.put('questions',{run_id:run.id,task_id:run.task_id,text:text(b.text,'text',5000),options:Array.isArray(b.options)?b.options.slice(0,20):[],status:'open'});
     await tx.put('runs',{...run,state:'waiting_input'});await tx.put('tasks',{...task,status:'waiting_input'});await tx.emit('question.created',q,run.task_id,run.id);return q;
   });
-  const memoryScope=async(r:FastifyRequest,p:Principal,tx:Tx)=>r.headers['x-run-ticket']?runAuth(r,p,tx):assistant(r,p,tx);
-  route('POST','/node/memory/search','device',async(r,p,tx)=>{
-    await memoryScope(r,p,tx);return recall.search(tx,body(r));
-  });
-  route('POST','/node/memory/read','device',async(r,p,tx)=>{await memoryScope(r,p,tx);return recall.read(tx,uuid(body(r).id));});
-  route('POST','/node/memory/proposals','device',async(r,p,tx)=>{await memoryScope(r,p,tx);const saved=await recall.propose(tx,body(r));await tx.emit('memory.changed',{id:saved.id,version:saved.version});return saved;});
+  const memoryAccess=async(r:FastifyRequest,p:Principal,tx:Tx)=>{
+    if(r.headers['x-run-ticket']){const run=await runAuth(r,p,tx);return workerAccess(await tx.need('tasks',run.task_id),await tx.get('memory_bindings',tx.tenant));}
+    await assistant(r,p,tx);const requested=body(r).task_id;const task=requested?await tx.need('tasks',uuid(requested)):null;
+    return plannerAccess(await service.settings(tx),await tx.get('memory_bindings',tx.tenant),task);
+  };
+  route('POST','/node/memory/search','device',async(r,p,tx)=>recall.search(tx,body(r),await memoryAccess(r,p,tx)));
+  route('POST','/node/memory/read','device',async(r,p,tx)=>{const access=await memoryAccess(r,p,tx);return recall.read(tx,uuid(body(r).id),access);});
+  route('POST','/node/memory/proposals','device',async(r,p,tx)=>{await memoryAccess(r,p,tx);const saved=await recall.propose(tx,{...body(r),status:'candidate'});await tx.emit('memory.changed',{id:saved.id,version:saved.version});return saved;});
 
   route('POST','/artifacts/uploads','either',async(r,p,tx)=>{
     if(!config.s3)throw new ApiError(503,'storage_not_configured','尚未配置云端对象存储');
     const run=p.type==='device'?await runAuth(r,p,tx):null,b=body(r),size=Number(b.size);
     if(!Number.isSafeInteger(size)||size<0||size>50*1024*1024)throw new ApiError(422,'invalid_file_size','文件应小于 50 MB');
     const taskId=run?.task_id??(b.task_id?uuid(b.task_id):null);if(taskId)await tx.need('tasks',taskId);if(run&&b.task_id&&b.task_id!==run.task_id)throw new ApiError(404,'not_found','任务不存在');
-    const id=randomUUID(),key=`artifacts/staging/${tx.tenant}/${id}/content`,artifact=await tx.put('artifacts',{id,task_id:taskId,run_id:run?.id??null,name:text(b.name,'name',300),mime:text(b.mime??'application/octet-stream','mime',200),size,sha256:typeof b.sha256==='string'?b.sha256:null,staging_object_key:key,object_key:key,status:'staged'});
+    const evidenceKind=['page_capture','screenshot','memory_retrieval'].includes(b.evidence_kind)?b.evidence_kind:null;
+    if(b.provenance!=null&&b.provenance!=='tool_broker')throw new ApiError(422,'invalid_evidence','证据来源无效');
+    if(b.provenance==='tool_broker'&&!evidenceKind)throw new ApiError(422,'invalid_evidence','工具证据类型无效');
+    const id=randomUUID(),key=`artifacts/staging/${tx.tenant}/${id}/content`,artifact=await tx.put('artifacts',{id,task_id:taskId,run_id:run?.id??null,name:text(b.name,'name',300),mime:text(b.mime??'application/octet-stream','mime',200),size,sha256:typeof b.sha256==='string'?b.sha256:null,staging_object_key:key,object_key:key,status:'staged',...(evidenceKind?{evidence_kind:evidenceKind,provenance:'tool_broker',captured_at:typeof b.captured_at==='string'?b.captured_at.slice(0,40):null,source_url:typeof b.source_url==='string'?b.source_url.slice(0,2000):null,step_id:typeof b.step_id==='string'?b.step_id.slice(0,80):null}:{})});
     return{artifact_id:id,upload_url:signObject(config.s3,'PUT',key),upload_headers:{'Content-Type':artifact.mime},expires_at:expires(300000),max_size:50*1024*1024};
   });
   route('POST','/artifacts/:id/finalize','either',async(r,p,tx)=>{
@@ -242,7 +253,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     if(settings.assistant_device_id&&settings.assistant_device_id!==p.device)throw new ApiError(409,'not_assistant_device','不是指定主助理电脑');
     if(old&&old.device_id!==p.device&&Date.parse(old.expires_at)>Date.now())throw new ApiError(409,'assistant_busy','主助理租约被其他电脑持有');
     const epoch=old&&old.device_id===p.device&&Date.parse(old.expires_at)>Date.now()?String(old.epoch):String(BigInt(old?.epoch??'0')+1n);
-    await tx.put('assistant_leases',{device_id:p.device,epoch,expires_at:expires(45000)},tx.tenant);return{epoch,lease_valid_for_ms:45000};
+    await tx.put('assistant_leases',{device_id:p.device,epoch,expires_at:expires(45000)},tx.tenant);return{epoch,lease_valid_for_ms:45000,budget:{category:'assistant',limits:DEFAULT_BUDGET_LIMITS.assistant,dollar_cap:'not_enforced'}};
   });
   route('POST','/assistant/lease/renew','device',async(r,p,tx)=>{const lease=await auth.assistant(p,tx,body(r).epoch??r.headers['x-assistant-epoch']);await tx.put('assistant_leases',{...lease,expires_at:expires(45000)});return{epoch:lease.epoch,lease_valid_for_ms:45000};});
   route('GET','/assistant/inbox','device',async(r,p,tx)=>{await assistant(r,p,tx);const completed=new Set((await tx.all('inbox_receipts')).map(x=>x.source_message_id));return items((await tx.all('messages')).filter(m=>m.role==='user'&&!m.task_id&&!completed.has(m.id)));});

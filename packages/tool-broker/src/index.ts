@@ -8,6 +8,7 @@ export * from './runtime.js';
 export { BrowserActor } from './browser.js';
 import { BrowserActor } from './browser.js';
 import { ArtifactTools } from './artifacts.js';
+import { memoryRetrievalEvidence, pageEvidence, screenshotEvidence } from './evidence.js';
 import type { ToolStepUpdate } from '@super-agent/protocol';
 
 type Args = Record<string, unknown>;
@@ -32,6 +33,7 @@ export interface BrokerOptions {
   onOperation?: (name: string, result: unknown) => void | Promise<void>;
   onUncertain?: (name: string) => void;
   onStep?: (step: ToolStepUpdate) => void | Promise<void>;
+  memoryCache?: { lookup: (kind: 'search' | 'read', fingerprint: string) => { hit: true; stale: boolean; observed_at: string; value: unknown } | { hit: false }; store: (kind: 'search' | 'read', fingerprint: string, value: unknown) => void; markOffline: () => void; invalidate?: () => void };
 }
 export class ToolBroker {
   constructor(private readonly options: BrokerOptions) {}
@@ -42,7 +44,7 @@ export class ToolBroker {
       { name: 'browser_click', description: 'Click a current semantic @e reference or CSS selector.', parameters: schema({ selector: str }, ['selector']) },
       { name: 'browser_fill', description: 'Replace content in an input or contenteditable element.', parameters: schema({ selector: str, value: str }, ['selector', 'value']) },
       { name: 'browser_keys', description: 'Press keys in this task browser, such as Enter or Mod+a.', parameters: schema({ keys: str }, ['keys']) },
-      { name: 'browser_screenshot', description: 'Capture the current page as task evidence and for the human viewer.', parameters: schema({}) },
+      { name: 'browser_screenshot', description: 'Capture the current page as frozen task evidence. This does not require someone to be watching the live view.', parameters: schema({}) },
       { name: 'memory_search', description: 'Search the user cloud memory for website knowledge, preferences, procedures, and prior task experience. Search before unfamiliar work.', parameters: schema({ query: str, site: str, limit: { type: 'integer', minimum: 1, maximum: 20 } }, ['query']) },
       { name: 'memory_read', description: 'Read a memory returned by search, including its source/version.', parameters: schema({ id: str }, ['id']) },
       { name: 'memory_propose', description: 'Save a candidate observation or validated procedure with evidence. This cannot change user authorization.', parameters: schema({ title: str, content: str, type: { enum: ['preference', 'website', 'procedure', 'project', 'experience'] }, site: str }, ['title', 'content', 'type']) },
@@ -58,7 +60,7 @@ export class ToolBroker {
     if (this.options.assistant) definitions.push(
       { name: 'tasks_list', description: 'List the user tasks and their progress without waiting for completion.', parameters: schema({}) },
       { name: 'devices_list', description: 'List the user available execution computers and configured engines.', parameters: schema({}) },
-      { name: 'task_start', description: 'Propose work on a selected computer. The user must confirm the proposed goal and deliverables before execution.', parameters: schema({ goal: str, title: str, deliverables: { type: 'array', items: str }, engine: { enum: ['codex', 'grok'] }, device_id: str, item_key: str, depends_on_keys: { type: 'array', items: str, maxItems: 40 }, parent_item_key: str }, ['goal', 'deliverables', 'engine', 'device_id', 'item_key']) },
+      { name: 'task_start', description: 'Propose work on a selected computer. The user must confirm the proposed goal and deliverables before execution. memory_scope.sites limits which site memories the task can read; an empty site is not access to every memory.', parameters: schema({ goal: str, title: str, deliverables: { type: 'array', items: str }, engine: { enum: ['codex', 'grok'] }, device_id: str, item_key: str, depends_on_keys: { type: 'array', items: str, maxItems: 40 }, parent_item_key: str, memory_scope: { type: 'object' } }, ['goal', 'deliverables', 'engine', 'device_id', 'item_key']) },
       { name: 'task_status', description: 'Read a background task status.', parameters: schema({ id: str }, ['id']) },
     );
     return this.options.allowBrowser === false ? definitions.filter(tool => !tool.name.startsWith('browser_')) : definitions;
@@ -68,7 +70,7 @@ export class ToolBroker {
     let unsafe = false;
     try {
       await this.options.onStep?.(step);
-      const result = await this.perform(name, args, () => { unsafe = true; });
+      const result = await this.perform(name, args, () => { unsafe = true; }, step.step_id);
       await this.options.onStep?.({ ...step, status: 'succeeded', completed_at: new Date().toISOString() });
       return result;
     } catch (error) {
@@ -80,7 +82,13 @@ export class ToolBroker {
       throw error;
     }
   }
-  private async perform(name: string, args: Args, markUnsafe: () => void): Promise<unknown> {
+  private async publishEvidence(stepId: string, document: Record<string, unknown>, bytes: Buffer, name: string, mime: string): Promise<Record<string, unknown>> {
+    try {
+      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: document.source_url ?? null, step_id: stepId });
+      return { evidence_kind: document.evidence_kind, captured_at: document.captured_at, source_url: document.source_url ?? null, artifact_id: artifact.id, evidence_status: artifact.status ?? 'ready', viewer_required: false };
+    } catch { return { evidence_status: 'not_frozen', evidence_kind: document.evidence_kind, viewer_required: false }; }
+  }
+  private async perform(name: string, args: Args, markUnsafe: () => void, stepId: string): Promise<unknown> {
     this.options.assertActive();
     if (this.options.allowBrowser === false && name.startsWith('browser_')) throw new Error('browser_capability_unavailable');
     if (this.options.signal.aborted) throw new DOMException('Execution stopped', 'AbortError');
@@ -100,22 +108,55 @@ export class ToolBroker {
         const knowledge = await this.options.request('/node/memory/search', { query: url.hostname, site: url.hostname, limit: 5 });
         markUnsafe();
         const navigation = await browser.call(runId, 'navigate', { url: url.href, newTab: true, group_title: 'Super-agent 任务' });
-        result = { knowledge, navigation }; break;
+        let evidence: Record<string, unknown> = { evidence_status: 'not_frozen', viewer_required: false };
+        try {
+          const observed = await browser.observe(runId);
+          const snapshot = await browser.call(runId, 'snapshot');
+          const document = pageEvidence({ url: observed.url || url.href, capturedAt: observed.captured_at, runId, stepId, body: snapshot });
+          evidence = await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json');
+        } catch { /* Navigation already happened; missing evidence stays unverified. */ }
+        result = { knowledge, navigation, evidence }; break;
       }
-      case 'browser_snapshot': result = await browser.call(runId, 'snapshot'); break;
+      case 'browser_snapshot': {
+        const snapshot = await browser.call(runId, 'snapshot');
+        let observed = { url: '', captured_at: new Date().toISOString() };
+        try { observed = await browser.observe(runId); } catch { /* The snapshot text is still the tool result. */ }
+        const document = pageEvidence({ url: observed.url, capturedAt: observed.captured_at, runId, stepId, body: snapshot });
+        result = { snapshot, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json') }; break;
+      }
       case 'browser_click': { const selector = string(args, 'selector', 1000); markUnsafe(); result = await browser.call(runId, 'click', { selector }); break; }
       case 'browser_fill': { const selector = string(args, 'selector', 1000), value = typeof args.value === 'string' ? args.value : (() => { throw new Error('invalid_argument: value'); })(); markUnsafe(); result = await browser.call(runId, 'fill', { selector, value }); break; }
       case 'browser_keys': { const keys = string(args, 'keys', 1000); markUnsafe(); result = await browser.call(runId, 'send_keys', { keys }); break; }
       case 'browser_screenshot': {
         const frame = await browser.frame(runId);
-        await this.options.request(`/node/runs/${runId}/frames`, frame);
-        result = { captured: true, frame_id: frame.frame_id, width: frame.width, height: frame.height, captured_at: frame.captured_at }; break;
+        const bytes = Buffer.from(frame.image_base64, 'base64');
+        let source = '';
+        try { source = (await browser.observe(runId)).url; } catch { /* Capture time still comes from the screenshot itself. */ }
+        const image = screenshotEvidence({ url: source, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height });
+        const stored = await this.publishEvidence(stepId, image, bytes, `screenshot-${stepId}.jpg`, 'image/jpeg');
+        const manifest = screenshotEvidence({ url: source, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, imageArtifactId: typeof stored.artifact_id === 'string' ? stored.artifact_id : null });
+        result = { captured: stored.evidence_status !== 'not_frozen', frame_id: frame.frame_id, width: frame.width, height: frame.height, captured_at: frame.captured_at, viewer_required: false, evidence: await this.publishEvidence(stepId, manifest, Buffer.from(JSON.stringify(manifest)), `screenshot-${stepId}.json`, 'application/json') }; break;
       }
-      case 'memory_search': result = await this.options.request('/node/memory/search', { query: string(args, 'query'), site: args.site, limit: Math.min(20, Math.max(1, Number(args.limit ?? 5))) }); break;
-      case 'memory_read': result = await this.options.request('/node/memory/read', { id: string(args, 'id', 100) }); break;
+      case 'memory_search': {
+        const query = string(args, 'query'), site = args.site, limit = Math.min(20, Math.max(1, Number(args.limit ?? 5)));
+        const fingerprint = JSON.stringify({ runId, query, site: site ?? null, limit });
+        let found: { items?: unknown[]; scope?: unknown };
+        try { found = await this.options.request('/node/memory/search', { query, site, limit }); this.options.memoryCache?.store('search', fingerprint, found); }
+        catch (error) { const cached = this.options.memoryCache?.lookup('search', fingerprint); if (!cached?.hit) { this.options.memoryCache?.markOffline(); throw error; } found = cached.value as { items?: unknown[]; scope?: unknown }; }
+        const document = memoryRetrievalEvidence({ capturedAt: new Date().toISOString(), runId, stepId, query, scope: found.scope ?? null, hits: Array.isArray(found.items) ? found.items : [] });
+        result = { ...found, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `memory-search-${stepId}.json`, 'application/json') }; break;
+      }
+      case 'memory_read': {
+        const id = string(args, 'id', 100), fingerprint = JSON.stringify({ runId, id });
+        let memory: Record<string, unknown>;
+        try { memory = await this.options.request('/node/memory/read', { id }); this.options.memoryCache?.store('read', fingerprint, memory); }
+        catch (error) { const cached = this.options.memoryCache?.lookup('read', fingerprint); if (!cached?.hit) { this.options.memoryCache?.markOffline(); throw error; } memory = cached.value as Record<string, unknown>; }
+        const document = memoryRetrievalEvidence({ capturedAt: new Date().toISOString(), runId, stepId, query: `id:${id}`, scope: null, hits: [memory] });
+        result = { ...memory, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `memory-read-${stepId}.json`, 'application/json') }; break;
+      }
       case 'memory_propose': {
         if (!['preference', 'website', 'procedure', 'project', 'experience'].includes(String(args.type))) throw new Error('invalid_memory_type');
-        result = await this.options.request('/node/memory/proposals', { title: string(args, 'title', 500), content: string(args, 'content'), type: args.type, site: args.site }); break;
+        result = await this.options.request('/node/memory/proposals', { title: string(args, 'title', 500), content: string(args, 'content'), type: args.type, site: args.site }); this.options.memoryCache?.invalidate?.(); break;
       }
       case 'files_list': result = await readdir(await this.path(typeof args.path === 'string' ? args.path : '.', false), { withFileTypes: true }).then(entries => entries.map(e => ({ name: e.name, directory: e.isDirectory() }))); break;
       case 'files_read': {
@@ -139,7 +180,7 @@ export class ToolBroker {
       case 'task_start': {
         if (args.depends_on_keys !== undefined && (!Array.isArray(args.depends_on_keys) || args.depends_on_keys.length > 40 || args.depends_on_keys.some(key => typeof key !== 'string' || !key || key.length > 100))) throw new Error('invalid_depends_on_keys');
         if (args.parent_item_key !== undefined) string(args, 'parent_item_key', 100);
-        result = await this.options.request('/node/tasks', { goal: string(args, 'goal'), title: args.title, deliverables: Array.isArray(args.deliverables) ? args.deliverables.map(String).slice(0, 20) : [], engine: args.engine, device_id: string(args, 'device_id', 100), item_key: string(args, 'item_key', 100), depends_on_keys: args.depends_on_keys ?? [], ...(args.parent_item_key ? { parent_item_key: args.parent_item_key } : {}) }); break; }
+        result = await this.options.request('/node/tasks', { goal: string(args, 'goal'), title: args.title, deliverables: Array.isArray(args.deliverables) ? args.deliverables.map(String).slice(0, 20) : [], engine: args.engine, device_id: string(args, 'device_id', 100), item_key: string(args, 'item_key', 100), depends_on_keys: args.depends_on_keys ?? [], ...(args.parent_item_key ? { parent_item_key: args.parent_item_key } : {}), ...(args.memory_scope && typeof args.memory_scope === 'object' ? { memory_scope: args.memory_scope } : {}) }); break; }
       case 'task_status': result = await this.options.request(`/tasks/${encodeURIComponent(string(args, 'id', 100))}`); break;
       default: throw new Error('unsupported_tool');
     }

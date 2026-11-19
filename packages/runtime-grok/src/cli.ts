@@ -29,7 +29,9 @@ export class GrokCliRuntime implements RuntimeAdapter {
     const reportUsage = async (meta: Json = {}) => {
       if (!promptUsageKey || usageRecorded) return;
       usageRecorded = true;
-      await context.emit({ type: 'usage', usage: { request_key: promptUsageKey, input_tokens: number(meta.inputTokens), cached_input_tokens: number(meta.cachedReadTokens), output_tokens: number(meta.outputTokens), reasoning_tokens: number(meta.reasoningTokens) } });
+      const sample = { request_key: promptUsageKey, input_tokens: number(meta.inputTokens), cached_input_tokens: number(meta.cachedReadTokens), output_tokens: number(meta.outputTokens), reasoning_tokens: number(meta.reasoningTokens) };
+      await context.emit({ type: 'usage', usage: sample });
+      context.budget?.noteUsage?.(sample);
     };
     const enqueue = (fn: () => void | Promise<void>) => { events = events.then(fn); events.catch(() => {}); };
     const onAbort = () => { if (this.sessionId) client?.notify('session/cancel', { sessionId: this.sessionId }); void client?.close(); };
@@ -75,6 +77,8 @@ export class GrokCliRuntime implements RuntimeAdapter {
       await context.emit({ type: 'binding', binding: { session_id: this.sessionId } });
       for (const input of this.queued.splice(0)) await this.steer(input);
       const prompt = context.checkpoint ? `${context.goal}\nCheckpoint: ${JSON.stringify(context.checkpoint)}\nVerify current state before continuing unfinished work.` : context.goal;
+      // The CLI owns its inner sampling loop. This checks the grant once before the prompt; it does not preempt each hidden round.
+      context.budget?.beforeModelCall();
       this.options.onDiagnostic?.({ phase: 'prompt' });
       const response = await client.request('session/prompt', { sessionId: this.sessionId, prompt: [{ type: 'text', text: prompt }] }, this.options.maxRunMs ?? 60 * 60_000, () => { promptUsageKey = `grok-cli:${randomUUID()}`; });
       await reportUsage(response._meta ?? {});

@@ -23,6 +23,7 @@ export class GrokRuntime implements RuntimeAdapter {
     let previous: string | undefined;
     for (let round = 0; round < (this.options.maxRounds ?? 80); round++) {
       checkAbort(signal);
+      context.budget?.beforeModelCall();
       for (const text of this.queuedInputs.splice(0)) input.push({ role: 'user', content: text });
       await context.emit({ type: 'progress', summary: `Grok 正在处理第 ${round + 1} 轮` });
       const body: Obj = { model: context.modelId, input: previous ? input.splice(0) : input, tools: context.tools.map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters })), max_output_tokens: this.options.maxOutputTokens ?? 4096, store: true };
@@ -34,7 +35,9 @@ export class GrokRuntime implements RuntimeAdapter {
       const inputDetails = (usage.input_tokens_details ?? usage.prompt_tokens_details ?? {}) as Obj;
       const outputDetails = (usage.output_tokens_details ?? usage.completion_tokens_details ?? {}) as Obj;
       const n = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null;
-      await context.emit({ type: 'usage', usage: { request_key: `xai:${responseId}`, input_tokens: n(usage.input_tokens ?? usage.prompt_tokens), cached_input_tokens: n(inputDetails.cached_tokens), output_tokens: n(usage.output_tokens ?? usage.completion_tokens), reasoning_tokens: n(outputDetails.reasoning_tokens), ...(usage.cost_in_usd_ticks === undefined ? {} : { cost_ticks: String(usage.cost_in_usd_ticks) }) } });
+      const sample = { request_key: `xai:${responseId}`, input_tokens: n(usage.input_tokens ?? usage.prompt_tokens), cached_input_tokens: n(inputDetails.cached_tokens), output_tokens: n(usage.output_tokens ?? usage.completion_tokens), reasoning_tokens: n(outputDetails.reasoning_tokens), ...(usage.cost_in_usd_ticks === undefined ? {} : { cost_ticks: String(usage.cost_in_usd_ticks) }) };
+      await context.emit({ type: 'usage', usage: sample });
+      const budgetStop = context.budget?.noteUsage?.(sample);
       const outputs = (response.output ?? []) as Obj[];
       const calls = outputs.filter(o => o.type === 'function_call');
       if (!calls.length) {
@@ -42,6 +45,7 @@ export class GrokRuntime implements RuntimeAdapter {
         if (!text && response.status === 'incomplete') throw new Error('grok_output_incomplete');
         await context.emit({ type: 'message', text }); return { text, binding: { response_id: responseId } };
       }
+      if (budgetStop) throw new Error(`budget_stop:${budgetStop}`);
       previous = typeof response.id === 'string' ? response.id : undefined;
       // The first input array is retained only for fallback if a provider omits response IDs.
       if (previous) input.length = 0; else input.push(...outputs);

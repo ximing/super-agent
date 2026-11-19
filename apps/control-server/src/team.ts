@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ApiError,hash,type Doc,type Tx } from './store.js';
 import { text,uuid,type Principal } from './auth.js';
 import { publicStep } from './steps.js';
+import { deviceEvidenceSatisfied, isIndependentObservation, observationTools } from './acceptance-evidence.js';
 
 export const DEFAULT_DELIVERABLE='目标完成且有可核对结果';
 export async function graphLock(tx:Tx):Promise<void>{await tx.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`team-graph:${tx.tenant}`]);}
@@ -26,7 +27,7 @@ export function publicTask(t:Doc):Doc{
   return Object.fromEntries(keys.filter(k=>t[k]!==undefined).map(k=>[k,t[k]]));
 }
 export function publicRun(r:Doc|null,result:string|null=null):Doc|null{return r?Object.fromEntries(['id','task_id','state','engine','device_id','model_id','lease_epoch','summary','created_at'].map(k=>[k,r[k]]).concat([['result_text',result]])):null;}
-export function publicArtifact(a:Doc):Doc{return{...Object.fromEntries(['id','name','mime','size','task_id','run_id','status','created_at'].map(k=>[k,a[k]])),integrity:a.integrity==='server_snapshot'?'server_snapshot':'legacy_unverified',finalized_at:a.integrity==='server_snapshot'?a.finalized_at??null:null};}
+export function publicArtifact(a:Doc):Doc{return{...Object.fromEntries(['id','name','mime','size','task_id','run_id','status','created_at'].map(k=>[k,a[k]])),integrity:a.integrity==='server_snapshot'?'server_snapshot':'legacy_unverified',finalized_at:a.integrity==='server_snapshot'?a.finalized_at??null:null,...(a.evidence_kind?{evidence_kind:a.evidence_kind,provenance:a.provenance??null,captured_at:a.captured_at??null,source_url:a.source_url??null}:{})};}
 export function publicCoordinatorEvent(e:Doc):Doc{return Object.fromEntries(['id','type','task_id','run_id','plan_id','delivery_id','source_message_id','status','reason_code','created_at','version'].map(k=>[k,e[k]??null]));}
 
 export class TeamService {
@@ -106,7 +107,8 @@ export class TeamService {
     const delivery=(await tx.all('task_deliveries')).find(d=>d.run_id===run.id)??await this.submit(tx,task,run),criteria=deliverables(delivery.deliverables);
     if(delivery.status==='accepted')throw new ApiError(409,'delivery_already_accepted','交付已经验收');
     if(!Array.isArray(body.checks)||body.checks.length>20)throw new ApiError(422,'invalid_review','需要逐条验收标准');
-    const used=new Set<number>(),checks:Doc[]=[];let corroborated=false;
+    const used=new Set<number>(),checks:Doc[]=[];const referenced:Doc[]=[];
+    const steps=(await tx.all('steps')).filter(step=>step.run_id===run.id);
     for(const check of body.checks){
       const index=check.deliverable_index;
       if(!Number.isInteger(index)||index<0||index>=criteria.length||used.has(index)||typeof check.passed!=='boolean'||!Array.isArray(check.evidence_refs)||check.evidence_refs.length>50)throw new ApiError(422,'invalid_review','验收标准或证据无效');
@@ -115,13 +117,14 @@ export class TeamService {
         if(!ref||!['artifact','step','checkpoint'].includes(ref.kind))throw new ApiError(422,'invalid_evidence','证据引用类型无效');
         const object=await tx.need(ref.kind==='artifact'?'artifacts':ref.kind==='step'?'steps':'checkpoints',uuid(ref.id));
         if(object.run_id!==run.id||(ref.kind!=='step'&&object.task_id!==task.id)||ref.kind==='artifact'&&(object.status!=='ready'||!delivery.artifact_ids.includes(object.id))||ref.kind==='checkpoint'&&(!object.checkpoint?.completed||object.id!==delivery.checkpoint_id))throw new ApiError(422,'invalid_evidence','证据不属于本次交付快照');
-        if(ref.kind==='artifact'||ref.kind==='step'&&object.status==='succeeded')corroborated=true;
+        if(ref.kind==='artifact')referenced.push(object);
         refs.push({kind:ref.kind,id:object.id});
       }
       if(verdict==='accept'&&(!check.passed||!refs.length))throw new ApiError(422,'acceptance_incomplete','每条交付标准都需通过并提供证据');
       checks.push({deliverable_index:index,passed:check.passed,evidence_refs:refs});
     }
-    if(verdict==='accept'&&(used.size!==criteria.length||p.type==='device'&&!corroborated))throw new ApiError(422,'acceptance_incomplete','验收需覆盖全部标准；自动审核还需可独立核对的工具或产物证据');
+    const corroborated=p.type==='device'&&(observationTools(steps)?referenced.some(isIndependentObservation):deviceEvidenceSatisfied(steps,referenced));
+    if(verdict==='accept'&&(used.size!==criteria.length||p.type==='device'&&!corroborated))throw new ApiError(422,'acceptance_incomplete','验收需覆盖全部标准；自动审核还需可独立核对的冻结证据');
     const review=await tx.put('task_reviews',{task_id:task.id,run_id:run.id,delivery_id:delivery.id,verdict,summary:text(body.summary,'summary',10000),checks,reviewer_kind:p.type==='client'?'user':'coordinator',reviewer_id:p.id});
     await tx.put('task_deliveries',{...delivery,status:verdict==='accept'?'accepted':verdict==='reject'?'rejected':'needs_input',review_id:review.id});
     const updated=await tx.put('tasks',{...task,status:verdict==='accept'?'succeeded':'awaiting_review',delivery_status:verdict==='accept'?'accepted':verdict==='reject'?'rejected':'needs_input',reason_code:verdict==='accept'?null:verdict==='reject'?'delivery_rejected':'delivery_needs_input'});

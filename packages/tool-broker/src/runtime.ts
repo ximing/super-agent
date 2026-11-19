@@ -30,6 +30,8 @@ export interface RuntimeContext {
   signal: AbortSignal;
   mcp?: { url: string; token: string; script: string };
   developerInstructions?: string;
+  /** Checked before a controllable model request. Codex cannot intercept its own inner sampling loop. */
+  budget?: { beforeModelCall: () => void; noteUsage?: (usage: UsageSample) => string | null };
 }
 export interface RuntimeResult { text: string; binding?: Record<string, string> }
 export interface RuntimeAdapter {

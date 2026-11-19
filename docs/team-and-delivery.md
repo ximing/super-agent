@@ -49,7 +49,7 @@ POST 对应 `/tasks/:id/reviews` 或 `/assistant/tasks/:id/reviews`，需 If-Mat
 }
 ```
 
-verdict 可为 accept/reject/needs_input。标准索引不可重复或越界；accept 需覆盖全部标准、逐条通过且有证据。服务端核验引用属于同 Task/当前 Run、artifact 为 ready 且在交付快照内、checkpoint 恰为固定 completed checkpoint，不能引用任意字符串或其它任务。Coordinator 另需非单纯 checkpoint 的旁证。
+verdict 可为 accept/reject/needs_input。标准索引不可重复或越界；accept 需覆盖全部标准、逐条通过且有证据。服务端核验引用属于同 Task/当前 Run、artifact 为 ready 且在交付快照内、checkpoint 恰为固定 completed checkpoint，不能引用任意字符串或其它任务。Coordinator 不能只重复 checkpoint。若本 Run 有成功的浏览器或记忆步骤，自动 accept 还要引用 ToolBroker 冻结的 `page_capture`、`screenshot` 或 `memory_retrieval`；成功步骤、Worker 报告和普通文件存在都不够。
 
 节点的自动审核规则更严格：使用新的 runtime adapter，仅提供 delivery_evidence、artifact_read、review_submit 等只读工具；实际独立读取 server_snapshot 产物，每条通过标准关联真实读取的 artifact。不将 Worker 原文重新复述当作验收。legacy、未知来源、二进制、读取失败，或网站真实提交状态无法核实时，选择 needs_input 并转人工。拒绝或需补充不会自动重试有副作用操作。
 
@@ -61,7 +61,9 @@ verdict 可为 accept/reject/needs_input。标准索引不可重复或越界；a
 
 节点可读当前任务输入、历史 Run 产物及已验收依赖的冻结产物；finalize 仍限本 Run 上传。产物转移不带产品 Bearer，不自动跟随重定向，最大50MiB。私有证据的临时 GET URL不进入工具时间线或通知。
 
-ToolStep 仅保存 `{id,run_id,tool,title,status,started_at,completed_at,error_code,created_at,version}`。工具/标题白名单映射，未知工具为 other；状态含 result_unknown，安全错误码为 tool_failed/invalid_arguments/not_authorized/cancelled/result_unknown。参数、输出、页面、URL及原始错误不进入步骤数据库、公开事件和 GET；历史数据也经同样投影。
+网页正文、截图清单和记忆检索引用是同一次交付里的普通产物，走上述冻结。捕获时间来自工具执行，不来自模型填写。截图保存不要求客户端先打开画面。记忆产物不包含无关公司记忆全文。旧 staging 地址不能替换已经 ready 的 final 对象。
+
+ToolStep 仅保存 `{id,run_id,tool,title,status,started_at,completed_at,error_code,created_at,version}`。工具/标题白名单映射，未知工具为 other；状态含 result_unknown，安全错误码为 tool_failed/invalid_arguments/not_authorized/cancelled/result_unknown。参数、输出、页面、URL及原始错误不进入步骤数据库、公开事件和 GET；历史数据也经同样投影。页面原文在冻结产物里，不在步骤里。
 
 ## Coordinator 事件与恢复
 

@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
 import { ApiError, Tx, type Doc, hash } from './store.js';
 import { text, uuid } from './auth.js';
+import { assessMemory, publicAccess, type MemoryAccess } from './memory-governance.js';
 
 export interface RecallConfig { encryptionKey:string; allowedOrigins?:string[]; fetch?:typeof fetch }
 const typeMap:Record<string,string>={preference:'preference',website:'fact',procedure:'workflow',project:'architecture',experience:'lesson'};
@@ -52,7 +53,9 @@ export class AgentRecallAdapter {
     uuid(raw.id);const meta=await tx.get('memories',raw.id),tags=Array.isArray(raw.tags)?raw.tags:[];
     const tagged=tags.find((t:unknown)=>typeof t==='string'&&t.startsWith('sa-type:'))?.slice(8);
     const content=typeof raw.content==='string'?raw.content:'';
-    return{id:raw.id,title:meta?.title??content.split('\n').find((line:string)=>line.trim())?.replace(/^#+\s*/,'').slice(0,160)??'未命名记忆',content,type:tagged&&typeMap[tagged]?tagged:reverse[raw.type]??'experience',site:meta?.site??null,status:meta?.status??'verified',version:Number(raw.version)||1,created_at:raw.createdAt??raw.created_at,updated_at:raw.updatedAt??raw.updated_at??new Date().toISOString(),source:'agent-recall',recall_type:raw.type,recall_project:raw.project??null,recall_chain_id:raw.chainId??raw.id,recall_tags:tags};
+    const governed=meta?.governance?.verification;
+    const status=governed==='expired'?'expired':governed==='superseded'?'superseded':meta?.status??'verified';
+    return{id:raw.id,title:meta?.title??content.split('\n').find((line:string)=>line.trim())?.replace(/^#+\s*/,'').slice(0,160)??'未命名记忆',content,type:tagged&&typeMap[tagged]?tagged:reverse[raw.type]??'experience',site:meta?.site??null,status,version:Number(raw.version)||1,created_at:raw.createdAt??raw.created_at,updated_at:raw.updatedAt??raw.updated_at??new Date().toISOString(),source:'agent-recall',recall_type:raw.type,recall_project:raw.project??null,recall_chain_id:raw.chainId??raw.id,recall_tags:tags,scope_kind:meta?.scope_kind??null,governance:meta?.governance??null};
   }
   async list(tx:Tx,query:Doc={}):Promise<Doc[]>{
     const binding=await this.binding(tx),params=new URLSearchParams({limit:String(Math.max(1,Math.min(500,Number(query.limit)||200)))});
@@ -64,23 +67,36 @@ export class AgentRecallAdapter {
     const candidates=(await tx.all('memories')).filter(m=>m.status==='candidate'&&m.content);
     return [...external,...candidates];
   }
-  async read(tx:Tx,id:string):Promise<Doc>{
+  private scoped(memory:Doc,access:MemoryAccess|undefined,site:unknown):Doc{
+    if(!access||access.role==='user')return memory;
+    if(typeof site==='string'&&site&&!access.sites.includes(site.toLowerCase()))throw new ApiError(404,'not_found','记忆不存在');
+    const decision=assessMemory(memory,access);
+    if(!decision.allowed)throw new ApiError(404,'not_found','记忆不存在');
+    if(typeof site==='string'&&site&&decision.presentation.site&&decision.presentation.site.toLowerCase()!==site.toLowerCase())throw new ApiError(404,'not_found','记忆不存在');
+    return decision.presentation;
+  }
+  async read(tx:Tx,id:string,access?:MemoryAccess):Promise<Doc>{
     const binding=await this.binding(tx),local=await tx.get('memories',uuid(id));
-    if(local?.status==='candidate'&&local.content)return local;
+    if(local?.status==='candidate'&&local.content)return this.scoped(local,access,undefined);
     const data=await this.call(binding,tx.tenant,`/api/memories/${encodeURIComponent(id)}`);if(!data.memory)throw new ApiError(404,'not_found','记忆不存在');
     if(binding.project&&data.memory.project!==binding.project)throw new ApiError(404,'not_found','记忆不存在');
-    return this.convert(tx,data.memory);
+    return this.scoped(await this.convert(tx,data.memory),access,undefined);
   }
-  async search(tx:Tx,input:Doc):Promise<Doc>{
+  async search(tx:Tx,input:Doc,access?:MemoryAccess):Promise<Doc>{
     const binding=await this.binding(tx),filter:Doc={};if(binding.project)filter.project=binding.project;
     if(Array.isArray(input.types)){const mapped=input.types.map((v:string)=>typeMap[v]).filter(Boolean);if(mapped.length)filter.type=[...new Set(mapped)];}
     const result=await this.call(binding,tx.tenant,'/api/memories/recall','POST',{query:text(input.query,'query',10000),limit:Math.max(1,Math.min(50,Number(input.limit)||5)),...(Object.keys(filter).length?{filter}:{})});
-    const memories=await Promise.all((Array.isArray(result.memories)?result.memories:[]).map((m:Doc)=>this.convert(tx,m)));
-    return{items:input.site?memories.filter(m=>!m.site||m.site===input.site):memories,search_mode:'agent-recall'};
+    let memories=await Promise.all((Array.isArray(result.memories)?result.memories:[]).map((m:Doc)=>this.convert(tx,m)));
+    if(!access||access.role==='user')return{items:input.site?memories.filter(m=>!m.site||m.site===input.site):memories,search_mode:'agent-recall'};
+    if(typeof input.site==='string'&&input.site&&!access.sites.includes(input.site.toLowerCase()))throw new ApiError(404,'not_found','记忆不存在');
+    const locals=(await tx.all('memories')).filter(memory=>memory.status==='candidate'&&memory.content&&!memories.some(item=>item.id===memory.id));
+    memories=[...memories,...locals];
+    const items=memories.flatMap(memory=>{const decision=assessMemory(memory,access);if(!decision.allowed)return[];if(typeof input.site==='string'&&input.site&&decision.presentation.site&&decision.presentation.site.toLowerCase()!==input.site.toLowerCase())return[];return[decision.presentation];});
+    return{items,search_mode:'agent-recall',scope:publicAccess(access)};
   }
   private input(body:Doc):Doc{
     if(!typeMap[body.type])throw new ApiError(422,'invalid_memory_type','知识类型无效');
-    return{title:text(body.title,'title',300),content:text(body.content,'content',100000),type:body.type,site:typeof body.site==='string'?body.site.slice(0,500):null};
+    return{title:text(body.title,'title',300),content:text(body.content,'content',100000),type:body.type,site:typeof body.site==='string'?body.site.slice(0,500):null,scope_kind:body.scope_kind==='global'&&body.type==='preference'?'global':null};
   }
   async create(tx:Tx,body:Doc,operationKey?:string):Promise<Doc>{
     const binding=await this.binding(tx),input=this.input(body),opTag=`sa-op:${hash(operationKey??input).slice(0,24)}`;
@@ -89,7 +105,7 @@ export class AgentRecallAdapter {
     let raw=found.memories?.[0];
     if(!raw){const result=await this.call(binding,tx.tenant,'/api/memories','POST',{content:input.content,type:typeMap[input.type],tags:[`sa-type:${input.type}`,opTag],...(binding.project?{project:binding.project}:{})});raw=result.memory;}
     if(!raw)throw new ApiError(503,'recall_response_invalid','记忆服务未返回创建结果');
-    await tx.put('memories',{title:input.title,type:input.type,site:input.site,status:'verified',external_id:raw.id,recall_chain_id:raw.chainId??raw.id},uuid(raw.id));
+    await tx.put('memories',{title:input.title,type:input.type,site:input.site,scope_kind:input.scope_kind,status:'verified',external_id:raw.id,recall_chain_id:raw.chainId??raw.id},uuid(raw.id));
     return this.convert(tx,raw);
   }
   async update(tx:Tx,id:string,body:Doc,expected:number):Promise<Doc>{
@@ -102,7 +118,7 @@ export class AgentRecallAdapter {
     const tags=(Array.isArray(old.recall_tags)?old.recall_tags:[]).filter((tag:string)=>!tag.startsWith('sa-type:'));if(tags.length<16)tags.push(`sa-type:${input.type}`);
     const raw=await this.call(binding,tx.tenant,`/api/memories/${encodeURIComponent(id)}`,'PATCH',{content:input.content,type:typeMap[input.type],tags});
     if(!raw.memory)throw new ApiError(503,'recall_response_invalid','记忆服务未返回更新结果');
-    await tx.put('memories',{title:input.title,type:input.type,site:input.site,status:'verified',external_id:raw.memory.id,recall_chain_id:raw.memory.chainId??raw.memory.id},uuid(raw.memory.id));
+    await tx.put('memories',{title:input.title,type:input.type,site:input.site,scope_kind:input.scope_kind,status:'verified',external_id:raw.memory.id,recall_chain_id:raw.memory.chainId??raw.memory.id,governance:old.governance??null},uuid(raw.memory.id));
     return this.convert(tx,raw.memory);
   }
   async remove(tx:Tx,id:string,expected:number):Promise<void>{const binding=await this.binding(tx),old=await this.read(tx,id);if(old.version!==expected)throw new ApiError(412,'version_conflict','记忆已更新，请刷新后重试');if(old.status!=='candidate')await this.call(binding,tx.tenant,`/api/memories/${encodeURIComponent(id)}`,'DELETE');await tx.remove('memories',id);}

@@ -107,4 +107,20 @@ export class ArtifactTools {
     const artifact = await this.options.request<Obj>(`/artifacts/${id(descriptor.artifact_id)}/finalize`, {});
     return { id: descriptor.artifact_id, name: artifact.name ?? fileName, mime: artifact.mime ?? contentType, size: data.length, status: artifact.status ?? 'ready' };
   }
+  async uploadBytes(data: Buffer, name: string, mime: string, evidence?: Obj): Promise<Obj> {
+    this.active();
+    if (data.length > MAX_BYTES) throw new Error('artifact_too_large');
+    if (!name || name.length > 300 || !mime || mime.length > 200 || /[\r\n]/.test(mime)) throw new Error('invalid_artifact_metadata');
+    const descriptor = await this.options.request<{ artifact_id: string; upload_url: string; upload_headers?: Obj; max_size: number }>('/artifacts/uploads', { name, mime, size: data.length, sha256: createHash('sha256').update(data).digest('hex'), ...(evidence ?? {}) });
+    if (!Number.isSafeInteger(descriptor.max_size) || data.length > descriptor.max_size) throw new Error('artifact_too_large');
+    const headers = new Headers();
+    for (const [key, value] of Object.entries(descriptor.upload_headers ?? { 'content-type': mime })) {
+      if (!['content-type', 'content-md5', 'x-amz-checksum-sha256'].includes(key.toLowerCase()) || typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error('unsafe_artifact_upload_headers');
+      headers.set(key, value);
+    }
+    const response = await this.transfer(signedUrl(descriptor.upload_url), { method: 'PUT', headers, body: new Uint8Array(data) });
+    await response.body?.cancel(); this.active();
+    const artifact = await this.options.request<Obj>(`/artifacts/${id(descriptor.artifact_id)}/finalize`, {});
+    return { id: descriptor.artifact_id, name: artifact.name ?? name, mime: artifact.mime ?? mime, size: data.length, status: artifact.status ?? 'ready' };
+  }
 }

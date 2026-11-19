@@ -110,6 +110,9 @@ export class CodexRuntime implements RuntimeAdapter {
           const value = (key: string) => typeof usage[key] === 'number' ? usage[key] as number : null;
           const sample: UsageSample = { request_key: `codex:${this.threadId}:${String(params.turnId ?? this.turnId)}`, input_tokens: value('inputTokens'), cached_input_tokens: value('cachedInputTokens'), output_tokens: value('outputTokens'), reasoning_tokens: value('reasoningOutputTokens') };
           void context.emit({ type: 'usage', usage: sample });
+          const budgetStop = context.budget?.noteUsage?.(sample);
+          // The current Codex turn may already be in flight. Interrupt it; do not claim the sample itself was prevented.
+          if (budgetStop) { void this.stop(); rejectDone(new Error(`budget_stop:${budgetStop}`)); }
         }
       }
       if (message.method === 'turn/completed') {
@@ -140,6 +143,7 @@ export class CodexRuntime implements RuntimeAdapter {
       await context.emit({ type: 'binding', binding: { thread_id: this.threadId } });
       checkAbort(context.signal);
       const prompt = context.checkpoint ? `${context.goal}\n\nContinue only unfinished work. Checkpoint:\n${JSON.stringify(context.checkpoint)}` : context.goal;
+      context.budget?.beforeModelCall();
       const started = await rpc.request<{ turn: { id: string } }>('turn/start', { threadId: this.threadId, input: [{ type: 'text', text: prompt }], ...(this.options.reasoningEffort ? { effort: this.options.reasoningEffort } : {}) });
       this.turnId = started.turn.id;
       this.options.onProtocolEvent?.('turn/start/completed');

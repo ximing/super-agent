@@ -73,6 +73,14 @@ export class BrowserActor {
     if (!result.success) throw new Error(`CSI: ${result.error ?? 'operation failed'}`);
     return result.data ?? {};
   }
+  async observe(runId: string): Promise<{ url: string; captured_at: string }> {
+    return this.serial(runId, false, async () => {
+      const metadata = await this.request(runId, 'evaluate', { code: viewportExpression });
+      const viewport = parseViewport(metadata);
+      if (viewport) this.viewports.set(runId, viewport);
+      return { url: viewport?.url ?? '', captured_at: new Date().toISOString() };
+    });
+  }
   async call(runId: string, action: string, args: RecordValue = {}): Promise<RecordValue> {
     return this.serial(runId, false, async () => {
       const result = await this.request(runId, action, args);

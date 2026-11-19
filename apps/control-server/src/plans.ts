@@ -24,7 +24,7 @@ export class PlanService {
       if(pinned&&pinned.selection_mode!=='auto'&&((pinned.device_id&&pinned.device_id!==device)||(pinned.engine&&pinned.engine!==selectedEngine)))throw new ApiError(422,'pinned_execution_mismatch','计划不能改变用户指定的电脑或引擎');
       if(item.depends_on_keys!==undefined&&(!Array.isArray(item.depends_on_keys)||item.depends_on_keys.length>20))throw new ApiError(422,'invalid_dependency','依赖任务格式无效');
       const depends_on_keys=[...new Set((item.depends_on_keys??[]).map((k:unknown)=>text(k,'dependency',100)))];
-      proposed.push({item_key:key,title:text(item.title??item.goal,'title',200),goal:text(item.goal,'goal'),deliverables:deliverables(item.deliverables),engine:selectedEngine,device_id:device,depends_on_keys,parent_item_key:item.parent_item_key?text(item.parent_item_key,'parent_item_key',100):null,...(item.model_id?{model_id:text(item.model_id,'model_id',200)}:{})});
+      proposed.push({item_key:key,title:text(item.title??item.goal,'title',200),goal:text(item.goal,'goal'),deliverables:deliverables(item.deliverables),engine:selectedEngine,device_id:device,depends_on_keys,parent_item_key:item.parent_item_key?text(item.parent_item_key,'parent_item_key',100):null,...(item.model_id?{model_id:text(item.model_id,'model_id',200)}:{}),...(item.memory_scope?{memory_scope:item.memory_scope}:{})});
     }
     validatePlanGraph(proposed);
     const summary=text(body.summary??proposed.map(i=>i.title).join('\n'),'summary',10000);

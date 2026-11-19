@@ -37,6 +37,8 @@ export interface ArtifactMetadata {
   id: string; task_id: string; run_id: string | null; name: string; mime: string;
   size: number; status: string; created_at: string; version?: number;
   integrity?: 'server_snapshot' | 'legacy_unverified'; finalized_at?: string | null;
+  evidence_kind?: 'page_capture' | 'screenshot' | 'memory_retrieval';
+  provenance?: 'tool_broker' | null; captured_at?: string | null; source_url?: string | null;
 }
 export interface TaskReview extends TaskReviewInput { id: string; task_id: string; created_at: string; version: number }
 export interface TaskEvidence {
@@ -59,21 +61,38 @@ export interface ToolStep extends Omit<ToolStepUpdate, 'step_id'> {
 export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; task_id: string | null; created_at: string }
 export interface Question { id: string; task_id: string; run_id: string; text: string; options: string[]; status: 'open' | 'answered' | 'cancelled'; version: number; created_at: string }
 export type MemoryType = 'preference' | 'website' | 'procedure' | 'project' | 'experience';
-export interface Memory { id: string; title: string; content: string; type: MemoryType; site: string | null; status: 'candidate' | 'verified' | 'stale'; version: number; updated_at: string }
+export type MemoryStatus = 'candidate' | 'verified' | 'stale' | 'expired' | 'superseded';
+export type MemoryRole = 'user' | 'planner' | 'worker';
+export interface MemoryAccess {
+  role: MemoryRole; project: string | null; sites: string[]; global_preference: boolean;
+  statuses: MemoryStatus[]; max_version: number | null;
+}
+export interface Memory { id: string; title: string; content: string | null; type: MemoryType; site: string | null; status: MemoryStatus; version: number; updated_at: string; fresh?: boolean; stale?: boolean; stale_reason?: string | null }
 export type CostSource = 'supplier_reported' | 'estimated' | 'unavailable';
 export { canTransitionRun, canStartReplacement, moneyToTicks, ticksToMoney, summarizeCosts } from './invariants.js';
 export interface CostTotal { currency: string; amount: string; source: CostSource }
 export interface CostSummary { totals: CostTotal[]; input_tokens: number; output_tokens: number; unknown_count: number; request_count: number; coverage: number; as_of: string }
 export interface CostPoint { date: string; currency: string; amount: string; source: CostSource; input_tokens: number; output_tokens: number }
 export interface CostBreakdown { key: string; label: string; currency: string; amount: string; request_count: number; unknown_count: number }
-export interface Budget { monthly_limit_usd: string | null; task_limit_usd: string | null; used_usd: string; version: number }
+export interface Budget { monthly_limit_usd: string | null; task_limit_usd: string | null; used_usd: string; version: number; unknown_count?: number }
+export type BudgetCategory = 'worker' | 'assistant' | 'review' | 'proactive';
+export type BudgetStopReason = 'token_limit' | 'time_limit' | 'model_call_limit' | 'tool_step_limit' | 'budget_exhausted' | 'budget_unknown';
+/** Observable run limits. These are not a provider-enforced dollar ceiling. */
+export interface RuntimeBudgetLimits { max_total_tokens: number; max_model_calls: number; max_tool_steps: number; max_runtime_ms: number }
+export const DEFAULT_BUDGET_LIMITS: Record<BudgetCategory, RuntimeBudgetLimits> = {
+  worker: { max_total_tokens: 200_000, max_model_calls: 40, max_tool_steps: 80, max_runtime_ms: 1_200_000 },
+  assistant: { max_total_tokens: 80_000, max_model_calls: 12, max_tool_steps: 40, max_runtime_ms: 600_000 },
+  review: { max_total_tokens: 40_000, max_model_calls: 6, max_tool_steps: 12, max_runtime_ms: 180_000 },
+  proactive: { max_total_tokens: 40_000, max_model_calls: 4, max_tool_steps: 20, max_runtime_ms: 600_000 },
+};
+export const BUDGET_IN_FLIGHT_BOUNDARY = '停止只阻断下一次受管模型调用和工具步骤。已经发出的 Grok 请求，以及 Codex 当前内部回合，仍可能完成并记入用量。未知金额不按 0 美元计算，也不构成供应商账户硬额度。';
 export interface Frame { frame_id: string; image_base64: string; width: number; height: number; captured_at: string; viewport_version: string; tab_id: string | null }
 export interface ApiError { error: { code: string; message: string; retryable: boolean; request_id?: string } }
 export interface ServerEvent { event_id: string; stream_seq: string; type: string; occurred_at: string; task_id?: string | null; run_id?: string | null; entity_version?: number; payload: Record<string, unknown> }
 export interface RuntimeSelection { engine: Engine; model_id: string; local_profile_id: string }
 export interface RunStartPayload { command_id: string; tenant_id: string; task_id: string; run_id: string; device_id: string; lease_epoch: string; scope_version_id: string; capability_generation: number; runtime: RuntimeSelection; expires_at: string; lease_valid_for_ms: number; checkpoint_id: string | null; budget_grant_id: string }
 export interface WireMessage<T = Record<string, unknown>> { protocol_version: '1.0'; message_id: string; kind: string; sent_at: string; payload: T }
-export interface RunContext { run: Run; task: Task; scope: Record<string, unknown>; checkpoint: Record<string, unknown> | null; run_ticket: string; lease_valid_for_ms: number }
+export interface RunContext { run: Run; task: Task; scope: Record<string, unknown>; checkpoint: Record<string, unknown> | null; run_ticket: string; lease_valid_for_ms: number; budget?: { grant_id: string; category: BudgetCategory; limits: RuntimeBudgetLimits; money_treatment: 'known' | 'unknown_not_zero' | 'unconfigured'; in_flight_boundary: string } | null }
 export interface PairingStart { pairing_id: string; code: string; polling_secret: string; expires_at: string }
 export interface PairingResult { status: 'pending' | 'claimed'; device_id?: string; tenant_id?: string }
 export const TERMINAL_RUN_STATES = new Set<RunState>(['succeeded', 'failed', 'cancelled', 'paused']);
