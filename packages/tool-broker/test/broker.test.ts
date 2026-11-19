@@ -4,6 +4,7 @@ import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ToolBroker, BrowserActor, startToolBridge } from '../src/index.js';
+import { memoryFailureClass } from '../src/evidence.js';
 import { imageSize } from '../src/browser.js';
 
 test('workspace file tools refuse parent traversal and symlink escape', async () => {
@@ -21,6 +22,40 @@ test('workspace file tools refuse parent traversal and symlink escape', async ()
     try { assert.equal((await fetch(`${bridge.url}/tools`)).status, 401); assert.equal((await fetch(`${bridge.url}/tools`, { headers: { authorization: `Bearer ${bridge.token}` } })).status, 200); }
     finally { await bridge.close(); }
   } finally { await rm(dir, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
+});
+
+test('memory denial drops cached text and navigation still reaches the browser', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'super-agent-memory-')), calls: string[] = [], cache = new Map<string, unknown>();
+  let reads = 0;
+  const browser = new BrowserActor('http://csi.invalid', (async (_url: unknown, init: RequestInit) => {
+    const command = JSON.parse(String(init.body)) as { action: string };
+    calls.push(command.action);
+    return Response.json({ success: true, data: command.action === 'evaluate' ? { value: JSON.stringify({ width: 10, height: 10, scale: 1, url: 'https://fixture.invalid/', scroll_x: 0, scroll_y: 0 }) } : {} });
+  }) as typeof fetch);
+  const deny = () => Object.assign(new Error('not_found'), { status: 404, code: 'not_found' });
+  const broker = new ToolBroker({ runId: 'run', cwd: dir, browser, signal: new AbortController().signal, assertActive: () => {}, ask: async () => '',
+    memoryCache: {
+      lookup: (kind, fingerprint) => cache.has(`${kind}:${fingerprint}`) ? { hit: true, stale: false, observed_at: '2026-11-19T00:00:00.000Z', value: cache.get(`${kind}:${fingerprint}`) } : { hit: false },
+      store: (kind, fingerprint, value) => { cache.set(`${kind}:${fingerprint}`, value); },
+      markOffline: () => {},
+      drop: (kind, fingerprint) => { cache.delete(`${kind}:${fingerprint}`); },
+    },
+    request: async (path) => {
+      if (path === '/node/memory/read') { reads += 1; if (reads === 1) return { id: 'm1', content: 'secret-body', status: 'verified', version: 1, fresh: true }; throw deny(); }
+      if (path === '/node/memory/search') throw deny();
+      throw new Error('evidence-upload-unavailable');
+    } });
+  try {
+    assert.equal(memoryFailureClass(deny()), 'deny');
+    assert.equal(memoryFailureClass(Object.assign(new Error('down'), { status: 503, code: 'recall_credentials_invalid' })), 'deny');
+    assert.equal(memoryFailureClass(Object.assign(new Error('down'), { status: 503, code: 'recall_unreachable' })), 'offline');
+    const first = await broker.execute('memory_read', { id: 'm1' }) as { content?: string };
+    assert.equal(first.content, 'secret-body');
+    await assert.rejects(broker.execute('memory_read', { id: 'm1' }), /not_found/);
+    assert.equal(cache.size, 0);
+    await broker.execute('browser_navigate', { url: 'https://fixture.invalid/path' });
+    assert.ok(calls.includes('navigate'));
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('browser actor prevents concurrent owners, serializes operations and enforces human mode', async () => {

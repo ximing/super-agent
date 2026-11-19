@@ -28,7 +28,17 @@ export class GrokRuntime implements RuntimeAdapter {
       await context.emit({ type: 'progress', summary: `Grok 正在处理第 ${round + 1} 轮` });
       const body: Obj = { model: context.modelId, input: previous ? input.splice(0) : input, tools: context.tools.map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters })), max_output_tokens: this.options.maxOutputTokens ?? 4096, store: true };
       if (previous) body.previous_response_id = previous;
-      const response = await this.request(fetcher, body, signal);
+      let response: Obj;
+      try { response = await this.request(fetcher, body, signal); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (/^grok_http_|^grok_retry_exhausted$/.test(message)) {
+          const failed = { request_key: `xai:failed:${context.runId}:${round}`, input_tokens: null, cached_input_tokens: null, output_tokens: null, reasoning_tokens: null };
+          await context.emit({ type: 'usage', usage: failed });
+          context.budget?.noteUsage?.(failed);
+        }
+        throw error;
+      }
       const responseId = typeof response.id === 'string' ? response.id : `local-${randomUUID()}`;
       await context.emit({ type: 'binding', binding: { response_id: responseId } });
       const usage = (response.usage ?? {}) as Obj;

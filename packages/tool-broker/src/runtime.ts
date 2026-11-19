@@ -10,6 +10,7 @@ export interface UsageSample {
   output_tokens: number | null;
   reasoning_tokens: number | null;
   cost_ticks?: string;
+  occurred_at?: string;
 }
 export type RuntimeEvent =
   | { type: 'progress'; summary: string }
@@ -31,7 +32,7 @@ export interface RuntimeContext {
   mcp?: { url: string; token: string; script: string };
   developerInstructions?: string;
   /** Checked before a controllable model request. Codex cannot intercept its own inner sampling loop. */
-  budget?: { beforeModelCall: () => void; noteUsage?: (usage: UsageSample) => string | null };
+  budget?: { beforeModelCall: () => void; beforeToolCall?: () => void; noteUsage?: (usage: UsageSample) => string | null };
 }
 export interface RuntimeResult { text: string; binding?: Record<string, string> }
 export interface RuntimeAdapter {

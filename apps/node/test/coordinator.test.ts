@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import type { TaskEvidence } from '@super-agent/protocol';
 import type { RuntimeAdapter, RuntimeContext } from '@super-agent/tool-broker';
 import { readReviewArtifact, reviewDelivery } from '../src/coordinator.js';
+import { BudgetGuard } from '../src/budget-guard.js';
+import { DEFAULT_BUDGET_LIMITS } from '@super-agent/protocol';
 
 function fixture(): TaskEvidence {
   return {
@@ -55,4 +57,29 @@ test('signed evidence reads carry no product authorization, reject binary and en
   await assert.rejects(readReviewArtifact({ ...artifact, mime: 'application/pdf' }, 'https://objects.example/signed', signal, fetcher), /requires_human/);
   await assert.rejects(readReviewArtifact({ ...artifact, integrity: 'legacy_unverified' }, 'https://objects.example/signed', signal, fetcher), /requires_human/);
   await assert.rejects(readReviewArtifact(artifact, 'http://objects.example/signed', signal, fetcher), /url_invalid/);
+});
+
+test('review tool calls stop on the call after the tool limit and do not execute it', async () => {
+  const guard = new BudgetGuard({ ...DEFAULT_BUDGET_LIMITS.review, max_tool_steps: 12 });
+  await reviewDelivery({ evidence: fixture(), cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => 'VERIFIED',
+    budget: { beforeModelCall: () => guard.beforeModelCall(), beforeToolCall: () => guard.beforeToolCall() },
+    adapter: adapter(async context => {
+      for (let count = 0; count < 12; count += 1) await context.executeTool('delivery_evidence', {});
+      await assert.rejects(context.executeTool('delivery_evidence', {}), /tool_step_limit/);
+    }) });
+  assert.equal(guard.tools, 12);
+});
+
+test('accept cannot cite an observation artifact the reviewer did not read', async () => {
+  const evidence = fixture();
+  evidence.steps = [{ id: 'step-1', run_id: 'run-1', title: '读取网页', tool: 'browser_snapshot', status: 'succeeded', started_at: '', completed_at: '', error_code: null, created_at: '', version: 1 }];
+  evidence.artifacts.push({ id: 'page-1', task_id: 'task-1', run_id: 'run-1', name: 'page.json', mime: 'application/json', size: 2, status: 'ready', created_at: '', integrity: 'server_snapshot', evidence_kind: 'page_capture', provenance: 'tool_broker', fresh: true });
+  evidence.delivery!.artifact_ids = ['artifact-1', 'page-1'];
+  await reviewDelivery({ evidence, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => 'PAGE',
+    adapter: adapter(async context => {
+      await context.executeTool('delivery_artifact_read', { id: 'artifact-1' });
+      await assert.rejects(context.executeTool('delivery_review', { verdict: 'accept', summary: '只读了报告。', checks: [{ deliverable_index: 0, passed: true, evidence_refs: [{ kind: 'artifact', id: 'artifact-1' }, { kind: 'artifact', id: 'page-1' }] }] }), /read_observation/);
+      await context.executeTool('delivery_artifact_read', { id: 'page-1' });
+      await context.executeTool('delivery_review', { verdict: 'accept', summary: '已读取页面证据。', checks: [{ deliverable_index: 0, passed: true, evidence_refs: [{ kind: 'artifact', id: 'page-1' }] }] });
+    }) });
 });

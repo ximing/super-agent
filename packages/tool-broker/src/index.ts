@@ -8,7 +8,7 @@ export * from './runtime.js';
 export { BrowserActor } from './browser.js';
 import { BrowserActor } from './browser.js';
 import { ArtifactTools } from './artifacts.js';
-import { memoryRetrievalEvidence, pageEvidence, screenshotEvidence } from './evidence.js';
+import { memoryFailureClass, memoryRetrievalEvidence, pageEvidence, screenshotEvidence } from './evidence.js';
 import type { ToolStepUpdate } from '@super-agent/protocol';
 
 type Args = Record<string, unknown>;
@@ -33,7 +33,7 @@ export interface BrokerOptions {
   onOperation?: (name: string, result: unknown) => void | Promise<void>;
   onUncertain?: (name: string) => void;
   onStep?: (step: ToolStepUpdate) => void | Promise<void>;
-  memoryCache?: { lookup: (kind: 'search' | 'read', fingerprint: string) => { hit: true; stale: boolean; observed_at: string; value: unknown } | { hit: false }; store: (kind: 'search' | 'read', fingerprint: string, value: unknown) => void; markOffline: () => void; invalidate?: () => void };
+  memoryCache?: { lookup: (kind: 'search' | 'read', fingerprint: string) => { hit: true; stale: boolean; observed_at: string; value: unknown } | { hit: false }; store: (kind: 'search' | 'read', fingerprint: string, value: unknown) => void; markOffline: (offline?: boolean) => void; invalidate?: () => void; drop?: (kind: 'search' | 'read', fingerprint: string) => void };
 }
 export class ToolBroker {
   constructor(private readonly options: BrokerOptions) {}
@@ -84,8 +84,8 @@ export class ToolBroker {
   }
   private async publishEvidence(stepId: string, document: Record<string, unknown>, bytes: Buffer, name: string, mime: string): Promise<Record<string, unknown>> {
     try {
-      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: document.source_url ?? null, step_id: stepId });
-      return { evidence_kind: document.evidence_kind, captured_at: document.captured_at, source_url: document.source_url ?? null, artifact_id: artifact.id, evidence_status: artifact.status ?? 'ready', viewer_required: false };
+      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: document.source_url ?? null, step_id: stepId, fresh: document.fresh !== false, stale: document.stale === true });
+      return { evidence_kind: document.evidence_kind, captured_at: document.captured_at, source_url: document.source_url ?? null, artifact_id: artifact.id, evidence_status: artifact.status ?? 'ready', fresh: document.fresh !== false, stale: document.stale === true, viewer_required: false };
     } catch { return { evidence_status: 'not_frozen', evidence_kind: document.evidence_kind, viewer_required: false }; }
   }
   private async perform(name: string, args: Args, markUnsafe: () => void, stepId: string): Promise<unknown> {
@@ -105,7 +105,9 @@ export class ToolBroker {
       case 'browser_navigate': {
         const url = new URL(string(args, 'url', 4096));
         if (!['https:', 'http:'].includes(url.protocol)) throw new Error('unsupported_url_protocol');
-        const knowledge = await this.options.request('/node/memory/search', { query: url.hostname, site: url.hostname, limit: 5 });
+        let knowledge: unknown = { items: [], knowledge_status: 'unavailable' };
+        try { knowledge = await this.options.request('/node/memory/search', { query: url.hostname, site: url.hostname, limit: 5 }); }
+        catch (error) { knowledge = { items: [], knowledge_status: memoryFailureClass(error) === 'deny' ? 'out_of_scope' : 'unavailable' }; }
         markUnsafe();
         const navigation = await browser.call(runId, 'navigate', { url: url.href, newTab: true, group_title: 'Super-agent 任务' });
         let evidence: Record<string, unknown> = { evidence_status: 'not_frozen', viewer_required: false };
@@ -140,18 +142,14 @@ export class ToolBroker {
       case 'memory_search': {
         const query = string(args, 'query'), site = args.site, limit = Math.min(20, Math.max(1, Number(args.limit ?? 5)));
         const fingerprint = JSON.stringify({ runId, query, site: site ?? null, limit });
-        let found: { items?: unknown[]; scope?: unknown };
-        try { found = await this.options.request('/node/memory/search', { query, site, limit }); this.options.memoryCache?.store('search', fingerprint, found); }
-        catch (error) { const cached = this.options.memoryCache?.lookup('search', fingerprint); if (!cached?.hit) { this.options.memoryCache?.markOffline(); throw error; } found = cached.value as { items?: unknown[]; scope?: unknown }; }
-        const document = memoryRetrievalEvidence({ capturedAt: new Date().toISOString(), runId, stepId, query, scope: found.scope ?? null, hits: Array.isArray(found.items) ? found.items : [] });
+        const found = await this.cachedMemory('search', fingerprint, () => this.options.request<{ items?: unknown[]; scope?: unknown }>('/node/memory/search', { query, site, limit }));
+        const document = memoryRetrievalEvidence({ generatedAt: new Date().toISOString(), runId, stepId, query, scope: found.scope ?? null, hits: Array.isArray(found.items) ? found.items : [] });
         result = { ...found, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `memory-search-${stepId}.json`, 'application/json') }; break;
       }
       case 'memory_read': {
         const id = string(args, 'id', 100), fingerprint = JSON.stringify({ runId, id });
-        let memory: Record<string, unknown>;
-        try { memory = await this.options.request('/node/memory/read', { id }); this.options.memoryCache?.store('read', fingerprint, memory); }
-        catch (error) { const cached = this.options.memoryCache?.lookup('read', fingerprint); if (!cached?.hit) { this.options.memoryCache?.markOffline(); throw error; } memory = cached.value as Record<string, unknown>; }
-        const document = memoryRetrievalEvidence({ capturedAt: new Date().toISOString(), runId, stepId, query: `id:${id}`, scope: null, hits: [memory] });
+        const memory = await this.cachedMemory('read', fingerprint, () => this.options.request<Record<string, unknown>>('/node/memory/read', { id }));
+        const document = memoryRetrievalEvidence({ generatedAt: new Date().toISOString(), runId, stepId, query: `id:${id}`, scope: null, hits: [memory] });
         result = { ...memory, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `memory-read-${stepId}.json`, 'application/json') }; break;
       }
       case 'memory_propose': {
@@ -186,6 +184,20 @@ export class ToolBroker {
     }
     await this.options.onOperation?.(name, result);
     return result;
+  }
+  private async cachedMemory<T>(kind: 'search' | 'read', fingerprint: string, load: () => Promise<T>): Promise<T> {
+    try {
+      const value = await load();
+      this.options.memoryCache?.markOffline(false);
+      this.options.memoryCache?.store(kind, fingerprint, value);
+      return value;
+    } catch (error) {
+      if (memoryFailureClass(error) === 'deny') { this.options.memoryCache?.drop?.(kind, fingerprint); throw error; }
+      this.options.memoryCache?.markOffline(true);
+      const cached = this.options.memoryCache?.lookup(kind, fingerprint);
+      if (!cached?.hit || cached.stale !== true) throw error;
+      return cached.value as T;
+    }
   }
   private artifacts(): ArtifactTools { return new ArtifactTools({ resolvePath: (path, create) => this.path(path, create), request: this.options.request, signal: this.options.signal, assertActive: this.options.assertActive, fetcher: this.options.fetcher }); }
   private async path(path: string, create: boolean): Promise<string> {

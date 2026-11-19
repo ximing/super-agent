@@ -64,7 +64,7 @@ launchctl bootout "gui/$(id -u)/com.superagent.node"
 
 在控制端设置中绑定本人 `https://recall.aimo.plus` 账号 PAT。已发布内容与版本来自 Recall；节点按当前任务授权检索，不获得 PAT。新探索先生成候选，控制端审核并发布后供后续任务使用。
 
-任务要读取站点记忆时，创建任务带上 `memory_scope`，例如 `{"project":"isolated-test","sites":["example.com"],"global_preference":false}`。不填写站点时，空站点的公司记忆不会被这个任务读到。全局偏好还要在记忆上标记 `scope_kind=global`，并在执行设置里显式打开 `memory_global_read`。任务结束后的复盘是待审核候选，不会自动变成已验证。
+任务要读取站点记忆时，创建任务带上 `memory_scope`，例如 `{"project":"isolated-test","sites":["example.com"],"global_preference":false}`。不填写站点时，空站点的公司记忆不会被这个任务读到。打开网页仍会执行；如果该站点不在记忆范围里，只会少一份网站档案，不会因此取消导航。全局偏好还要在记忆上标记 `scope_kind=global`，并在执行设置里显式打开 `memory_global_read`。任务成功或失败后的复盘都是待审核候选，不会自动变成已验证，推断也不会在发布时被改成事实。另一台电脑改过记忆后，本机会在下次事件同步时丢弃本地缓存。
 
 预算页面里的未知金额不是 0。设置了月额度后，只要本期还有未知金额，新任务不会按美元余额放行。运行中还会受到 Token、模型次数、工具步和时间限制；超过后停止后续可控步骤。已经发给模型的当前请求仍可能计费，尤其是 Codex 和 Grok CLI 已经开始的内部回合。
 

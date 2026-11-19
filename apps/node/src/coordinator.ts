@@ -35,6 +35,7 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
     }, ['verdict', 'summary', 'checks']) },
   ];
   const executeTool = async (name: string, args: Args): Promise<unknown> => {
+    options.budget?.beforeToolCall?.();
     options.assertActive(); options.signal.throwIfAborted();
     if (!definitions.some(tool => tool.name === name)) throw new Error('verification_tool_not_allowed');
     if (name === 'delivery_evidence') return evidence;
@@ -64,10 +65,11 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
         if (kind === 'checkpoint' && evidence.checkpoint?.id !== id) throw new Error('invalid_review_reference');
         return { kind, id } as EvidenceReference;
       });
-      if (args.verdict === 'accept' && (!value.passed || !references.some(ref => ref.kind === 'artifact' && read.has(ref.id)))) throw new Error('review_requires_independently_read_artifact');
+      const readArtifacts = references.filter(ref => ref.kind === 'artifact' && read.has(ref.id));
+      if (args.verdict === 'accept' && (!value.passed || !readArtifacts.length)) throw new Error('review_requires_independently_read_artifact');
       const needsObservation = evidence.steps.some(step => step.status === 'succeeded' && /^(browser_|memory_)/.test(step.tool));
-      const observed = references.some(ref => ref.kind === 'artifact' && evidence.artifacts.some(item => item.id === ref.id && item.provenance === 'tool_broker' && ['page_capture', 'screenshot', 'memory_retrieval'].includes(item.evidence_kind ?? '')));
-      if (args.verdict === 'accept' && needsObservation && !observed) throw new Error('review_requires_observation_evidence');
+      const currentObservation = (id: string) => evidence.artifacts.some(item => item.id === id && item.provenance === 'tool_broker' && ['page_capture', 'screenshot', 'memory_retrieval'].includes(item.evidence_kind ?? '') && item.fresh !== false && item.stale !== true);
+      if (args.verdict === 'accept' && needsObservation && !readArtifacts.some(ref => currentObservation(ref.id))) throw new Error('review_requires_read_observation');
       checks.push({ deliverable_index: index, passed: value.passed, evidence_refs: references });
     }
     if (args.verdict === 'accept' && (!evidence.deliverables.length || checks.length !== evidence.deliverables.length)) throw new Error('review_requires_all_deliverables');

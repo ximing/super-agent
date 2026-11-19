@@ -40,6 +40,13 @@ export function dollarAdmission(budget: Doc, reservations: Doc[], nextAmount: st
   return { ok: true, reason: null };
 }
 
+/** Cumulative task usage ignores wall-clock age so an old task is not expired merely by its creation time. */
+export function accumulatedStop(limits: RuntimeBudgetLimits, usage: BudgetUsage): string | null {
+  if (usage.model_calls >= limits.max_model_calls) return 'model_call_limit';
+  if (usage.input_tokens + usage.output_tokens >= limits.max_total_tokens) return 'token_limit';
+  return null;
+}
+
 export function evaluateLimits(limits: RuntimeBudgetLimits, usage: BudgetUsage, now = Date.now()): { stop: boolean; reason: string | null } {
   if (now - usage.started_at >= limits.max_runtime_ms) return { stop: true, reason: 'time_limit' };
   if (usage.model_calls >= limits.max_model_calls) return { stop: true, reason: 'model_call_limit' };

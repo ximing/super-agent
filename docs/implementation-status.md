@@ -1,6 +1,6 @@
 # 实施状态
 
-更新：2026-11-19。此文件区分代码、测试与部署，不将单元测试通过等同于生产就绪。**此前团队 DAG、独立交付验收、证据快照、工具时间线及通知 outbox 已实现并通过云 TEST，并部署生产镜像 32eb39d8。本轮记忆治理、业务观察证据和运行中预算限制已完成代码与本地单元测试，未部署，也未做云 TEST 或真实验收。**
+更新：2026-11-19。此文件区分代码、测试与部署，不将单元测试通过等同于生产就绪。**此前团队 DAG、独立交付验收、证据快照、工具时间线及通知 outbox 已部署生产镜像 32eb39d8。记忆范围、观察证据和运行预算的首轮实现之后，本轮补上权限缓存、证据新鲜度、验收读取、脱敏、协调预算和跨机失效。代码与云 TEST 已通过，尚未部署，也未做公司业务真实验收。**
 
 ## 当前已验证
 
@@ -72,8 +72,8 @@ v0.2.1-preview.1已公开发布，但发布/验签不等同安装后的全部真
 | 多 Agent 团队 | 计划归属、父子 Task、依赖 DAG/拓扑放行、失败阻塞/取消传播、持久 Coordinator 事件与汇总/待确认再规划，云 TEST 已验证 | 真实多 Mac 业务验收；Codex 原生 multi_agent 当前关闭，产品层 Task 图不冒充原生 Agent/Run 树 |
 | 交付验收 | Run 完成→awaiting_review，独立只读 reviewer/人工逐条标准核对，固定 checkpoint 与不可旧 PUT 改写的产物；ToolBroker 另保存网页正文、截图清单和记忆检索引用 | 真实模型审核质量、公司网站业务状态的人工验收；截图像素判断和无法独立核实的结论仍是 needs_input |
 | 主动性 | 固定间隔提醒、待确认方案；通知自身的时区/跨午夜/DST 静默时段已实现 | 网站/系统事件观察、条件触发、复杂日历/时区调度规则、个性化建议和持续偏好学习 |
-| 记忆学习与治理 | 本人 Recall 绑定；服务端按任务的项目、站点、状态和版本过滤 search 与按 ID read；空站点不是通配；全局偏好要同时有显式 global 范围和 `memory_global_read`；复盘只写本地 candidate；冲突/替代/过期只写产品侧关系；节点缓存有界，离线或失效时标 stale 并去掉正文 | 不改写、删除或批量发布公司 Recall；跨电脑的实时失效广播还没有，其他电脑在缓存 TTL 内可能看到本机旧结果；真实隔离项目的 Recall 写入本轮没有配置，因此跳过 |
-| 成本预算 | 原有用量账本和 Run 预留；预留按 operation key 幂等；未知金额不计入 0 美元，配置了月额度时未知金额会拒绝新的美元准入；Worker、主助理、reviewer、主动任务有 Token/次数/时间/工具步限制，超限停止下一次可控调用 | 不是供应商美元硬上限。Codex 内部回合和 Grok CLI 的隐藏推理轮不能在每一步之前拦截；已经发出的请求仍可能产生用量。没有价格表估算，也没有把外部工具费用单独拆账 |
+| 记忆学习与治理 | 任务范围过滤 search 与按 ID read；权限拒绝不回放缓存正文；复盘 candidate 保留项目和证据链；失败经验也只作候选；节点按 `memory.changed` 游标清空缓存 | 不改写公司 Recall；失效靠事件轮询而不是推送，两次轮询之间仍可能短暂使用旧缓存；真实隔离项目的 Recall 写入没有单独配置，因此跳过 |
+| 成本预算 | 原账本加上分类预留；同一任务跨 Run 累计 Token 和模型次数；review 工具步计入上限；迟到用量保留首次 `occurred_at`；失败的 Grok 直连请求记一笔未知用量 | 不是供应商美元硬上限。Codex 内部回合和 Grok CLI 隐藏轮不能逐步拦截。整棵 DAG 不自动共享一个额度。没有价格表估算 |
 | 图片与画面 | 人可以看网页截图，模型用 DOM/文本工具操作 | 截图/图片的模型视觉输入链路；完整桌面、其他 App、视频、完整远程键鼠仍为后续范围 |
 | 跨机恢复 | 新 Run、检查点与同任务云附件可交接 | 完整环境预检、文件清单自动恢复、无人故障接任、可靠的原生会话恢复；重启后未知执行仍需核对 |
 | 进度展示 | 状态、摘要、提问、画面/结果、安全工具步骤时间线；团队与验收 DTO 已实现 | 新客户端真机团队展示验收；原生 SubAgent 树及更细业务阶段进度 |
@@ -86,15 +86,17 @@ v0.2.1-preview.1已公开发布，但发布/验签不等同安装后的全部真
 
 首版定时关注支持创建/启停/删除，触发后提醒并准备待确认目标，确认后执行。应用前台用持久 REST 增量轮询；尚未实现 WSS；服务端厂商推送代码、TEST和生产部署已完成，但真实厂商配置及实际设备送达尚未验收，不声称应用关闭后已经可收到通知。
 
-## 本轮 P0：记忆、观察证据、运行预算
+## 记忆、观察证据、运行预算
 
-状态：代码完成，相关包 typecheck 通过，本地单元测试通过。云 PostgreSQL / 私有 S3 集成本轮环境没有 `TEST_DATABASE_URL`，11 项云测试跳过。没有部署，没有改生产库，没有对公司 Recall 做写入。Mac 界面重构仍是工作区里别人的未提交改动，本轮没有改客户端界面。
+状态：代码完成。控制服务云 TEST 51/51 通过，跨组件云集成 7/7 通过，node 25、tool-broker 14、runtime-grok 10、runtime-codex 7 通过。没有部署，没有改生产库，没有对公司 Recall 做写入。Mac 界面和 Android 图标仍是其他工作区改动，本轮没有改客户端界面。
 
-- 记忆：`POST /node/memory/search` 和 `POST /node/memory/read` 都带运行或主助理身份。Worker 使用任务 `scope.memory`；没有站点范围时不返回空站点记忆。Planner 没有任务时只在设置 `memory_global_read=true` 时读取 `scope_kind=global` 的偏好。猜到其他范围的 ID 返回 404。任务成功后写一条本地复盘，`status=candidate`，`claim=inference`，相同 `retrospective:<run id>` 不重复写，也不调用 Recall 发布。`POST /memories/:id/relations` 只给登录用户记录冲突、替代或过期，不 PATCH 公司正文。
-- 证据：`browser_snapshot`、导航后的页面读取、`browser_screenshot` 和记忆 search/read 在 ToolBroker 里生成证据并走现有 staging/finalize。截图不调用画面订阅接口，没有人看画面也可以保存。网页正文记录捕获时间、去掉账号和查询串的 URL、截断和脱敏。记忆证据只保留查询、范围、版本和来源引用。自动验收在运行里有成功的浏览器或记忆步骤时，必须引用 `provenance=tool_broker` 且 `integrity=server_snapshot` 的观察产物；工具成功、检查点或 Worker 报告不够。无法满足时接口返回 422，reviewer 继续 `needs_input`。
-- 预算：不新开账本。预留仍在 `budget_reservations`，用量仍按 request key 和 revision 去重。迟到用量在预留已释放或过期后保留账目并标 `late_usage`。默认限制来自协议里的 worker/assistant/review/proactive。续租发现超限时暂停运行。节点在下一次模型调用和工具步骤前停止。Grok 直连循环可以在每次请求前检查；Codex 只在 `turn/start` 前检查，并在用量通知后 `turn/interrupt`；Grok CLI 只在提交 prompt 前检查。这三处都不能把已发出的内部回合收回。
+上一轮浏览器接管集成在导航前失败，原因是打开网页时的记忆预取被任务范围拒绝，导航没有发出。现在范围拒绝只让预取返回 `out_of_scope`，授权导航继续执行。定向云集成已通过。
 
-没有新增数据库迁移。001/002/003 未改。新字段放在既有 JSON 文档里。
+- 记忆：search 和按 ID read 都检查任务范围。401/403/404 以及凭据失效类 503 不会回退缓存正文，并丢掉该条缓存。只有网络故障可以返回缓存，且必须是 `stale`、正文为空。成功响应会清除离线标记。节点通过 `GET /node/events` 续读 `memory.changed`，断线后从本地游标继续。复盘 candidate 使用 `governance.applicability.project`。审核发布保留 claim、证据引用、来源 Run 和项目，推断不会被改成事实。未来的带时区到期时间不会立刻标 expired。失败 Run 也会写一条未发布的失败经验候选。
+- 证据：网页正文和其中的 URL 副本都会去掉账号、fragment 和 `code`/`token`/`ticket` 等认证参数。记忆证据分开记录原始 `observed_at`、生成时间和 fresh/stale。过期或离线缓存的 `fresh=false`，不能作为当前事实自动验收。自动 accept 引用的观察产物必须是本次 reviewer 实际读取过的。证据不足继续 `needs_input`。
+- 预算：Worker 按同一任务跨 Run 累计 Token 和模型次数，不把整棵 DAG 自动并成一个额度。助理、reviewer、主动规划和事件汇总在调用模型前走 `POST /assistant/budget/reserve`，相同 operation key 不重复预留。定时规划记为 `proactive`，交付审核记为 `review`，其余协调记为 `assistant`。Review 的每个只读工具都计入工具步。Codex MCP 走同一 `executeTool`。用量可带 `occurred_at`，重复回执保留第一次的发生时间。Grok 直连在请求失败时记一笔未知用量。已发出的 Codex 内部回合和 Grok CLI 隐藏轮次仍可能计费。
+
+没有新增数据库迁移。001/002/003 未改。新字段放在既有 JSON 文档和事件流里。客户端界面尚未接入这些字段。
 
 所有本机模型 Key、数据库连接串、设备私钥和 OIDC 管理密码均不在仓库或本文件中。真实配置由被忽略的环境文件和云服务器配置持有。
 

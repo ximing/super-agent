@@ -105,7 +105,8 @@ export class AgentRecallAdapter {
     let raw=found.memories?.[0];
     if(!raw){const result=await this.call(binding,tx.tenant,'/api/memories','POST',{content:input.content,type:typeMap[input.type],tags:[`sa-type:${input.type}`,opTag],...(binding.project?{project:binding.project}:{})});raw=result.memory;}
     if(!raw)throw new ApiError(503,'recall_response_invalid','记忆服务未返回创建结果');
-    await tx.put('memories',{title:input.title,type:input.type,site:input.site,scope_kind:input.scope_kind,status:'verified',external_id:raw.id,recall_chain_id:raw.chainId??raw.id},uuid(raw.id));
+    const governance=body.governance&&typeof body.governance==='object'?{...body.governance,verification:'verified',claim:body.governance.claim==='fact'?'fact':body.governance.claim??'inference'}:null;
+    await tx.put('memories',{title:input.title,type:input.type,site:input.site,scope_kind:input.scope_kind,status:'verified',external_id:raw.id,recall_chain_id:raw.chainId??raw.id,...(governance?{governance}:{})},uuid(raw.id));
     return this.convert(tx,raw);
   }
   async update(tx:Tx,id:string,body:Doc,expected:number):Promise<Doc>{
@@ -113,7 +114,7 @@ export class AgentRecallAdapter {
     const input=this.input({...old,...body});
     if(old.status==='candidate'){
       if(body.status!=='verified')return tx.put('memories',{...old,...input,status:'candidate'},old.id);
-      const created=await this.create(tx,input,`approve:${old.id}`);await tx.remove('memories',old.id);return created;
+      const created=await this.create(tx,{...input,governance:old.governance??null},`approve:${old.id}`);await tx.remove('memories',old.id);return created;
     }
     const tags=(Array.isArray(old.recall_tags)?old.recall_tags:[]).filter((tag:string)=>!tag.startsWith('sa-type:'));if(tags.length<16)tags.push(`sa-type:${input.type}`);
     const raw=await this.call(binding,tx.tenant,`/api/memories/${encodeURIComponent(id)}`,'PATCH',{content:input.content,type:typeMap[input.type],tags});

@@ -27,7 +27,7 @@ export function publicTask(t:Doc):Doc{
   return Object.fromEntries(keys.filter(k=>t[k]!==undefined).map(k=>[k,t[k]]));
 }
 export function publicRun(r:Doc|null,result:string|null=null):Doc|null{return r?Object.fromEntries(['id','task_id','state','engine','device_id','model_id','lease_epoch','summary','created_at'].map(k=>[k,r[k]]).concat([['result_text',result]])):null;}
-export function publicArtifact(a:Doc):Doc{return{...Object.fromEntries(['id','name','mime','size','task_id','run_id','status','created_at'].map(k=>[k,a[k]])),integrity:a.integrity==='server_snapshot'?'server_snapshot':'legacy_unverified',finalized_at:a.integrity==='server_snapshot'?a.finalized_at??null:null,...(a.evidence_kind?{evidence_kind:a.evidence_kind,provenance:a.provenance??null,captured_at:a.captured_at??null,source_url:a.source_url??null}:{})};}
+export function publicArtifact(a:Doc):Doc{return{...Object.fromEntries(['id','name','mime','size','task_id','run_id','status','created_at'].map(k=>[k,a[k]])),integrity:a.integrity==='server_snapshot'?'server_snapshot':'legacy_unverified',finalized_at:a.integrity==='server_snapshot'?a.finalized_at??null:null,...(a.evidence_kind?{evidence_kind:a.evidence_kind,provenance:a.provenance??null,captured_at:a.captured_at??null,source_url:a.source_url??null,fresh:a.fresh!==false,stale:a.stale===true}:{})};}
 export function publicCoordinatorEvent(e:Doc):Doc{return Object.fromEntries(['id','type','task_id','run_id','plan_id','delivery_id','source_message_id','status','reason_code','created_at','version'].map(k=>[k,e[k]??null]));}
 
 export class TeamService {

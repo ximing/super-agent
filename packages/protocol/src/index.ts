@@ -39,6 +39,7 @@ export interface ArtifactMetadata {
   integrity?: 'server_snapshot' | 'legacy_unverified'; finalized_at?: string | null;
   evidence_kind?: 'page_capture' | 'screenshot' | 'memory_retrieval';
   provenance?: 'tool_broker' | null; captured_at?: string | null; source_url?: string | null;
+  fresh?: boolean; stale?: boolean;
 }
 export interface TaskReview extends TaskReviewInput { id: string; task_id: string; created_at: string; version: number }
 export interface TaskEvidence {

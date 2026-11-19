@@ -17,6 +17,7 @@ function upstream() {
     const url = new URL(String(input)), method = init?.method ?? 'GET';
     calls.push({ path: url.pathname, method });
     if (url.pathname === '/api/auth/me') return Response.json({ user: { id: 'alice', email: 'alice@example.com' } });
+    if (url.pathname === '/api/memories' && method === 'POST') { const created = { id: randomUUID(), content: 'published', type: 'workflow', version: 1, chainId: randomUUID(), project: 'alpha' }; return Response.json({ memory: created }); }
     if (url.pathname === '/api/memories/recall' || url.pathname === '/api/memories') return Response.json({ memories: rows });
     const found = rows.find(memory => memory.id === url.pathname.split('/').at(-1));
     if (!found) return Response.json({ error: 'missing' }, { status: 404 });
@@ -81,4 +82,30 @@ test('conflict, supersede and expiry are explicit and do not rewrite the other m
   const stale = assessMemory({ id: 'old', type: 'website', site: 'example.com', status: 'verified', version: 2, content: '过期内容', governance: { valid_until: '2020-01-01T00:00:00.000Z' } }, workerAccess({ scope: { memory: { sites: ['example.com'], statuses: ['expired'] } } }, null), '2026-11-19T00:00:00.000Z');
   assert.equal(stale.presentation.stale_reason, 'expired');
   assert.equal(stale.presentation.content, null);
+});
+
+test('retrospective project scope is visible and a future expiry does not expire immediately', async () => {
+  const tx = localTx();
+  const task = { id: 'task', title: '范围', goal: '核对', scope: { memory: { project: 'isolated-test', sites: ['example.com'] } } };
+  const saved = await proposeRetrospective(tx, { id: 'run', summary: '已完成' }, task);
+  const access = workerAccess(task, null); access.statuses = ['candidate', 'verified'];
+  const visible = assessMemory(saved, access, '2026-11-19T00:00:00.000Z');
+  assert.equal(visible.allowed, true);
+  assert.equal(visible.presentation.fresh, false);
+  const dated = await relateMemory(tx, saved.id, { relation: 'expires', valid_until: '2099-01-01T00:00:00.000Z', operation_key: 'future-expiry' });
+  assert.notEqual(dated.governance.verification, 'expired');
+  assert.equal(assessMemory(await tx.get('memories', saved.id) as Doc, access, '2026-11-19T00:00:00.000Z').presentation.status, 'candidate');
+});
+
+test('publishing a candidate keeps the inference claim and evidence chain', async () => {
+  const mock = upstream(), adapter = new AgentRecallAdapter({ encryptionKey: 'publish-test-key', fetch: mock.mocked }), tx = localTx();
+  await adapter.bind(tx, { url: 'https://recall.aimo.plus', token: 'alice-pat' });
+  const proposed = await adapter.propose(tx, { title: '推断流程', content: '可能的入口', type: 'procedure', site: 'example.com' });
+  const stored = await tx.put('memories', { ...proposed, governance: { claim: 'inference', evidence_refs: [{ kind: 'page_capture', id: 'evidence-1' }], source_run_id: 'run-1', applicability: { project: 'isolated-test', sites: ['example.com'], global: false }, verification: 'candidate' } }, proposed.id);
+  const published = await adapter.update(tx, proposed.id, { status: 'verified' }, stored.version);
+  assert.equal(published.governance.claim, 'inference');
+  assert.equal(published.governance.evidence_refs[0].id, 'evidence-1');
+  assert.equal(published.governance.source_run_id, 'run-1');
+  assert.equal(published.governance.applicability.project, 'isolated-test');
+  assert.equal(mock.calls.some(call => call.method === 'DELETE'), false);
 });

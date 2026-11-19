@@ -9,10 +9,9 @@ export class MemoryCache {
   offline = false;
   constructor(private readonly limits = { maxEntries: 64, maxBytes: 1_000_000, ttlMs: 5 * 60_000 }) {}
   markOffline(offline = true): void { this.offline = offline; }
-  invalidate(filter?: { id?: string }): void {
-    if (!filter?.id) { this.generation += 1; this.entries.clear(); this.bytes = 0; return; }
-    for (const [key, entry] of this.entries) if (key.includes(`\0${filter.id}\0`)) { this.bytes -= entry.bytes; this.entries.delete(key); }
-    this.generation += 1;
+  invalidate(): void { this.generation += 1; this.entries.clear(); this.bytes = 0; }
+  drop(kind: 'search' | 'read', fingerprint: string): void {
+    for (const [key, entry] of this.entries) if (key.startsWith(`${kind}\0${fingerprint}\0`)) { this.bytes -= entry.bytes; this.entries.delete(key); }
   }
   private storageKey(kind: string, fingerprint: string): string { return `${kind}\0${fingerprint}\0${this.generation}`; }
   lookup(kind: 'search' | 'read', fingerprint: string, now = Date.now()): MemoryCacheLookup {

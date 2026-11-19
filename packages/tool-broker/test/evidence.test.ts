@@ -12,6 +12,11 @@ test('page evidence comes from the tool capture and drops secrets, queries and e
   assert.equal(captured.truncated, true);
   assert.equal(JSON.stringify(captured).includes('hunter2'), false);
   assert.equal(JSON.stringify(captured).includes('very-secret'), false);
+  const nested = pageEvidence({ url: 'https://example.com/start', capturedAt: '2026-11-19T01:02:03.000Z', runId: 'run', stepId: 'step', body: { url: 'https://login.example/callback?code=synthetic-auth-code&next=/home#token=synthetic-fragment', title: '业务标题' } });
+  assert.equal(JSON.stringify(nested).includes('synthetic-auth-code'), false);
+  assert.equal(JSON.stringify(nested).includes('synthetic-fragment'), false);
+  assert.equal(JSON.stringify(nested).includes('业务标题'), true);
+  assert.equal(nested.redacted, true);
   assert.equal(redactEvidenceText('cookie: session=abc').redacted, true);
 });
 
@@ -20,7 +25,12 @@ test('screenshot evidence does not require a live viewer and memory evidence kee
   assert.equal(shot.viewer_required, false);
   assert.equal(shot.captured_at, '2026-11-19T01:02:03.000Z');
   assert.equal(JSON.stringify(shot).includes('jpeg'), false);
-  const memory = memoryRetrievalEvidence({ capturedAt: '2026-11-19T01:02:03.000Z', runId: 'run', stepId: 'step', query: '入口', scope: { project: 'alpha', sites: ['example.com'] }, hits: [{ id: 'm1', version: 3, title: '入口', site: 'example.com', status: 'verified', content: '不应进入证据的公司全文' }] });
+  const memory = memoryRetrievalEvidence({ generatedAt: '2026-11-19T01:02:03.000Z', runId: 'run', stepId: 'step', query: '入口', scope: { project: 'alpha', sites: ['example.com'] }, hits: [{ id: 'm1', version: 3, title: '入口', site: 'example.com', status: 'verified', content: '不应进入证据的公司全文' }] });
   assert.equal(JSON.stringify(memory).includes('不应进入证据'), false);
   assert.equal((memory.hits as { id: string; version: number }[])[0].version, 3);
+  const stale = memoryRetrievalEvidence({ generatedAt: '2026-11-19T02:00:00.000Z', runId: 'run', stepId: 'step', query: '入口', scope: null, hits: [{ id: 'm1', version: 3, status: 'verified', fresh: false, stale: true, stale_reason: 'offline', observed_at: '2026-11-19T00:00:00.000Z', content: '旧正文' }] });
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.acceptable_as_current, false);
+  assert.equal((stale.hits as { observed_at: string; status: string }[])[0].observed_at, '2026-11-19T00:00:00.000Z');
+  assert.equal(JSON.stringify(stale).includes('旧正文'), false);
 });

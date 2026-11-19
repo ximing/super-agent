@@ -64,7 +64,9 @@
 
 - `POST /tasks` 和已确认计划项可带 `memory_scope:{project,sites,global_preference,statuses,max_version}`。Worker 的 search/read 使用该范围；`sites` 为空时不能读取空站点记忆。全局偏好同时要求记忆 `scope_kind=global`（或适用性 global）以及执行设置 `memory_global_read=true`。Planner 带 `task_id` 时使用该任务范围，并可以看见 candidate；不带任务时只有上述全局偏好。用户自己的 `GET /memories/:id` 仍可管理本人记忆。
 - 任务成功写本地复盘候选，不自动 `verified`，不发布到 Recall。`POST /memories/:id/relations` 需要 If-Match，`relation` 为 `conflicts|supersedes|expires`，并用 `operation_key` 幂等。它只写产品侧关系。
-- 节点记忆缓存键包含范围指纹和 generation。离线、过期或失效结果带 `stale=true`、`fresh=false`，正文为空。
+- 节点记忆缓存键包含范围指纹和 generation。401/403/404 和凭据失效类 503 删除对应缓存并返回错误，不回放旧正文。只有传输失败可以返回 `stale=true`、`fresh=false` 且正文为空的结果。`GET /node/events?after=` 供设备续读 `memory.changed`；成功重连后按游标补齐并清空受影响缓存。
+- 观察产物带 `fresh`。`memory_retrieval` 同时有 `generated_at` 和每条来源的 `observed_at`。`fresh=false` 不能充当当前事实。自动 accept 所引用的观察产物必须已被本次 reviewer 读取。网页证据对正文里的 URL 副本做同样的认证参数清理。
+- `POST /assistant/budget/reserve {operation_key,category,task_id?}` 在助理、审核、主动规划和事件汇总调用模型前执行。同一 key 返回原预留。定时规划的用量类别是 `proactive`。同一任务的多次 Run 累计 Token 和模型次数；父任务不会自动吃掉子任务额度。用量回执可带 `occurred_at`，重放保持首次发生时间。
 - 预算预留继续使用 `budget_reservations`，`operation_key=reserve:<run id>`。相同 key 不第二次扣减。用量未知且设置了月额度时，新的美元准入返回 `budget_unknown`，不用 0 代替未知金额。没有配置美元额度时仍执行 Token、模型次数、工具步和运行时间限制。续租可返回 `control.action=pause` 和 `token_limit|time_limit|model_call_limit|tool_step_limit|budget_exhausted`。`dollar_cap` 固定为 `not_enforced`。已发出的 Codex 内部回合、Grok CLI 隐藏轮次和已提交的 Grok 请求不保证能收回。
 
 ## 通知接口

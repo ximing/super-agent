@@ -49,7 +49,7 @@ POST 对应 `/tasks/:id/reviews` 或 `/assistant/tasks/:id/reviews`，需 If-Mat
 }
 ```
 
-verdict 可为 accept/reject/needs_input。标准索引不可重复或越界；accept 需覆盖全部标准、逐条通过且有证据。服务端核验引用属于同 Task/当前 Run、artifact 为 ready 且在交付快照内、checkpoint 恰为固定 completed checkpoint，不能引用任意字符串或其它任务。Coordinator 不能只重复 checkpoint。若本 Run 有成功的浏览器或记忆步骤，自动 accept 还要引用 ToolBroker 冻结的 `page_capture`、`screenshot` 或 `memory_retrieval`；成功步骤、Worker 报告和普通文件存在都不够。
+verdict 可为 accept/reject/needs_input。标准索引不可重复或越界；accept 需覆盖全部标准、逐条通过且有证据。服务端核验引用属于同 Task/当前 Run、artifact 为 ready 且在交付快照内、checkpoint 恰为固定 completed checkpoint，不能引用任意字符串或其它任务。Coordinator 不能只重复 checkpoint。若本 Run 有成功的浏览器或记忆步骤，自动 accept 还要引用本次 reviewer 实际读取过的、`fresh` 不为 false 的 ToolBroker 冻结观察产物；只引用未读产物、成功步骤、Worker 报告或普通文件存在都不够。
 
 节点的自动审核规则更严格：使用新的 runtime adapter，仅提供 delivery_evidence、artifact_read、review_submit 等只读工具；实际独立读取 server_snapshot 产物，每条通过标准关联真实读取的 artifact。不将 Worker 原文重新复述当作验收。legacy、未知来源、二进制、读取失败，或网站真实提交状态无法核实时，选择 needs_input 并转人工。拒绝或需补充不会自动重试有副作用操作。
 

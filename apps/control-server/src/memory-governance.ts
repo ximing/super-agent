@@ -47,7 +47,11 @@ export function publicAccess(access: MemoryAccess): Doc {
 }
 
 function siteOf(memory: Doc): string | null { return typeof memory.site === 'string' && memory.site.trim() ? memory.site.trim().toLowerCase() : null; }
-function projectOf(memory: Doc): string | null { const value = memory.recall_project ?? memory.project ?? null; return typeof value === 'string' && value ? value : null; }
+function projectOf(memory: Doc): string | null {
+  const applicability = memory.governance?.applicability?.project;
+  const value = typeof applicability === 'string' && applicability ? applicability : memory.recall_project ?? memory.project ?? null;
+  return typeof value === 'string' && value ? value : null;
+}
 function globalPreference(memory: Doc): boolean {
   return memory.type === 'preference' && !siteOf(memory) && (memory.scope_kind === 'global' || memory.governance?.applicability?.global === true);
 }
@@ -68,9 +72,10 @@ export function assessMemory(memory: Doc, access: MemoryAccess, now = new Date()
   if (site) { if (!access.sites.includes(site)) return { allowed: false, presentation: memory }; }
   else if (!global || !access.global_preference) return { allowed: false, presentation: memory };
   const conflict = governance.verification === 'conflict' || (Array.isArray(governance.conflicts_with) && governance.conflicts_with.length > 0);
-  const current = status === 'verified' && !conflict;
-  const presentation: Doc = { ...memory, status, fresh: current, stale: !current, stale_reason: current ? null : conflict ? 'conflict' : status };
-  if (!current) presentation.content = null;
+  const withheld = status === 'expired' || status === 'superseded' || conflict;
+  const settled = status === 'verified' && !withheld && governance.claim !== 'inference';
+  const presentation: Doc = { ...memory, status, claim: governance.claim ?? null, fresh: settled, stale: !settled, stale_reason: settled ? null : conflict ? 'conflict' : status === 'verified' && governance.claim === 'inference' ? 'inference' : status };
+  if (withheld) presentation.content = null;
   return { allowed: true, presentation };
 }
 
@@ -80,24 +85,24 @@ export function retrospectiveCandidate(run: Doc, task: Doc, evidenceRefs: Doc[] 
   const refs = evidenceRefs.slice(0, 20).map(ref => ({ kind: String(ref.kind ?? 'artifact'), id: String(ref.id) }));
   return {
     title: `复盘：${String(task.title ?? task.goal ?? '任务').slice(0, 120)}`,
-    content: [`claim: inference`, `task: ${task.id}`, `run: ${run.id}`, `goal: ${String(task.goal ?? '').slice(0, 500)}`, `summary: ${String(run.summary ?? '').slice(0, 500)}`, `evidence: ${refs.map(ref => `${ref.kind}:${ref.id}`).join(',') || 'none'}`].join('\n'),
+    content: [`claim: inference`, `outcome: ${run.outcome ?? 'succeeded'}`, `task: ${task.id}`, `run: ${run.id}`, `goal: ${String(task.goal ?? '').slice(0, 500)}`, `summary: ${String(run.summary ?? '').slice(0, 500)}`, `evidence: ${refs.map(ref => `${ref.kind}:${ref.id}`).join(',') || 'none'}`].join('\n'),
     type: 'experience', site: sites[0] ?? null, status: 'candidate', scope_kind: null,
     governance: {
       claim: 'inference', evidence_refs: refs,
       applicability: { project: typeof memory.project === 'string' ? memory.project : null, sites, global: false },
       verification: 'candidate', valid_until: null, supersedes: null, superseded_by: null, conflicts_with: [],
-      operation_key: `retrospective:${run.id}`, source_run_id: run.id, source_task_id: task.id, observed_at: now, operations: [`retrospective:${run.id}`],
+      operation_key: `retrospective:${run.outcome ?? 'succeeded'}:${run.id}`, source_run_id: run.id, source_task_id: task.id, observed_at: now, operations: [`retrospective:${run.outcome ?? 'succeeded'}:${run.id}`],
     },
     source: 'retrospective',
   };
 }
 
-export async function proposeRetrospective(tx: Tx, run: Doc, task: Doc): Promise<Doc> {
-  const key = `retrospective:${run.id}`;
+export async function proposeRetrospective(tx: Tx, run: Doc, task: Doc, outcome: 'succeeded' | 'failed' = 'succeeded'): Promise<Doc> {
+  const key = `retrospective:${outcome}:${run.id}`;
   const existing = (await tx.all('memories')).find(memory => memory.governance?.operation_key === key || memory.governance?.operations?.includes(key));
   if (existing) return existing;
   const refs = (await tx.all('artifacts')).filter(artifact => artifact.task_id === task.id && artifact.run_id === run.id && artifact.status === 'ready' && artifact.provenance === 'tool_broker').map(artifact => ({ kind: artifact.evidence_kind ?? 'artifact', id: artifact.id }));
-  const candidate = retrospectiveCandidate(run, task, refs);
+  const candidate = retrospectiveCandidate({ ...run, outcome }, task, refs);
   const locals = (await tx.all('memories')).filter(memory => memory.status === 'verified' && memory.site && memory.site === candidate.site && memory.title === candidate.title && memory.content && memory.content !== candidate.content);
   if (locals.length) { candidate.governance.verification = 'conflict'; candidate.governance.conflicts_with = locals.map(memory => memory.id); }
   const saved = await tx.put('memories', candidate, randomUUID());
@@ -128,8 +133,9 @@ export async function relateMemory(tx: Tx, id: string, body: Doc): Promise<Doc> 
     }
   } else {
     const until = typeof body.valid_until === 'string' ? body.valid_until : new Date().toISOString();
-    if (!Number.isFinite(Date.parse(until))) throw new ApiError(422, 'invalid_memory_relation', '有效期无效');
-    governance.valid_until = until; governance.verification = 'expired';
+    if (!/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(until) || !Number.isFinite(Date.parse(until))) throw new ApiError(422, 'invalid_memory_relation', '有效期需要带时区的 ISO 时间');
+    governance.valid_until = new Date(Date.parse(until)).toISOString();
+    governance.verification = Date.parse(until) <= Date.now() ? 'expired' : governance.verification === 'expired' ? 'candidate' : governance.verification ?? 'candidate';
   }
   if (governance.verification === 'verified') throw new ApiError(422, 'invalid_memory_relation', '关系不能把记忆标为已验证');
   return tx.put('memories', { ...current, status: current.status === 'candidate' ? 'candidate' : current.status ?? 'verified', governance }, memoryId);

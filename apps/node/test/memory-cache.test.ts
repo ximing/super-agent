@@ -14,9 +14,8 @@ test('fresh cache hits stay fresh and offline or invalidated hits cannot pose as
   assert.equal((offline as { value: { content: null; stale_reason: string } }).value.content, null);
   assert.equal((offline as { value: { stale_reason: string } }).value.stale_reason, 'offline');
   cache.markOffline(false);
-  cache.invalidate({ id: 'memory-1' });
-  const invalidated = cache.lookup('search', 'tenant:scope:query', Date.parse('2026-11-19T00:00:01.000Z'));
-  assert.equal(invalidated.hit, false);
+  cache.invalidate();
+  assert.equal(cache.lookup('read', 'tenant:scope:memory-1', Date.parse('2026-11-19T00:00:01.000Z')).hit, false);
 });
 
 test('the cache stays bounded', () => {
