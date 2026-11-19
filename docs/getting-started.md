@@ -4,9 +4,13 @@
 
 Mac 点击“打开安全登录”后若系统窗口未出现，先点“取消登录”，再选择“改用浏览器登录”。两种入口使用相同的 OIDC/PKCE 授权；浏览器完成后返回工作台，首次修改临时密码由用户完成。登录等待有阶段提示、取消入口及超时，不必一直等转圈。
 
+当前公开版本为[v0.2.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.2.0-preview.1)，包含Mac/Android安装包、便携Worker与校验和。Mac arm64版本0.2.0 build4，Android版本0.2.0 code2；安装包签名/校验通过不等于正式公证或商店签名。便携Worker使用方法见[节点README](../apps/node/README.md)，下面保留源码安装方式。
+
+Mac0.2.0云包升级旧钥匙串时可能因ACL交互阻塞而无窗口，已发布风险提示；0.2.1/build5异步、非交互恢复补丁已通过本机测试与启动验收，约4秒后安全存储仍未响应会停止自动等待并给出固定提示；OS Keychain本身仍可能阻塞，不保证自动恢复。修复云包尚未构建发布，不能把0.2.0等待无窗口当作正常启动。旧包历史登录成功不等于新包升级验证通过。Android/服务端/Worker不受影响。
+
 ## 正式执行 Mac：一次性安装
 
-需要 Node.js **24.14+**、pnpm 10.30.3、本机已登录的 Codex CLI，以及已安装的 CSI daemon/Chrome 扩展。浏览器自动化依赖当前用户登录 Chrome；不要把浏览器 cookie 或模型认证文件上传到服务器。
+需要 Node.js **24.14+**、pnpm 10.30.3、本机已登录的Codex CLI或已配置的Grok运行时，以及已安装的 CSI daemon/Chrome 扩展。浏览器自动化依赖当前用户登录 Chrome；不要把浏览器 cookie 或模型认证文件上传到服务器。
 
 在正式执行电脑上选择固定目录，后续后台服务会引用此代码路径：
 
@@ -31,7 +35,7 @@ node apps/node/dist/cli.js start
 
 节点使用显式 HTTP(S)_PROXY 环境变量、`node.json` 本机 `proxy_url` 或 macOS 系统 HTTP(S) 代理，按此优先级选择；localhost 工具通信保持直连。PAC/SOCKS-only 配置需提供等效 HTTP 代理端点。代理设置不上传云端。
 
-Grok 在已有 `node.json` 的 `grok` 部分配置可用模型及本机 Key 来源：`keychain_service`、`key_file` 或 `key_env`。后台进程不继承交互终端中的 Key，推荐钥匙串。不要替换整个配置而丢失设备身份；不要把 Key 放进 plist、仓库或控制服务器。
+Grok支持复用本机已登录的官方CLI，具体adapter配置见[Grok说明](../packages/runtime-grok/README.md)。使用API模式时，在已有 `node.json` 的 `grok` 部分配置可用模型及本机 Key 来源：`keychain_service`、`key_file` 或 `key_env`。后台进程不继承交互终端中的 Key，推荐钥匙串。不要替换整个配置而丢失设备身份；不要把 Key 放进 plist、仓库或控制服务器。
 
 ## 后台运行
 
@@ -54,7 +58,7 @@ launchctl print "gui/$(id -u)/com.superagent.node"
 launchctl bootout "gui/$(id -u)/com.superagent.node"
 ```
 
-当前开发电脑仅进行受限验证，没有安装长期 Worker 自启动。
+当前开发电脑仅进行受限验证，没有安装长期Worker自启动。用户授权的独立正式Mac已安装用户级LaunchAgent，验证优雅重启后journal不变且无Task/模型重放；此为当次安装验收，长期弱网与休眠后恢复仍需观察。
 
 ## 记忆、文件与主动提醒
 
@@ -62,4 +66,4 @@ launchctl bootout "gui/$(id -u)/com.superagent.node"
 
 任务附件上传至私有 S3；Worker 可列出/下载本任务附件，并上传工作目录中的产物。跨电脑切换仍可读取该任务旧 Run 的云端文件。每个用户和任务均校验归属。
 
-定时关注首版为“提醒并确认后执行”。控制端前台可看问题、任务变化与浏览器画面；关闭应用后的远程推送尚未完成服务端投递与重试链路，之后也需要 APNs/FCM/厂商通道配置，不依赖手机后台 JavaScript 保活。
+定时关注首版为“提醒并确认后执行”。控制端前台可看问题、任务变化与浏览器画面；服务端APNs/Expo投递、持久重试与回执链路已上线，关闭应用后实际送达仍需厂商凭据、签名和目标真机验收，不依赖手机后台 JavaScript 保活。

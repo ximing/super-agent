@@ -21,6 +21,10 @@ import SuperAgentCore
     @Published var busy = false
     @Published var loginPhase: LoginPhase?
     @Published var loginInProgress = false
+    @Published var sessionRestoring = false
+    @Published var sessionRestoreMessage: String?
+    private var bootstrapStarted = false
+    private var restoreAttempt: UUID?
     private var loginTask: Task<Void, Never>?
     @Published var lastSync: Date?
     @Published var selectedEngine: Engine = .codex
@@ -34,10 +38,45 @@ import SuperAgentCore
     private let oidc = OIDCLogin()
     init() { api = APIClient(baseURL: URL(string: UserDefaults.standard.string(forKey: "server") ?? "https://super-agent.aimo.plus") ?? URL(string: "https://super-agent.aimo.plus")!) }
     func bootstrap() async {
-        guard !server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        session = await api.currentSession()
-        if session != nil { await refresh(); startPolling() }
-        else { await loadAuthConfig() }
+        guard !bootstrapStarted, !server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        bootstrapStarted = true
+        await Task.yield()
+        await restoreSavedSession()
+    }
+    func restoreSavedSession(allowInteraction: Bool = false) async {
+        guard !sessionRestoring, !loginInProgress, session == nil else { return }
+        let attempt = UUID(); restoreAttempt = attempt; sessionRestoring = true
+        sessionRestoreMessage = allowInteraction ? "正在恢复已保存登录，请留意系统的钥匙串授权提示。" : "正在检查已保存登录…"
+        // An OS Keychain call may ignore noninteractive hints and never return.
+        // This independent deadline ends only the UX/generation, not the read's
+        // worker thread, and never waits for an uncancellable task-group child.
+        let deadline: Task<Void, Never>? = allowInteraction ? nil : Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(4)) } catch { return }
+            guard let self, self.restoreAttempt == attempt, self.session == nil, !self.loginInProgress else { return }
+            self.restoreAttempt = nil; self.sessionRestoring = false
+            self.sessionRestoreMessage = "安全存储响应较慢，已停止自动等待。可以重新登录；旧凭据会保留，系统请求未结束前不会重复读取。"
+            await self.api.cancelSessionRestoration()
+            if self.authConfig == nil { Task { await self.loadAuthConfig() } }
+        }
+        defer { deadline?.cancel(); if restoreAttempt == attempt { sessionRestoring = false; restoreAttempt = nil } }
+        do {
+            if allowInteraction { try await configure() }
+            let saved = try await api.restoreSession(allowInteraction: allowInteraction)
+            guard restoreAttempt == attempt, !loginInProgress else { return }
+            session = saved
+            sessionRestoreMessage = saved == nil ? "没有可自动恢复的登录，可以直接登录。" : nil
+            if saved != nil { await refresh(); startPolling() }
+        } catch {
+            guard restoreAttempt == attempt, !loginInProgress else { return }
+            sessionRestoreMessage = (error as? APIError)?.message ?? "暂时无法恢复已保存登录，可以直接重新登录；旧凭据会保留。"
+        }
+        if session == nil, restoreAttempt == attempt { await loadAuthConfig() }
+    }
+    func skipSessionRestoration() async {
+        restoreAttempt = nil; sessionRestoring = false
+        sessionRestoreMessage = "已跳过恢复，可以重新登录；旧凭据会保留。"
+        await api.cancelSessionRestoration()
+        if authConfig == nil { await loadAuthConfig() }
     }
     func configure() async throws {
         let url = try APIClient.validatedURL(server)
@@ -51,10 +90,12 @@ import SuperAgentCore
     }
     func signIn(email: String, name: String, mode: LoginBrowserMode = .system) async {
         guard loginTask == nil else { return }
+        restoreAttempt = nil; sessionRestoring = false; sessionRestoreMessage = nil
         loginInProgress = true; busy = true; error = nil; loginPhase = .configure
         loginTask = Task {
             defer { loginTask = nil; loginInProgress = false; busy = false }
             do {
+                await api.cancelSessionRestoration()
                 try await configure()
                 try Task.checkCancellation()
                 guard let config = authConfig else { throw APIError(status: 0, code: "auth_config", message: "无法取得服务器登录方式") }

@@ -82,6 +82,12 @@ struct LoginView: View {
             }.frame(width: 360, alignment: .leading)
             VStack(alignment: .leading, spacing: 18) {
                 Text("连接你的助理").font(.title2.weight(.semibold))
+                if let message = model.sessionRestoreMessage { Text(message).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                if model.sessionRestoring {
+                    HStack { ProgressView().controlSize(.small); Button("跳过恢复，重新登录") { Task { await model.skipSessionRestoration() } } }
+                } else if !model.loginInProgress {
+                    Button("恢复已保存登录") { Task { await model.restoreSavedSession(allowInteraction: true) } }.disabled(model.busy || model.server.isEmpty)
+                }
                 if model.authConfig?.mode == "development" {
                     Label("服务器已显式启用本地开发登录", systemImage: "hammer").font(.caption).foregroundStyle(.secondary)
                     TextField("邮箱", text: $email).textFieldStyle(.roundedBorder)

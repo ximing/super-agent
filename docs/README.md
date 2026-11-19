@@ -16,6 +16,7 @@
 | [契约样例](contracts/README.md) | 调度、运行状态和费用上报的 JSON Schema 与样例 |
 | [云端资源清单](cloud-resources.md) | 用户部署资源、云端配置和禁止本地 Docker 的实施约束 |
 | [开始使用](getting-started.md) | 原生客户端、正式执行 Mac 安装、配对和后台启动 |
+| [工作台视觉与交互提案](design/README.md) | 面向 SwiftUI 原生客户端的 HTML 设计稿，待评审 |
 
 ## 已确定的边界
 

@@ -2,9 +2,9 @@
 
 多用户私人助理工作台。Swift Mac 与 React Native Android 控制端通过云端服务派活，用户自己的 Mac 执行 Codex/Grok、操作浏览器并按需使用云端记忆。
 
-已发布 [Mac v0.1.1-preview.2](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.2) 与 [Android v0.1.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1)。API 已部署到 `https://super-agent.aimo.plus`。
+已发布 [v0.2.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.2.0-preview.1)，包含Mac、Android、便携Worker与校验和。API 已部署到 `https://super-agent.aimo.plus`。Mac 0.2.0云包升级旧钥匙串时发现无窗口问题，release notes已提示；0.2.1/build5修复源码和本机验证已通过，云包尚未构建发布，Android/服务端/Worker不受影响。
 
-当前新增团队依赖调度、独立交付验收、不可变产物快照、工具步骤和通知队列已实现，服务端云 TEST **41/41**（含待发布的首帧续期修复）、跨组件云CI完整 **7/7、0skip** 通过。本批次服务端已部署生产镜像0211b3a9（2026-11-19），新客户端安装包尚未发布，真实模型业务与通知真机送达仍需验收；详细范围见[实施状态](docs/implementation-status.md)。
+当前新增团队依赖调度、独立交付验收、不可变产物快照、工具步骤和通知队列已实现，服务端云 TEST **41/41**（含首帧续期修复）、跨组件云CI完整 **7/7、0skip** 通过。本批次服务端已部署生产镜像32eb39d8（2026-11-19），预览安装包已发布；真实Grok只读样例在独立审核needs_input后已由控制端代理核对接受，通知真机送达仍待完成；正式Worker用户级后台服务已安装并验证重启无模型重放；详细范围见[实施状态](docs/implementation-status.md)。
 
 ## 运行边界
 

@@ -4,7 +4,7 @@
 
 ## 1. 关键决策
 
-本批次受管 Task DAG、独立交付验收、不可变证据快照、Coordinator 事件和通知投递已实现并通过云 TEST，已部署生产镜像0211b3a9；新客户端发布和真实验收另列。当前可联调接口以[实现契约](implementation-contract.md)为准；[团队与交付](team-and-delivery.md)、[通知](notification-delivery.md)细化已落地边界。其余前瞻设计不自动视为实现。
+本批次受管 Task DAG、独立交付验收、不可变证据快照、Coordinator 事件和通知投递已实现并通过云 TEST，已部署生产镜像32eb39d8；v0.2.0-preview.1已发布，真实业务与通知送达验收另列。当前可联调接口以[实现契约](implementation-contract.md)为准；[团队与交付](team-and-delivery.md)、[通知](notification-delivery.md)细化已落地边界。其余前瞻设计不自动视为实现。
 
 实施更新（2026-11-19）：服务端实际路径为 `apps/control-server`，所有基础设施只在云端；记忆后端优先复用 `agent-recall`，每用户独立绑定，不另建向量服务。先前 embedding 自建选项仅为历史候选，不作为本轮实施依赖。当前资源和验证见 [实施状态](implementation-status.md)。
 
