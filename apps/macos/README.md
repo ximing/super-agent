@@ -38,7 +38,7 @@ open 'build/Super Agent.app'
 
 ## 本机验证
 
-- `swift test`：5 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留，以及无请求体 DELETE 不发送 JSON Content-Type。
+- `swift test`：8 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留，以及无请求体 DELETE 不发送 JSON Content-Type。
 - `bash scripts/build-app.sh`：release 可执行应用已构建并进行本机签名。
 - 真实 OIDC、Recall 账号和云端端到端流程取决于用户部署的服务配置，不能由编译通过推定。
 
@@ -51,3 +51,9 @@ open 'build/Super Agent.app'
 该模式只渲染本应用未登录 NSView 并保存 PNG 后退出，不截取整张用户桌面。
 
 OIDC 登录仅请求 `openid profile email`，默认回调为 `superagent://oauth/callback`。应用保存和刷新产品服务端会话，不申请 OIDC `offline_access` 长期权限。
+
+## 登录排查与备用入口
+
+登录页显示固定阶段，身份服务连接和换取凭证的请求使用 20 秒请求超时、30 秒资源超时；浏览器等待最多 5 分钟，可随时取消。阶段与错误不记录授权 URL、state、code 或 Token。
+
+原系统安全登录未弹出时，先取消等待，再点击“改用浏览器登录”。备用入口通过默认浏览器执行同一套 Authorization Code + PKCE，回调必须匹配当前一次性登录的 scheme/host/path/port/state；重复参数、过期或未请求的回调不会完成当前登录。首次临时密码修改由用户在身份服务页面完成，客户端不替用户设置密码。
