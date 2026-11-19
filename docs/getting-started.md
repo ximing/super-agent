@@ -4,9 +4,9 @@
 
 Mac 点击“打开安全登录”后若系统窗口未出现，先点“取消登录”，再选择“改用浏览器登录”。两种入口使用相同的 OIDC/PKCE 授权；浏览器完成后返回工作台，首次修改临时密码由用户完成。登录等待有阶段提示、取消入口及超时，不必一直等转圈。
 
-当前公开版本为[v0.2.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.2.0-preview.1)，包含Mac/Android安装包、便携Worker与校验和。Mac arm64版本0.2.0 build4，Android版本0.2.0 code2；安装包签名/校验通过不等于正式公证或商店签名。便携Worker使用方法见[节点README](../apps/node/README.md)，下面保留源码安装方式。
+当前公开版本为[v0.2.1-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.2.1-preview.1)，包含Mac/Android安装包、便携Worker与校验和。Mac arm64版本0.2.1 build5，Android版本0.2.0 code2；安装包签名/校验通过不等于正式公证或商店签名。便携Worker使用方法见[节点README](../apps/node/README.md)，下面保留源码安装方式。
 
-Mac0.2.0云包升级旧钥匙串时可能因ACL交互阻塞而无窗口，已发布风险提示；0.2.1/build5异步、非交互恢复补丁已通过本机测试与启动验收，约4秒后安全存储仍未响应会停止自动等待并给出固定提示；OS Keychain本身仍可能阻塞，不保证自动恢复。修复云包尚未构建发布，不能把0.2.0等待无窗口当作正常启动。旧包历史登录成功不等于新包升级验证通过。Android/服务端/Worker不受影响。
+Mac0.2.0云包升级旧钥匙串时可能因ACL交互阻塞而无窗口，已发布风险提示；精确76a9e2e的0.2.1/build5异步、非交互恢复云包已通过构建/验签并安装，真实看到窗口和本人工作台，约4秒后安全存储仍未响应会停止自动等待并给出固定提示；OS Keychain本身仍可能阻塞，不保证自动恢复。补丁已公开发布并替代0.2.0的Mac升级风险包，不能把旧版等待无窗口当作正常启动。旧包历史登录成功不等于新包升级验证通过。Android/服务端/Worker不受影响。
 
 ## 正式执行 Mac：一次性安装
 

@@ -10,7 +10,7 @@
 - 控制服务 typecheck/build 通过；首帧续期修复后服务端 **41/41、0 fail、0 skip**（28.18秒），显式加载专用云 TEST 配置，使用非 owner 应用角色/独立 owner 迁移及私有测试 S3。覆盖隔离、签名重放、目标确认、费用去重、撤销、Recall 隔离、接管、迁移 ledger/锁、DAG/独立验收/取消传播、不同 envelope 的取消复活与证据替换拒绝、真实对象冻结、通知 outbox/过时抑制/HTTP/API/慢 provider 不阻塞派发。数据库连接故障返回可重试503。
 - 跨组件云CI已完整 **7/7通过、0skip**（此前协调者完整6/6加新增usage传输503定向1/1也均通过），使用真实 NodeAgent/SQLite/Fastify 与云 PG；模型使用明确 FakeRuntime，CSI 使用明确 mock。覆盖聊天确认/重启去重/澄清、暂停接管与自然像素换算，以及团队执行、独立 reviewer 和事件恢复路径；不将 FakeRuntime 写成真实 Grok 或业务验收。
 - Android 最新 typecheck 与 **12/12 客户端测试**通过，覆盖设备撤销、步骤隐私、任务关系及交付证据；先前基础运行的5项 API/安全配置测试和763 modules Hermes JS 导出为历史证据。独立 release APK 已由最新 GHA 构建通过，CI 和下载后均核验内嵌 Hermes 字节码、不依赖 Metro，APK 签名校验通过；包约 56 MiB，Android 7+。内部测试签名与正式发布签名分开。
-- Mac启动恢复补丁的Swift编译与 **22/22测试**、release构建及本机codesign验证通过（此前团队版本17/17），覆盖登录回调、设备撤销、步骤、团队关系和交付核对；先前9项 XCTest、release appbundle 与本机签名为历史已通过证据。旧历史云包曾在本机启动并恢复会话，已撤销设备不会作为执行目标；最新0.2.0云包的实际启动发现钥匙串主线程阻塞，不能沿用历史启动证据。正式分发签名/公证尚需用户 Apple 开发者配置。
+- Mac启动恢复补丁的Swift编译与 **22/22测试**、release构建及本机codesign验证通过（此前团队版本17/17），覆盖登录回调、设备撤销、步骤、团队关系和交付核对；先前9项 XCTest、release appbundle 与本机签名为历史已通过证据。旧历史云包曾在本机启动并恢复会话，已撤销设备不会作为执行目标；0.2.0云包实际启动发现钥匙串主线程阻塞；现精确76a9e2e的0.2.1/build5云包已安装并实际看到窗口、等待上限提示及本人工作台，不能沿用历史启动证据或声称自动钥匙串一定恢复。正式分发签名/公证尚需用户 Apple 开发者配置。
 - 真实云端 OIDC S256 授权、callback state、Token 交换、JWT 签名/audience、产品会话与注销撤销通过；临时 Keycloak 测试用户已删除。已修复 Keycloak 26 client 默认 scope 缺 basic 导致无 sub 的配置问题。
 - 使用本机已连接的 Recall 账号验证产品绑定与直接读取既有内容通过；临时产品绑定已按 version 删除，未修改既有记忆内容。PAT 未输出、未进入公开仓库。
 - 真实 CSI/Chrome 已验证 BrowserActor 快照、JPEG 帧/视口尺寸和接管 CDP 点击；测试仅操作新建公开示例页，未读取用户其他标签页。
@@ -32,9 +32,9 @@
 | `super-agent-test` / `super-agent-prod` S3 | 已创建/验证，Put/Get/Delete smoke test 通过 |
 | Recall | 每用户独立加密绑定、既有记录读取、候选审核发布与搜索适配已实现；真实账号绑定/列表与隔离测试已通过 |
 | OIDC | 云端 Keycloak、test/prod realms、native PKCE client、公网 HTTPS 与真实 Token/产品会话交换已验证 |
-| GitHub | 修复提交32eb39d884be3e8df47dece1e676f298c1373ab9；[Cloud checks](https://github.com/ximing/super-agent/actions/runs/44460947651)四job全部成功。CI服务端41项为40pass/1skip（未配置专用测试S3，真实对象case显式跳过），跨组件完整7/7、0skip；本机显式云TEST+私有S3为41/41，二者不混同 |
+| GitHub | Mac恢复补丁提交76a9e2ea62294eba554a3c9864f319337155a155；[Cloud checks](https://github.com/ximing/super-agent/actions/runs/44464095640)四job全部成功，Swift22/22。CI服务端41项为40pass/1skip（未配置专用测试S3，真实对象case显式跳过），跨组件完整7/7、0skip；本机显式云TEST+私有S3为41/41，二者不混同 |
 | 生产镜像 | [云端镜像构建/发布](https://github.com/ximing/super-agent/actions/runs/44460986472)成功，32eb39d8镜像已在云端加载并部署healthy，无本地镜像构建/拉取 |
-| 安装包 | [v0.2.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.2.0-preview.1)已公开发布，target为32eb39d8，含Mac/Android安装包、便携Worker及校验和。精确同提交客户端已验签/版本核验：Mac arm64 0.2.0 build4；Android 0.2.0 code2、内部debug签名v2；不是正式Developer ID/公证或商店发布签名。Mac0.2.0云包实际升级发现旧钥匙串ACL导致无窗口，release notes已标风险；0.2.1/build5源码及本机22测试/启动恢复验收通过，云包尚未构建发布，Android/server/Worker不受影响 |
+| 安装包 | [v0.2.1-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.2.1-preview.1)已公开发布，tag target为76a9e2e，含Mac、Android、便携Worker与校验和四份资产。Mac arm64为0.2.1 build5；Android同CI构建仍为0.2.0 code2，已验v2内部debug签名、CRC与内嵌Hermes；Worker r3实现未变。精确云Mac已安装、实际运行并进入本人工作台，替代有旧钥匙串升级风险的v0.2.0 Mac包；仍不是正式Developer ID/公证或商店发布签名 |
 | 本批次团队/通知/内容冻结 | 代码/TEST回归与生产部署完成；应用角色仍非superuser/非BYPASSRLS，Task/review/push FORCE RLS已核对。厂商推送凭据与实际设备送达未验收 |
 | API | `https://super-agent.aimo.plus` 已切换 `super_agent_prod` / prod S3 / prod OIDC，32eb39d8容器healthy；/ready为200，任务与通知设置无凭证为401、开发登录404；生产角色非superuser/非BYPASSRLS，Task/review/push FORCE RLS |
 | 本地 Docker | 用户确认全清后执行；当前 Colima 的容器/镜像/卷均为 0，默认 context 未发现第二个可用引擎 |
@@ -49,19 +49,19 @@
 
 正式远程Mac上的真实Grok样例已Run succeeded，回传12条工具步骤，其中2条失败为截图调用及越界文件读取被拒；失败如实保留。已生成2个ready、server_snapshot冻结Markdown产物，example-com-check为1048字节及另一份result产物；协调者实际下载文件并看见实时浏览器画面，逐项比对中文首段一致。
 
-fresh reviewer先给出needs_input：缺少原始网页/记忆内容的独立证据，未将Worker报告直接当作验收通过。随后协调者作为控制端代理，在可用原生onboarding包中逐条核对标准，绑定选定冻结产物和checkpoint，并明确记录实时画面中文首段一致、日期精度、定向Recall查询limit20及占位引用的核对范围，保留2条失败步骤后提交accept。生产只读确认Task succeeded、delivery accepted，review历史为[needs_input,accept]，仍有12条步骤与2个产物。这是有依据的控制端代理复核，不宣称用户本人亲自验收，也不宣称无人自动验证全部业务。正式Worker成本面板现显示4个请求（含新增plan.settled汇总），金额未知，不能计为0。正式Worker已安装用户级gui/501/com.superagent.node LaunchAgent并running；优雅重启后进程正常接任，journal的2个运行记录未变化，无Task/模型重放。节点使用远端r3代码，shell禁用、Grok主助理及browser可用；当前接电配置sleep0，仅只读核对，未运行caffeinate或修改pmset。云端心跳只读核对2026-11-19T05:12:25.292Z、当时约6.8秒，设备在线；此为当次观测，不承诺永不休眠或持续在线。
+fresh reviewer先给出needs_input：缺少原始网页/记忆内容的独立证据，未将Worker报告直接当作验收通过。随后协调者作为控制端代理，在可用原生onboarding包中逐条核对标准，绑定选定冻结产物和checkpoint，并明确记录实时画面中文首段一致、日期精度、定向Recall查询limit20及占位引用的核对范围，保留2条失败步骤后提交accept。生产只读确认Task succeeded、delivery accepted，review历史为[needs_input,accept]，仍有12条步骤与2个产物。这是有依据的控制端代理复核，不宣称用户本人亲自验收，也不宣称无人自动验证全部业务。正式Worker成本面板现显示4个请求（含新增plan.settled汇总），金额未知，不能计为0。正式Worker已安装用户级gui/501/com.superagent.node LaunchAgent并running；优雅重启后进程正常接任，launchctl运行计数为2；SQLite journal的1个Run、12条步骤、Worker usage revision1和assistant replied2均未变化，无Task/模型重放。节点使用远端r3代码，shell禁用、Grok主助理及browser可用；当前接电配置sleep0，仅只读核对，未运行caffeinate或修改pmset。云端心跳只读核对2026-11-19T05:12:25.292Z、当时约6.8秒，设备在线；此为当次观测，不承诺永不休眠或持续在线。
 
 ## 仍需验收
 
-v0.2.0-preview.1已发布，但发布/验签不等同安装后的全部真机业务验收。上述真实Grok样例已执行完成，并在自动审核needs_input后由控制端代理核对接受；公司业务、无人自动验收和长时运行仍另行验收。Mac0.2.0云包升级风险见下节，本机修复已验证，云端0.2.1预览包尚待构建发布。
+v0.2.1-preview.1已公开发布，但发布/验签不等同安装后的全部真机业务验收。上述真实Grok样例已执行完成，并在自动审核needs_input后由控制端代理核对接受；公司业务、无人自动验收和长时运行仍另行验收。Mac0.2.0云包升级风险见下节，精确0.2.1云包构建、安装及实际工作台验收通过，补丁已公开发布。
 
 - 正式执行 Mac 已完成配对和默认 Grok/电脑选择，已完成真实Grok只读样例及控制端代理复核接受，用户级后台服务已安装并验证优雅重启无重放，尚需长时间弱网/休眠恢复及目标Android真机验收；当前 Mac 生产账号已完成首次改密和登录。
 - 长期安装节点的真实业务任务、跨电脑切换、浏览器画面与人工接管；当前临时 Mac 的单回合受限读文件链路已通过。
-- 公司业务网站样本、厂商推送、Mac0.2.1云端安装包构建/发布后回归和正式分发签名配置。
+- 公司业务网站样本、厂商推送、Mac升级后不同钥匙串/账号环境的恢复回归和正式分发签名配置。
 
 ## Mac 0.2.0升级阻塞与0.2.1恢复补丁
 
-精确32eb39d8的Mac0.2.0/build4云包验签与版本检查通过，但启动时旧钥匙串ACL触发主线程SecItemCopyMatching阻塞，表现为无窗口。已恢复本机旧本地构建维持工作台可用；不能把旧包曾启动写成新云包已真实启动。0.2.1/build5源码补丁已冻结，采用异步、非交互会话恢复和显式恢复入口；22/22Swift测试、release构建和本机签名核验通过。真实CUA中较早0.2.1 staging窗口立即出现，跳过自动恢复后通过浏览器SSO进入本人工作台。最终带等待上限的0.2.1/build5 staging也已实际出现窗口，并约4秒后固定显示“安全存储响应较慢已停止自动等待”，不再无限停在checking。操作系统Keychain调用本身仍可能阻塞，因此不保证自动会话恢复；用户可明确跳过或使用登录入口。云端0.2.1-preview.1安装包尚未构建/发布，不以本机staging验收冒充已发布包验收。v0.2.0 release notes已提醒Mac升级风险，Android、服务器和Worker不受此问题影响。
+精确32eb39d8的Mac0.2.0/build4云包验签与版本检查通过，但启动时旧钥匙串ACL触发主线程SecItemCopyMatching阻塞，表现为无窗口。已恢复本机旧本地构建维持工作台可用；不能把旧包曾启动写成新云包已真实启动。0.2.1/build5源码补丁已冻结，采用异步、非交互会话恢复和显式恢复入口；22/22Swift测试、release构建和本机签名核验通过。真实CUA中较早0.2.1 staging窗口立即出现，跳过自动恢复后通过浏览器SSO进入本人工作台。最终带等待上限的0.2.1/build5 staging也已实际出现窗口，并约4秒后固定显示“安全存储响应较慢已停止自动等待”，不再无限停在checking。操作系统Keychain调用本身仍可能阻塞，因此不保证自动会话恢复；用户可明确跳过或使用登录入口。此后精确76a9e2ea的云Mac0.2.1/build5包已安装到用户应用目录，真实CUA看到窗口、约4秒的固定超时提示及随后本人工作台，正式Grok Worker在线；未确定之后进入工作台的具体恢复/SSO路径，不能据此宣称自动Keychain读取成功或总能恢复。0.2.1-preview.1已公开发布；协调者确认当前运行进程来自用户应用目录中的精确云包，并已实际看到本人工作台及1个正式Worker在线。v0.2.0 release notes已提醒Mac升级风险，Android、服务器和Worker不受此问题影响。
 
 ## 与完整产品目标的实现差距
 
