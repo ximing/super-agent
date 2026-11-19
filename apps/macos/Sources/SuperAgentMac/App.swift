@@ -7,6 +7,7 @@ import SuperAgentCore
     var body: some Scene {
         WindowGroup {
             WorkspaceView().environmentObject(model).tint(Palette.blue)
+                .onOpenURL { model.handleLoginCallback($0) }
                 .frame(minWidth: 1040, minHeight: 680).task {
                     notifications.model = model; model.notifications = notifications
                     if let index = CommandLine.arguments.firstIndex(of: "--smoke-screenshot"), CommandLine.arguments.indices.contains(index + 1) {
@@ -89,6 +90,12 @@ struct LoginView: View {
                 TextField("云端服务器，例如 https://agent.example.com", text: $model.server).textFieldStyle(.roundedBorder)
                 Button("读取登录配置") { Task { await model.operation { try await model.configure() } } }.disabled(model.server.isEmpty || model.busy)
                 Button { Task { await model.signIn(email: email, name: name) } } label: { HStack { if model.busy { ProgressView().controlSize(.small) }; Text(model.authConfig?.mode == "development" ? "登录开发环境" : "打开安全登录").frame(maxWidth: .infinity) } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || model.server.isEmpty || model.authConfig == nil || (model.authConfig?.mode == "development" && !email.contains("@")))
+                if model.authConfig?.mode == "oidc" {
+                    Button("改用浏览器登录") { Task { await model.signIn(email: email, name: name, mode: .external) } }.disabled(model.busy || model.server.isEmpty)
+                    Text("系统安全登录未弹出时，可在默认浏览器完成同一授权流程；首次改密由你操作。").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                if let phase = model.loginPhase { Text(phase.message).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                if model.loginInProgress { Button("取消登录") { model.cancelSignIn() } }
                 if let error = model.error { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
             }.frame(width: 340).padding(30).background(.background, in: RoundedRectangle(cornerRadius: 18)).overlay(RoundedRectangle(cornerRadius: 18).stroke(.quaternary))
         }.padding(50).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.canvas)

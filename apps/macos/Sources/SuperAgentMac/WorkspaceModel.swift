@@ -19,6 +19,9 @@ import SuperAgentCore
     @Published var settings: ExecutionSettings?
     @Published var error: String?
     @Published var busy = false
+    @Published var loginPhase: LoginPhase?
+    @Published var loginInProgress = false
+    private var loginTask: Task<Void, Never>?
     @Published var lastSync: Date?
     @Published var selectedEngine: Engine = .codex
     @Published var selectedDevice = ""
@@ -46,19 +49,34 @@ import SuperAgentCore
         do { authConfig = try await api.request("/auth/config", authenticated: false) }
         catch { self.error = error.localizedDescription }
     }
-    func signIn(email: String, name: String) async {
-        await operation {
-            try await self.configure()
-            guard let config = self.authConfig else { throw APIError(status: 0, code: "auth_config", message: "无法取得服务器登录方式") }
-            if config.mode == "development" { self.session = try await self.api.loginDevelopment(email: email, name: name) }
-            else {
-                let token = try await self.oidc.authenticate(config: config)
-                let result: Session = try await self.api.request("/auth/exchange", method: "POST", body: ["access_token": .string(token)], authenticated: false)
-                try await self.api.setSession(result); self.session = result
-            }
-            await self.refresh(); self.startPolling()
+    func signIn(email: String, name: String, mode: LoginBrowserMode = .system) async {
+        guard loginTask == nil else { return }
+        loginInProgress = true; busy = true; error = nil; loginPhase = .configure
+        loginTask = Task {
+            defer { loginTask = nil; loginInProgress = false; busy = false }
+            do {
+                try await configure()
+                try Task.checkCancellation()
+                guard let config = authConfig else { throw APIError(status: 0, code: "auth_config", message: "无法取得服务器登录方式") }
+                if config.mode == "development" { session = try await api.loginDevelopment(email: email, name: name) }
+                else {
+                    let token = try await oidc.authenticate(config: config, mode: mode) { [weak self] phase in self?.loginPhase = phase }
+                    loginPhase = .productSession
+                    let result: Session = try await api.request("/auth/exchange", method: "POST", body: ["access_token": .string(token)], authenticated: false)
+                    try Task.checkCancellation()
+                    try await api.setSession(result); session = result
+                }
+                loginPhase = .loadingWorkspace
+                await refresh(); startPolling(); loginPhase = nil
+            } catch is CancellationError { error = "已取消登录"; loginPhase = nil }
+            catch let failure as URLError where failure.code == .cancelled { error = "已取消登录"; loginPhase = nil }
+            catch let failure as URLError where failure.code == .timedOut { error = "登录连接超时，请检查网络后重试"; loginPhase = nil }
+            catch { self.error = error.localizedDescription; loginPhase = nil }
         }
+        await loginTask?.value
     }
+    func cancelSignIn() { loginTask?.cancel(); oidc.cancel() }
+    func handleLoginCallback(_ url: URL) { oidc.handleCallback(url) }
     func signOut() async {
         pollTask?.cancel(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; lastSync = nil; error = nil; cursor = "0"
     }
