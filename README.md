@@ -4,7 +4,7 @@
 
 已发布 [Mac v0.1.1-preview.2](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.2) 与 [Android v0.1.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1)。API 已部署到 `https://super-agent.aimo.plus`。
 
-当前新增团队依赖调度、独立交付验收、不可变产物快照、工具步骤和通知队列已实现，服务端云 TEST **40/40**、跨组件云测试 **5/5** 通过。本批次尚未部署生产，真实模型业务与通知真机送达仍需验收；详细范围见[实施状态](docs/implementation-status.md)。
+当前新增团队依赖调度、独立交付验收、不可变产物快照、工具步骤和通知队列已实现，服务端云 TEST **40/40**、跨组件云测试完整运行 **6/6** 通过，另新增提案用量传输失败持久化回归 **1/1** 通过（合并7项套件待CI确认）。本批次尚未部署生产，真实模型业务与通知真机送达仍需验收；详细范围见[实施状态](docs/implementation-status.md)。
 
 ## 运行边界
 

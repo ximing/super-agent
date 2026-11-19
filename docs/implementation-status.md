@@ -8,7 +8,7 @@
 - Mac 节点及两个 Runtime、ToolBroker 均可构建；已验证文件路径与符号链接越界、浏览器独占、Codex JSON-RPC、Grok 本地工具循环、取消、SQLite 去重与重启不重放。
 - 真实本机 Codex 0.170.0 只读探测通过：初始化、模型列表、只读 thread 创建/归档和 dynamicTools 定义接受；未因此启动付费模型回合。
 - 控制服务 typecheck/build 通过；最终服务端 **40/40、0 fail、0 skip**（25.35秒），显式加载专用云 TEST 配置，使用非 owner 应用角色/独立 owner 迁移及私有测试 S3。覆盖隔离、签名重放、目标确认、费用去重、撤销、Recall 隔离、接管、迁移 ledger/锁、DAG/独立验收/取消传播、不同 envelope 的取消复活与证据替换拒绝、真实对象冻结、通知 outbox/过时抑制/HTTP/API/慢 provider 不阻塞派发。数据库连接故障返回可重试503。
-- 最终跨组件云测试由协调者运行 **5/5 通过**，使用真实 NodeAgent/SQLite/Fastify 与云 PG；模型使用明确 FakeRuntime，CSI 使用明确 mock。覆盖聊天确认/重启去重/澄清、暂停接管与自然像素换算，以及团队执行、独立 reviewer 和事件恢复路径；不将 FakeRuntime 写成真实 Grok 或业务验收。
+- 最新跨组件云测试由协调者完整运行 **6/6 通过**；随后新增提案成功而usage传输503的持久化回归，定向 **1/1 通过**（合并7项套件尚待CI确认），使用真实 NodeAgent/SQLite/Fastify 与云 PG；模型使用明确 FakeRuntime，CSI 使用明确 mock。覆盖聊天确认/重启去重/澄清、暂停接管与自然像素换算，以及团队执行、独立 reviewer 和事件恢复路径；不将 FakeRuntime 写成真实 Grok 或业务验收。
 - Android 最新 typecheck 与 **12/12 客户端测试**通过，覆盖设备撤销、步骤隐私、任务关系及交付证据；先前基础运行的5项 API/安全配置测试和763 modules Hermes JS 导出为历史证据。独立 release APK 已由最新 GHA 构建通过，CI 和下载后均核验内嵌 Hermes 字节码、不依赖 Metro，APK 签名校验通过；包约 56 MiB，Android 7+。内部测试签名与正式发布签名分开。
 - Swift 最新编译与 **17/17 测试**通过，覆盖登录回调、设备撤销、步骤、团队关系和交付核对；先前9项 XCTest、release appbundle 与本机签名为历史已通过证据。云 CI 最终安装包已在本机启动并保留产品登录会话，已撤销设备不会作为执行目标。正式分发签名/公证尚需用户 Apple 开发者配置。
 - 真实云端 OIDC S256 授权、callback state、Token 交换、JWT 签名/audience、产品会话与注销撤销通过；临时 Keycloak 测试用户已删除。已修复 Keycloak 26 client 默认 scope 缺 basic 导致无 sub 的配置问题。
@@ -20,7 +20,7 @@
 - 用户授权的当前 Mac 临时生产验收已通过：真实原生客户端认领 → 云端派发 → 前台 NodeAgent/SQLite → 本机 Codex `gpt-6.2-sol` 单回合 → 真实 ToolBroker `files_read` 一次 → 正确标记回传 → 客户端已完成与成本页。输入 15,706、缓存输入 15,488、输出 11 Token；订阅金额如实标未知。验收 driver 仅预置自建文件、限制工具/路径/次数，不以固定回答替代模型或 ToolBroker；没有访问业务网站。Run 成功后前台已停止，Mac 通过正常用户 API 撤销临时设备，未安装自启动。此为新增独立验收流程上线前的基础链路证据，不等于业务网站、Grok、浏览器或完整团队调度已通过验收。
 - 正式远程 Mac 已由用户批准配对并前台在线；原生工作台已核实保存默认 Grok、默认执行电脑与主助理电脑。用户明确批准将该 Mac 的 Recall 绑定导入本人生产账号，已显示连接；临时导入文件已删除、PAT 未进入仓库/日志。这些是配置与连接证据，真实 Grok 任务及新团队验收仍待上线后验证。
 
-主助理规划恢复新增保守边界：模型调用前先在本机journal持久记录running，usage回执实时落盘；失败保存通用回复并回执消费，不自动再次发起同一模型工作。重启发现未决running时要求用户明确重发，不因inbox重放或传输重试重复调用；空模型配置按configured-default记账。该路径的新增跨组件回归结果待协调者最终确认，不预先计入通过数。
+主助理规划恢复新增保守边界：模型调用前先在本机journal持久记录running，usage回执实时落盘；失败保存通用回复并回执消费，不自动再次发起同一模型工作。重启发现未决running时要求用户明确重发，不因inbox重放或传输重试重复调用；空模型配置按configured-default记账。该路径已包含在协调者完整6项回归中；随后新增提案成功但usage传输503时先持久化再补传的定向回归1/1通过，未将两次运行冒充一次合并7项套件结果。
 
 ## 云资源
 
