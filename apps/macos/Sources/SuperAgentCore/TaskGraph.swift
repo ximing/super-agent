@@ -39,4 +39,14 @@ public enum TaskGraph {
         for id in task.dependsOnTaskIds ?? [] where depSeen.insert(id).inserted { dependencies.append(TaskDependency(id: id, task: index[id])) }
         return TaskRelationships(ancestors: ancestors.reversed(), children: loaded.filter { $0.parentTaskId == task.id }, dependencies: dependencies, incompleteAncestors: incomplete)
     }
+    /// Project, sites, and global preference stay visible. Nil means the item has no scope to show.
+    public static func planItemScopeLine(_ scope: MemoryScope?) -> String? {
+        guard let scope else { return nil }
+        let trimmed = scope.project?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let project = trimmed.isEmpty ? "未指定" : trimmed
+        let sites = scope.sites?.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? []
+        let siteText = sites.isEmpty ? "无" : sites.joined(separator: "、")
+        let global = scope.globalPreference == true ? "开" : "关"
+        return "记忆范围：项目 \(project) · 网站 \(siteText) · 全局偏好 \(global)"
+    }
 }

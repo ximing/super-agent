@@ -49,8 +49,8 @@ async function run(): Promise<void> {
   const authConfig = await authConfigResponse.json() as { mode?: string; issuer?: string; client_id?: string };
   check(authConfig.mode === 'oidc' && typeof authConfig.issuer === 'string', 'TEST API must use OIDC; no fixture was created.');
   const issuer = publicHttps(authConfig.issuer, 'Configured OIDC issuer');
-  const realmMatch = /^(.*)\/realms\/(super-agent-test)\/?$/.exec(issuer.pathname);
-  check(realmMatch && !/prod/i.test(issuer.pathname), 'Refusing API whose issuer is not the exact super-agent-test realm.');
+  const realmMatch = /^(.*)\/realms\/(aimo-plus-test)\/?$/.exec(issuer.pathname);
+  check(realmMatch && !/prod/i.test(issuer.pathname), 'Refusing API whose issuer is not the exact aimo-plus-test realm.');
   const issuerUrl = issuer.href.replace(/\/$/, '');
   if (process.env.OIDC_ISSUER) check(process.env.OIDC_ISSUER.replace(/\/$/, '') === issuerUrl, 'OIDC_ISSUER differs from the verified TEST API issuer.');
   check(!authConfig.client_id || authConfig.client_id === clientId, 'TEST API native OIDC client does not match this smoke.');

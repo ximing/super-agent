@@ -70,6 +70,46 @@ test('review tool calls stop on the call after the tool limit and do not execute
   assert.equal(guard.tools, 12);
 });
 
+test('a screenshot is needs_input until a vision-capable engine actually receives the bytes', async () => {
+  const evidence = fixture();
+  const png = Buffer.from('png-bytes');
+  evidence.artifacts[0] = { id: 'shot-1', task_id: 'task-1', run_id: 'run-1', name: 'screen.png', mime: 'image/png', size: png.length, status: 'ready', created_at: '', integrity: 'server_snapshot', evidence_kind: 'screenshot', provenance: 'tool_broker', fresh: true, source_url: 'https://a.example/item' };
+  evidence.delivery!.artifact_ids = ['shot-1'];
+  const review = { verdict: 'accept', summary: '看起来对。', checks: [{ deliverable_index: 0, passed: true, evidence_refs: [{ kind: 'artifact', id: 'shot-1' }] }] };
+  await reviewDelivery({ evidence, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => { throw new Error('must not download'); },
+    adapter: adapter(async context => {
+      const seen = await context.executeTool('delivery_artifact_read', { id: 'shot-1' });
+      assert.equal((seen as { visual: string }).visual, 'unsupported');
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_visual_read/);
+      await context.executeTool('delivery_review', { verdict: 'needs_input', summary: '引擎不能看图。', checks: [] });
+    }) });
+  let shown = false;
+  await reviewDelivery({ evidence, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => png.toString('base64'),
+    adapter: { ...adapter(async context => {
+      await context.executeTool('delivery_artifact_read', { id: 'shot-1' });
+      assert.equal(context.images?.[0]?.artifact_id, 'shot-1');
+      assert.equal(context.images?.[0]?.data_base64, png.toString('base64'));
+      shown = true;
+      await context.executeTool('delivery_review', review);
+    }), supportsVision: () => true, stop: async () => {}, steer: async () => {} } });
+  assert.equal(shown, true);
+});
+
+test('a memory conclusion needs the body, not only the retrieval id', async () => {
+  const evidence = fixture();
+  evidence.artifacts[0] = { id: 'mem-1', task_id: 'task-1', run_id: 'run-1', name: 'memory.json', mime: 'application/json', size: 2, status: 'ready', created_at: '', integrity: 'server_snapshot', evidence_kind: 'memory_retrieval', provenance: 'tool_broker', fresh: true };
+  evidence.delivery!.artifact_ids = ['mem-1'];
+  const review = { verdict: 'accept', summary: '正文已核对。', checks: [{ deliverable_index: 0, passed: true, evidence_refs: [{ kind: 'artifact', id: 'mem-1' }] }] };
+  await reviewDelivery({ evidence, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => '{"id":"mem-1"}', readMemory: async () => '正文：价格是 9',
+    adapter: adapter(async context => {
+      await context.executeTool('delivery_artifact_read', { id: 'mem-1' });
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
+      const body = await context.executeTool('memory_body_read', { id: 'mem-1' });
+      assert.match((body as { content: string }).content, /价格是 9/);
+      await context.executeTool('delivery_review', review);
+    }) });
+});
+
 test('accept cannot cite an observation artifact the reviewer did not read', async () => {
   const evidence = fixture();
   evidence.steps = [{ id: 'step-1', run_id: 'run-1', title: '读取网页', tool: 'browser_snapshot', status: 'succeeded', started_at: '', completed_at: '', error_code: null, created_at: '', version: 1 }];

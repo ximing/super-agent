@@ -4,6 +4,12 @@ import SuperAgentCore
 
 @MainActor final class NativeNotifications: NSObject, NSApplicationDelegate {
     weak var model: WorkspaceModel?
+    private let appIcon = AppIconController()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        appIcon.start()
+    }
+
     func enable() async {
         do {
             let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])

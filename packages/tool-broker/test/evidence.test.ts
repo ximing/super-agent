@@ -59,13 +59,48 @@ test('screenshot evidence does not require a live viewer and memory evidence kee
   assert.equal(uncertain.source_uncertain, true);
   assert.equal(uncertain.source_url, null);
   assert.equal(uncertain.fresh, false);
+  assert.equal(uncertain.stale, true);
   assert.equal(JSON.stringify(uncertain).includes('later.example'), false);
   assert.equal(JSON.stringify(uncertain).includes('token=abc'), false);
   const uncertainShot = screenshotEvidence({ url: 'https://later.example/after', capturedAt: '2026-11-19T01:02:03.000Z', runId: 'run', stepId: 'step', bytes: Buffer.from('jpeg'), width: 10, height: 12, sourceUncertain: true });
   assert.equal(uncertainShot.source_uncertain, true);
   assert.equal(uncertainShot.source_url, null);
-  assert.notEqual(uncertainShot.fresh, true);
+  assert.equal(uncertainShot.fresh, false);
+  assert.equal(uncertainShot.stale, true);
   assert.equal(JSON.stringify(uncertainShot).includes('jpeg'), false);
   assert.equal(JSON.stringify(uncertainShot).includes('later.example'), false);
   assert.equal(JSON.stringify(uncertainShot).includes('人工打开图片'), true);
+});
+
+test('a missing or non-http source is stale and uncertain, while a stable https url stays fresh and redacted', () => {
+  const capturedAt = '2026-11-19T01:02:03.000Z';
+  for (const url of ['', 'about:blank', 'file:///tmp/page', null]) {
+    const page = pageEvidence({ url, capturedAt, runId: 'run', stepId: 'step', body: '正文' });
+    assert.equal(page.source_uncertain, true);
+    assert.equal(page.fresh, false);
+    assert.equal(page.stale, true);
+    assert.equal(page.source_url, null);
+    assert.equal(typeof page.source_uncertain_reason, 'string');
+    assert.ok(page.source_uncertain_reason);
+    const shot = screenshotEvidence({ url, capturedAt, runId: 'run', stepId: 'step', bytes: Buffer.from('jpeg'), width: 8, height: 8 });
+    assert.equal(shot.source_uncertain, true);
+    assert.equal(shot.fresh, false);
+    assert.equal(shot.stale, true);
+    assert.equal(shot.source_url, null);
+    assert.equal(JSON.stringify(shot).includes('jpeg'), false);
+  }
+  const page = pageEvidence({ url: 'https://user:secret@example.com/path?token=abc&code=1#session', capturedAt, runId: 'run', stepId: 'step', body: '稳定正文' });
+  assert.equal(page.source_url, 'https://example.com/path');
+  assert.equal(page.source_uncertain, false);
+  assert.equal(page.fresh, true);
+  assert.equal(page.stale, false);
+  assert.equal(JSON.stringify(page).includes('secret'), false);
+  assert.equal(JSON.stringify(page).includes('token=abc'), false);
+  const shot = screenshotEvidence({ url: 'https://user:secret@example.com/path?ticket=abc#x', capturedAt, runId: 'run', stepId: 'step', bytes: Buffer.from('jpeg'), width: 8, height: 8 });
+  assert.equal(shot.source_url, 'https://example.com/path');
+  assert.equal(shot.source_uncertain, false);
+  assert.equal(shot.fresh, true);
+  assert.equal(shot.stale, false);
+  assert.equal(JSON.stringify(shot).includes('secret'), false);
+  assert.equal(JSON.stringify(shot).includes('ticket=abc'), false);
 });

@@ -201,12 +201,15 @@ test('memory cache envelopes stay stale and capture binds url to the same body',
     const stableShot = await stableBroker.execute('browser_snapshot', {}) as { snapshot: { text: string }; evidence: { source_uncertain?: boolean; source_url?: string | null; fresh?: boolean } };
     assert.deepEqual(stable.actions, ['evaluate', 'snapshot', 'evaluate']);
     assert.equal(stableShot.snapshot.text, 'stable-body');
-    assert.notEqual(stableShot.evidence.source_uncertain, true);
+    assert.equal(stableShot.evidence.source_uncertain, false);
     assert.equal(stableShot.evidence.source_url, 'https://stable.example/page');
     assert.equal(stableShot.evidence.fresh, true);
+    assert.equal(stableShot.evidence.stale, false);
     const settledUrls = ['https://old.example/a', 'https://new.example/b', 'https://new.example/b', 'https://new.example/b'];
     const settled = scripted(settledUrls, ['first-body', 'second-body']);
     const settledCapture = await settled.browser.capture('run');
+    assert.equal(settled.actions.filter(action => action === 'evaluate').length, 4);
+    assert.equal(settled.actions.filter(action => action === 'snapshot').length, 2);
     assert.equal(settledCapture.source_uncertain, false);
     assert.equal(settledCapture.url, 'https://new.example/b');
     assert.equal((settledCapture.snapshot as { text: string }).text, 'second-body');
@@ -218,9 +221,12 @@ test('memory cache envelopes stay stale and capture binds url to the same body',
     const shiftingBroker = new ToolBroker({ runId: 'run', cwd: dir, browser: shifting.browser, signal: new AbortController().signal, assertActive: () => {}, ask: async () => '', request: async <T>() => { throw new Error('evidence-upload-unavailable'); } });
     const shifted = await shiftingBroker.execute('browser_snapshot', {}) as { snapshot: { text: string }; evidence: { source_uncertain?: boolean; source_url?: string | null; fresh?: boolean } };
     assert.equal(shifted.snapshot.text, 'second-body');
+    assert.equal(shifting.actions.filter(action => action === 'evaluate').length, 4);
+    assert.equal(shifting.actions.filter(action => action === 'snapshot').length, 2);
     assert.equal(shifted.evidence.source_uncertain, true);
     assert.equal(shifted.evidence.source_url ?? null, null);
     assert.equal(shifted.evidence.fresh, false);
+    assert.equal(shifted.evidence.stale, true);
     assert.equal(JSON.stringify(shifted).includes('first-body'), false);
     assert.equal(JSON.stringify(shifted).includes('fourth.example'), false);
     assert.equal(JSON.stringify(shifted).includes('second.example'), false);
@@ -233,8 +239,108 @@ test('memory cache envelopes stay stale and capture binds url to the same body',
     assert.ok(shot.actions.includes('screenshot'));
     assert.equal(shotResult.evidence.source_uncertain, true);
     assert.equal(shotResult.evidence.fresh, false);
+    assert.equal(shotResult.evidence.stale, true);
     assert.equal(shotResult.evidence.source_url ?? null, null);
     assert.equal(JSON.stringify(shotResult).includes('fourth.example'), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('unreadable CSI evaluate cannot make a page fresh or bind the requested url', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'super-agent-unreadable-'));
+  const image = join(dir, 'frame.jpg');
+  await writeFile(image, Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9]));
+  const uploads: Record<string, unknown>[] = [];
+  const requested = 'https://user:secret@requested.example/start?token=abc#frag';
+  const redacted = 'https://user:secret@stable.example/path?code=abc&ticket=1#frag';
+  const actor = (evaluate: () => unknown) => {
+    const actions: string[] = [];
+    const browser = new BrowserActor('http://csi.invalid', (async (_url: unknown, init: RequestInit) => {
+      const command = JSON.parse(String(init.body)) as { action: string };
+      actions.push(command.action);
+      if (command.action === 'evaluate') return Response.json(evaluate());
+      if (command.action === 'snapshot') return Response.json({ success: true, data: { text: 'snapshot-body' } });
+      if (command.action === 'screenshot') return Response.json({ success: true, data: { path: image } });
+      return Response.json({ success: true, data: { ok: true } });
+    }) as typeof fetch);
+    return { browser, actions };
+  };
+  const request = async (path: string, body?: unknown) => {
+    if (path === '/node/memory/search') return { items: [] };
+    if (path === '/artifacts/uploads') {
+      uploads.push(body as Record<string, unknown>);
+      return { artifact_id: `art-${uploads.length}`, upload_url: 'https://objects.example/put', max_size: 50_000_000 };
+    }
+    if (path.endsWith('/finalize')) return { status: 'ready' };
+    throw new Error(`unexpected ${path}`);
+  };
+  const brokerFor = (browser: BrowserActor) => new ToolBroker({ runId: 'run', cwd: dir, browser, signal: new AbortController().signal, assertActive: () => {}, ask: async () => '', fetcher: async () => new Response(null, { status: 200 }), request });
+  const reviewer = (evidence: { fresh?: boolean; stale?: boolean; source_uncertain?: boolean; source_url?: string | null; source_uncertain_reason?: string }) => {
+    assert.equal(evidence.source_uncertain, true);
+    assert.equal(evidence.fresh, false);
+    assert.equal(evidence.stale, true);
+    assert.equal(evidence.source_url ?? null, null);
+    assert.equal(typeof evidence.source_uncertain_reason, 'string');
+    assert.ok(evidence.source_uncertain_reason);
+  };
+  try {
+    const blank = actor(() => ({ success: true, value: '{}' }));
+    const blankBroker = brokerFor(blank.browser);
+    const navigated = await blankBroker.execute('browser_navigate', { url: requested }) as { evidence: { fresh: boolean; stale: boolean; source_uncertain: boolean; source_url: string | null; source_uncertain_reason?: string; evidence_status?: string } };
+    reviewer(navigated.evidence);
+    assert.equal(navigated.evidence.evidence_status, 'ready');
+    assert.equal(blank.actions.filter(action => action === 'navigate').length, 1);
+    assert.equal(JSON.stringify(navigated.evidence).includes('requested.example'), false);
+    assert.equal(JSON.stringify(navigated.evidence).includes('token=abc'), false);
+    const snap = await blankBroker.execute('browser_snapshot', {}) as { evidence: { fresh: boolean; stale: boolean; source_uncertain: boolean; source_url: string | null; source_uncertain_reason?: string } };
+    reviewer(snap.evidence);
+    const shot = await blankBroker.execute('browser_screenshot', {}) as { evidence: { fresh: boolean; stale: boolean; source_uncertain: boolean; source_url: string | null; source_uncertain_reason?: string } };
+    reviewer(shot.evidence);
+    assert.equal(blank.actions.filter(action => action === 'snapshot').length, 6);
+    assert.ok(uploads.length >= 4);
+    for (const upload of uploads) {
+      assert.equal(upload.source_uncertain, true);
+      assert.equal(upload.fresh, false);
+      assert.equal(upload.stale, true);
+      assert.equal(upload.source_url, null);
+      assert.equal(typeof upload.source_uncertain_reason, 'string');
+      assert.equal(JSON.stringify(upload).includes('requested.example'), false);
+      assert.equal(JSON.stringify(upload).includes('token=abc'), false);
+      assert.equal(JSON.stringify(upload).includes('secret'), false);
+    }
+    uploads.length = 0;
+    const stable = actor(() => ({ success: true, data: { value: JSON.stringify({ width: 8, height: 8, scale: 1, url: redacted, scroll_x: 0, scroll_y: 0 }) } }));
+    const stableBroker = brokerFor(stable.browser);
+    const stableSnap = await stableBroker.execute('browser_snapshot', {}) as { evidence: { fresh: boolean; stale: boolean; source_uncertain: boolean; source_url: string | null } };
+    assert.equal(stable.actions.filter(action => action === 'snapshot').length, 1);
+    assert.equal(stableSnap.evidence.fresh, true);
+    assert.equal(stableSnap.evidence.stale, false);
+    assert.equal(stableSnap.evidence.source_uncertain, false);
+    assert.equal(stableSnap.evidence.source_url, 'https://stable.example/path');
+    const stableShot = await stableBroker.execute('browser_screenshot', {}) as { evidence: { fresh: boolean; stale: boolean; source_uncertain: boolean; source_url: string | null } };
+    assert.equal(stableShot.evidence.fresh, true);
+    assert.equal(stableShot.evidence.stale, false);
+    assert.equal(stableShot.evidence.source_uncertain, false);
+    assert.equal(stableShot.evidence.source_url, 'https://stable.example/path');
+    assert.ok(uploads.length >= 3);
+    for (const upload of uploads) {
+      assert.equal(upload.fresh, true);
+      assert.equal(upload.stale, false);
+      assert.equal(upload.source_uncertain, false);
+      assert.equal(upload.source_url, 'https://stable.example/path');
+      assert.equal(JSON.stringify(upload).includes('secret'), false);
+      assert.equal(JSON.stringify(upload).includes('code=abc'), false);
+      assert.equal(JSON.stringify(upload).includes('ticket=1'), false);
+    }
+    const about = actor(() => ({ success: true, data: { value: JSON.stringify({ width: 8, height: 8, scale: 1, url: 'about:blank', scroll_x: 0, scroll_y: 0 }) } }));
+    const aboutCapture = await about.browser.capture('run');
+    assert.equal(about.actions.filter(action => action === 'snapshot').length, 2);
+    assert.equal(aboutCapture.source_uncertain, true);
+    assert.equal(aboutCapture.url, '');
+    const aboutPage = pageEvidence({ url: aboutCapture.url, capturedAt: aboutCapture.captured_at, runId: 'run', stepId: 'step', body: aboutCapture.snapshot, sourceUncertain: aboutCapture.source_uncertain, sourceUncertainReason: aboutCapture.source_uncertain_reason ?? undefined });
+    assert.equal(aboutPage.fresh, false);
+    assert.equal(aboutPage.stale, true);
+    assert.equal(aboutPage.source_uncertain, true);
+    assert.equal(aboutPage.source_url, null);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

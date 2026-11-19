@@ -18,6 +18,11 @@ const string = (a: Args, key: string, limit = 100_000): string => {
 };
 const schema = (properties: Args, required: string[] = []) => ({ type: 'object', properties, required, additionalProperties: false });
 const str = { type: 'string' };
+const UNCONFIRMED_SOURCE_REASON = '未能确认当前页面网址';
+function browserSource(captured: { url: string; source_uncertain: boolean; source_uncertain_reason: string | null }): { url: string | null; sourceUncertain: boolean; sourceUncertainReason?: string } {
+  if (captured.source_uncertain || !captured.url) return { url: null, sourceUncertain: true, sourceUncertainReason: captured.source_uncertain_reason || UNCONFIRMED_SOURCE_REASON };
+  return { url: captured.url, sourceUncertain: false };
+}
 export interface BrokerOptions {
   runId: string;
   cwd: string;
@@ -83,17 +88,23 @@ export class ToolBroker {
     }
   }
   private async publishEvidence(stepId: string, document: Record<string, unknown>, bytes: Buffer, name: string, mime: string): Promise<Record<string, unknown>> {
-    const uncertain = document.source_uncertain === true;
-    const fresh = document.fresh !== false && !uncertain;
-    const stale = document.stale === true || uncertain;
+    const browserKind = document.evidence_kind === 'page_capture' || document.evidence_kind === 'screenshot';
+    const urlMissing = browserKind && (typeof document.source_url !== 'string' || document.source_url.length === 0);
+    const uncertain = document.source_uncertain === true || urlMissing;
+    const fresh = uncertain ? false : document.fresh !== false;
+    const stale = uncertain ? true : document.stale === true;
     const summary: Record<string, unknown> = { evidence_kind: document.evidence_kind, captured_at: document.captured_at, source_url: uncertain ? null : document.source_url ?? null, fresh, stale, viewer_required: false };
-    if (uncertain) { summary.source_uncertain = true; summary.source_uncertain_reason = document.source_uncertain_reason ?? '页面在捕获期间发生跳转，不能确定正文对应的网址'; }
+    if (uncertain) { summary.source_uncertain = true; summary.source_uncertain_reason = typeof document.source_uncertain_reason === 'string' && document.source_uncertain_reason ? document.source_uncertain_reason : UNCONFIRMED_SOURCE_REASON; }
+    else if (document.source_uncertain === false) summary.source_uncertain = false;
     if (typeof document.observed_at === 'string') summary.observed_at = document.observed_at;
     if (typeof document.retrieved_at === 'string') summary.retrieved_at = document.retrieved_at;
     if (typeof document.generated_at === 'string') summary.generated_at = document.generated_at;
     if (typeof document.stale_reason === 'string') summary.stale_reason = document.stale_reason;
+    const metadata: Record<string, unknown> = { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: summary.source_url, step_id: stepId, fresh, stale };
+    if (typeof summary.source_uncertain === 'boolean') metadata.source_uncertain = summary.source_uncertain;
+    if (typeof summary.source_uncertain_reason === 'string') metadata.source_uncertain_reason = summary.source_uncertain_reason;
     try {
-      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: summary.source_url, step_id: stepId, fresh, stale });
+      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, metadata);
       return { ...summary, artifact_id: artifact.id, evidence_status: artifact.status ?? 'ready' };
     } catch { return { evidence_status: 'not_frozen', ...summary }; }
   }
@@ -122,14 +133,16 @@ export class ToolBroker {
         let evidence: Record<string, unknown> = { evidence_status: 'not_frozen', viewer_required: false };
         try {
           const captured = await browser.capture(runId);
-          const document = pageEvidence({ url: captured.source_uncertain ? null : (captured.url || url.href), capturedAt: captured.captured_at, runId, stepId, body: captured.snapshot, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
+          const source = browserSource(captured);
+          const document = pageEvidence({ url: source.url, capturedAt: captured.captured_at, runId, stepId, body: captured.snapshot, sourceUncertain: source.sourceUncertain, sourceUncertainReason: source.sourceUncertainReason });
           evidence = await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json');
         } catch { /* Navigation already happened; missing evidence stays unverified. */ }
         result = { knowledge, navigation, evidence }; break;
       }
       case 'browser_snapshot': {
         const captured = await browser.capture(runId);
-        const document = pageEvidence({ url: captured.url, capturedAt: captured.captured_at, runId, stepId, body: captured.snapshot, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
+        const source = browserSource(captured);
+        const document = pageEvidence({ url: source.url, capturedAt: captured.captured_at, runId, stepId, body: captured.snapshot, sourceUncertain: source.sourceUncertain, sourceUncertainReason: source.sourceUncertainReason });
         result = { snapshot: captured.snapshot, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json') }; break;
       }
       case 'browser_click': { const selector = string(args, 'selector', 1000); markUnsafe(); result = await browser.call(runId, 'click', { selector }); break; }
@@ -139,9 +152,10 @@ export class ToolBroker {
         const captured = await browser.capture(runId, { screenshot: true });
         if (!captured.frame || !captured.bytes) throw new Error('screenshot_unavailable');
         const frame = captured.frame, bytes = captured.bytes;
-        const image = screenshotEvidence({ url: captured.url, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
+        const source = browserSource(captured);
+        const image = screenshotEvidence({ url: source.url, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, sourceUncertain: source.sourceUncertain, sourceUncertainReason: source.sourceUncertainReason });
         const stored = await this.publishEvidence(stepId, image, bytes, `screenshot-${stepId}.jpg`, 'image/jpeg');
-        const manifest = screenshotEvidence({ url: captured.url, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, imageArtifactId: typeof stored.artifact_id === 'string' ? stored.artifact_id : null, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
+        const manifest = screenshotEvidence({ url: source.url, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, imageArtifactId: typeof stored.artifact_id === 'string' ? stored.artifact_id : null, sourceUncertain: source.sourceUncertain, sourceUncertainReason: source.sourceUncertainReason });
         result = { captured: stored.evidence_status !== 'not_frozen', frame_id: frame.frame_id, width: frame.width, height: frame.height, captured_at: frame.captured_at, viewer_required: false, evidence: await this.publishEvidence(stepId, manifest, Buffer.from(JSON.stringify(manifest)), `screenshot-${stepId}.json`, 'application/json') }; break;
       }
       case 'memory_search': {

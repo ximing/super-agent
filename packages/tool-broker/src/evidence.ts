@@ -69,9 +69,11 @@ function redactStructured(value: unknown): { value: unknown; redacted: boolean }
 
 function digest(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex'); }
 const SOURCE_UNCERTAIN_REASON = '页面在捕获期间发生跳转，不能确定正文对应的网址';
+const UNCONFIRMED_SOURCE_REASON = '未能确认当前页面网址';
 function sourceBinding(url: unknown, uncertain: boolean, reason?: string): { source_url: string | null; source_uncertain: boolean; source_uncertain_reason?: string; fresh: boolean; stale: boolean } {
-  if (!uncertain) return { source_url: safeEvidenceUrl(url), source_uncertain: false, fresh: true, stale: false };
-  return { source_url: null, source_uncertain: true, source_uncertain_reason: reason || SOURCE_UNCERTAIN_REASON, fresh: false, stale: true };
+  const source_url = uncertain ? null : safeEvidenceUrl(url);
+  if (uncertain || !source_url) return { source_url: null, source_uncertain: true, source_uncertain_reason: reason || (uncertain ? SOURCE_UNCERTAIN_REASON : UNCONFIRMED_SOURCE_REASON), fresh: false, stale: true };
+  return { source_url, source_uncertain: false, fresh: true, stale: false };
 }
 function projectOfHit(item: Record<string, unknown>): unknown {
   const governance = item.governance && typeof item.governance === 'object' ? item.governance as Record<string, unknown> : null;

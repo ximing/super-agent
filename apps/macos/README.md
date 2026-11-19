@@ -32,13 +32,15 @@ open 'build/Super Agent.app'
 
 ## 视觉与交互
 
-墨蓝 `#182B45` 作为工作内容层级，工作蓝 `#315F9C` 标记当前控制，石板灰文字与浅灰画布承载后台状态。使用原生 SF 字体和窗口导航：左侧助理/任务/待处理/电脑/记忆/定时关注/成本，右侧完整工作区；状态、授权与费用来源在对应对象旁说明，不用演示数据填充空白。
+采用 `docs/design/workbench-native.html` 的 Mac 原生工作台方向：统一系统标题栏与工具栏，紧凑七项侧栏导航、最近任务、设备和账户入口；助理以对话为主体，执行配置收进输入区旁的紧凑菜单，右侧是可收起的任务检查器。任务使用可调宽列表与同工作区详情，详情分为概览、执行过程和交付物；新建与逐条验收使用 Sheet，普通详情不弹全局窗口。
+
+系统字体、SF Symbols、中性背景与细分隔线承担主要层级，紫色仅用于关键操作、选中和状态强调。助理草稿与各任务补充要求草稿保存在展示状态中，切换分栏、检查器或执行配置不会清空。状态、授权、父子归属、前置依赖与费用来源在对应对象旁说明，不以演示数据填充正常登录工作区。
 
 在云端 API 尚未配置或不可达时显示明确连接错误。只有 `/auth/config` 返回可用登录方式后才开放登录按钮。
 
 ## 本机验证
 
-- `swift test`：17 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留，以及无请求体 DELETE 不发送 JSON Content-Type。
+- `swift test`：22 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留、会话恢复，以及无请求体 DELETE 不发送 JSON Content-Type。
 - `bash scripts/build-app.sh`：release 可执行应用已构建并进行本机签名。
 - 真实 OIDC、Recall 账号和云端端到端流程取决于用户部署的服务配置，不能由编译通过推定。
 
@@ -49,6 +51,19 @@ open 'build/Super Agent.app'
 ```
 
 该模式只渲染本应用未登录 NSView 并保存 PNG 后退出，不截取整张用户桌面。
+
+已登录工作台使用显式隔离的演示 fixtures 检查真实 SwiftUI 渲染；此模式不恢复钥匙串会话、不启动轮询，也不请求云端：
+
+```sh
+'build/Super Agent.app/Contents/MacOS/SuperAgent' --demo-screenshot "$PWD/build/demo/assistant.png" --demo-view assistant
+'build/Super Agent.app/Contents/MacOS/SuperAgent' --demo-screenshot "$PWD/build/demo/tasks.png" --demo-view tasks
+'build/Super Agent.app/Contents/MacOS/SuperAgent' --demo-screenshot "$PWD/build/demo/review.png" --demo-view review
+'build/Super Agent.app/Contents/MacOS/SuperAgent' --demo-screenshot "$PWD/build/demo/assistant-minimum.png" --demo-view assistant --demo-minimum
+```
+
+默认内容尺寸为 1260 × 840；`--demo-minimum` 检查 1040 × 680。演示凭据是无效占位值，截图仅包含本应用窗口。
+
+`--demo-view` 另支持 `questions`、`devices`、`memories`、`schedules`、`costs`。辅助页面在演示模式下跳过费用与定时关注的云端读取，使用当前 fixtures 或明确空态。[最新原生 UI 验收和截图](../../docs/design/native-acceptance/README.md)记录本轮样式修复与检查结果。
 
 OIDC 登录仅请求 `openid profile email`，默认回调为 `superagent://oauth/callback`。应用保存和刷新产品服务端会话，不申请 OIDC `offline_access` 长期权限。
 

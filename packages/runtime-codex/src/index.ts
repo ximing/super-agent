@@ -65,6 +65,7 @@ export class CodexRuntime implements RuntimeAdapter {
   private context?: RuntimeContext;
   private pendingInputs: string[] = [];
   constructor(private readonly options: CodexOptions = {}) {}
+  supportsVision(): boolean { return false; }
   async execute(context: RuntimeContext): Promise<RuntimeResult> {
     checkAbort(context.signal);
     this.context = context; this.stopRequested = false;

@@ -4,3 +4,9 @@ export function taskTree(loaded:AgentTask[]):TreeEntry[]{const index=new Map<str
 export function taskGroups(loaded:AgentTask[]){const groups=new Map<string,AgentTask[]>();for(const task of loaded){const key=task.plan_id??'unassigned';const items=groups.get(key)??[];items.push(task);groups.set(key,items);}return [...groups].map(([id,items])=>({id,title:id==='unassigned'?'未分组任务':`方案 ${id.slice(0,8)}`,entries:taskTree(items)}));}
 export function taskRelations(task:AgentTask,loaded:AgentTask[]){const index=new Map(loaded.map(item=>[item.id,item]));const ancestors:AgentTask[]=[];const seen=new Set([task.id]);let parentId=task.parent_task_id;let incompleteAncestors=false;while(parentId){const parent=index.get(parentId);if(seen.has(parentId)||!parent){incompleteAncestors=true;break;}seen.add(parentId);ancestors.push(parent);parentId=parent.parent_task_id;}return{ancestors:ancestors.reverse(),children:loaded.filter(item=>item.parent_task_id===task.id),dependencies:[...new Set(task.depends_on_task_ids??[])].map(id=>({id,task:index.get(id)})),incompleteAncestors};}
 export const taskStateLabel=(state:string)=>({blocked:'等待前置任务',queued:'排队中',running:'正在执行',waiting_input:'待你回答',waiting_device:'等待电脑',awaiting_approval:'待你确认',pausing:'正在暂停',paused:'已暂停',switching:'正在切换',awaiting_review:'待验收',succeeded:'已完成',failed:'失败',cancelled:'已取消'} as Record<string,string>)[state]??'状态待确认';
+export function planItemScopeLine(scope:{project?:string|null;sites?:string[]|null;global_preference?:boolean|null}|null|undefined):string|null{
+  if(!scope)return null;
+  const project=scope.project?.trim()?scope.project.trim():'未指定';
+  const sites=(scope.sites??[]).map(item=>item.trim()).filter(Boolean);
+  return `记忆范围：项目 ${project} · 网站 ${sites.length?sites.join('、'):'无'} · 全局偏好 ${scope.global_preference===true?'开':'关'}`;
+}

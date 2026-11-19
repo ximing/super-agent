@@ -20,8 +20,8 @@ function validateConfiguration() {
   check(['postgres:', 'postgresql:'].includes(database.protocol) && nonLoopback(database.hostname) && !!database.username && /^\/[a-z0-9_]+_test$/i.test(database.pathname) && !/prod/i.test(database.pathname), 'TEST_DATABASE_URL must identify a dedicated cloud *_test PostgreSQL database; local and production databases are refused.');
   check(jwtSecret.length >= 32, 'JWT_SECRET must have at least 32 characters.');
   const issuer = parseUrl(process.env.OIDC_ISSUER!, 'OIDC_ISSUER');
-  const realmMatch = /^(.*)\/realms\/([a-z0-9_-]*super-agent-test)\/?$/i.exec(issuer.pathname);
-  check(issuer.protocol === 'https:' && nonLoopback(issuer.hostname) && !issuer.username && !issuer.password && !issuer.search && !issuer.hash && realmMatch, 'OIDC_ISSUER must be an HTTPS cloud Keycloak issuer whose realm ends in super-agent-test.');
+  const realmMatch = /^(.*)\/realms\/(aimo-plus-test)\/?$/.exec(issuer.pathname);
+  check(issuer.protocol === 'https:' && nonLoopback(issuer.hostname) && !issuer.username && !issuer.password && !issuer.search && !issuer.hash && realmMatch, 'OIDC_ISSUER must be an HTTPS cloud Keycloak issuer for the exact realm aimo-plus-test.');
   issuer.pathname = issuer.pathname.replace(/\/$/, '');
   return { databaseUrl, jwtSecret, issuer: issuer.href.replace(/\/$/, ''), keycloakBase: issuer.origin + realmMatch[1], realm: realmMatch[2]!, username: process.env.OIDC_ADMIN_USERNAME!, password: process.env.OIDC_ADMIN_PASSWORD! };
 }

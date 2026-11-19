@@ -13,6 +13,7 @@ export class GrokRuntime implements RuntimeAdapter {
     const url = new URL(options.baseUrl ?? 'https://api.x.ai/v1');
     if (url.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Provider URL must use HTTPS');
   }
+  supportsVision(): boolean { return false; }
   async execute(context: RuntimeContext): Promise<RuntimeResult> {
     checkAbort(context.signal);
     this.controller = new AbortController();

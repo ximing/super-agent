@@ -19,7 +19,7 @@ Supply these environment variables explicitly:
 
 - `TEST_DATABASE_URL`: already migrated cloud PostgreSQL database ending `_test`, using its application role.
 - `JWT_SECRET`: at least 32 characters for the test product session.
-- `OIDC_ISSUER`: HTTPS Keycloak issuer with a realm ending `super-agent-test`.
+- `OIDC_ISSUER`: HTTPS Keycloak issuer for the exact realm `aimo-plus-test`.
 - `OIDC_ADMIN_USERNAME`, `OIDC_ADMIN_PASSWORD`: test Keycloak administrator credentials able to create and delete users in that realm.
 
 The fixture expects the configured native client `super-agent-native`, audience `super-agent-api`, redirect URI `superagent://oauth/callback`, required S256 PKCE and standard `openid profile email` scopes (including the `sub` claim). The administrator token uses the Keycloak `admin-cli` client in `master`. Configure these in the cloud test deployment before running.

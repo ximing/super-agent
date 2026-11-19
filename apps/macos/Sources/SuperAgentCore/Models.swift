@@ -27,7 +27,29 @@ public struct Device: Codable, Identifiable, Sendable {
     public func supports(_ engine: Engine) -> Bool { revoked != true && capabilities.engines.contains { $0.engine == engine && $0.ready } }
 }
 public struct ExecutionSettings: Codable, Sendable {
-    public let defaultEngine: Engine; public let defaultDeviceId: String?; public let assistantDeviceId: String?; public let version: Int
+    public let defaultEngine: Engine; public let defaultDeviceId: String?; public let assistantDeviceId: String?; public let memoryGlobalRead: Bool?; public let version: Int
+}
+public struct MemoryScope: Codable, Sendable, Equatable {
+    public let project: String?
+    public let sites: [String]?
+    public let globalPreference: Bool?
+    public let statuses: [String]?
+    public let maxVersion: Int?
+}
+public struct RuntimeBudgetOverride: Codable, Sendable, Equatable {
+    public let maxTotalTokens: Int?
+    public let maxModelCalls: Int?
+    public let maxToolSteps: Int?
+    public let maxRuntimeMs: Int?
+    public func stored(_ key: String) -> Int? {
+        switch key {
+        case "max_total_tokens": return maxTotalTokens
+        case "max_model_calls": return maxModelCalls
+        case "max_tool_steps": return maxToolSteps
+        case "max_runtime_ms": return maxRuntimeMs
+        default: return nil
+        }
+    }
 }
 public struct AgentTask: Codable, Identifiable, Sendable {
     public let id: String; public let title: String; public let goal: String; public let status: String
@@ -35,6 +57,8 @@ public struct AgentTask: Codable, Identifiable, Sendable {
     public let parentTaskId: String?; public let rootTaskId: String?; public let planId: String?
     public let dependsOnTaskIds: [String]?; public let deliverables: [String]?; public let deliveryStatus: String?
     public let deviceName: String?; public let currentRunId: String?; public let createdAt: String; public let updatedAt: String; public let version: Int
+    public let memoryScope: MemoryScope?
+    public let budget: RuntimeBudgetOverride?
 }
 public struct Run: Codable, Identifiable, Sendable {
     public let id: String; public let taskId: String; public let state: String; public let engine: Engine
@@ -42,15 +66,32 @@ public struct Run: Codable, Identifiable, Sendable {
 }
 public struct Message: Codable, Identifiable, Sendable { public let id: String; public let role: String; public let content: String; public let taskId: String?; public let createdAt: String }
 public struct Question: Codable, Identifiable, Sendable { public let id: String; public let taskId: String; public let runId: String; public let text: String; public let options: [String]; public let status: String; public let version: Int; public let createdAt: String }
-public struct Memory: Codable, Identifiable, Sendable { public let id: String; public let title: String; public let content: String; public let type: String; public let site: String?; public let status: String; public let version: Int; public let updatedAt: String }
+public struct MemoryEvidence: Codable, Sendable, Equatable { public let kind: String?; public let id: String? }
+public struct MemoryGovernance: Codable, Sendable {
+    public let verification: String?; public let validUntil: String?; public let claim: String?
+    public let conflictsWith: [String]?; public let supersedes: String?; public let supersededBy: String?
+    public let version: Int?; public let evidenceRefs: [MemoryEvidence]?
+}
+public struct Memory: Codable, Identifiable, Sendable {
+    public let id: String; public let title: String; public let content: String; public let type: String; public let site: String?
+    public let status: String; public let version: Int; public let updatedAt: String
+    public let createdAt: String?; public let origin: String?; public let source: String?; public let expiresAt: String?; public let sessionId: String?
+    public let accessCount: Int?; public let recallType: String?; public let recallProject: String?; public let recallTags: [String]?
+    public let governance: MemoryGovernance?
+}
 public struct CostTotal: Codable, Sendable { public let currency: String; public let amount: String; public let source: String }
 public struct CostSummary: Codable, Sendable {
     public let totals: [CostTotal]; public let inputTokens: Int; public let outputTokens: Int; public let unknownCount: Int
     public let requestCount: Int; public let coverage: Double; public let asOf: String
+    public let reservedHoldUsd: String?; public let reservedUnknownCount: Int?
 }
 public struct CostPoint: Codable, Sendable { public let date: String; public let currency: String; public let amount: String; public let source: String; public let inputTokens: Int; public let outputTokens: Int }
 public struct CostBreakdown: Codable, Sendable { public let key: String; public let label: String; public let currency: String; public let amount: String; public let requestCount: Int; public let unknownCount: Int }
-public struct Budget: Codable, Sendable { public let monthlyLimitUsd: String?; public let taskLimitUsd: String?; public let usedUsd: String; public let version: Int }
+public struct Budget: Codable, Sendable {
+    public let monthlyLimitUsd: String?; public let taskLimitUsd: String?; public let usedUsd: String; public let version: Int
+    public let unknownCount: Int?; public let categoryLimits: [String: RuntimeBudgetOverride]?
+    public let reservedHoldUsd: String?; public let reservedUnknownCount: Int?
+}
 public struct Frame: Codable, Sendable {
     public let frameId: String; public let imageBase64: String; public let width: Int; public let height: Int
     public let capturedAt: String; public let viewportVersion: String; public let tabId: String?
@@ -59,7 +100,20 @@ public struct ServerEvent: Codable, Sendable { public let eventId: String; publi
 public struct EventBatch: Decodable, Sendable { public let items: [ServerEvent]; public let cursor: String }
 public struct EmptyResponse: Decodable, Sendable { public init() {} }
 public struct ViewSession: Decodable, Sendable { public let id: String; public let state: String?; public let pollUrl: String? }
-public struct MemorySettings: Decodable, Sendable { public let configured: Bool; public let url: String?; public let version: Int? }
+public struct MemorySettings: Decodable, Sendable {
+    public let configured: Bool
+    public let url: String?
+    public let project: String?
+    public let version: Int?
+    private enum CodingKeys: String, CodingKey { case configured, url, project, version }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        configured = try container.decode(Bool.self, forKey: .configured)
+        url = try container.decodeIfPresent(String.self, forKey: .url)
+        project = try container.decodeIfPresent(String.self, forKey: .project)
+        version = try container.decodeIfPresent(Int.self, forKey: .version)
+    }
+}
 public struct Schedule: Codable, Identifiable, Sendable {
     public let id: String; public let title: String; public let goal: String; public let engine: Engine; public let deviceId: String; public let intervalMinutes: Int; public let enabled: Bool; public let nextDueAt: String?; public let version: Int
 }
@@ -92,6 +146,6 @@ public enum JSONValue: Codable, Sendable, Equatable {
 }
 public enum AgentStatus {
     public static func title(_ value: String) -> String {
-        ["blocked":"等待前置任务", "queued":"排队中", "running":"正在执行", "waiting_input":"待你回答", "waiting_device":"等待电脑", "awaiting_approval":"待你确认", "pausing":"正在暂停", "paused":"已暂停", "switching":"正在切换", "awaiting_review":"待验收", "succeeded":"已完成", "failed":"失败", "cancelled":"已取消", "online":"在线", "offline":"离线", "busy":"忙碌", "result_unknown":"结果待核对", "starting":"正在启动", "dispatched":"已派发", "lost":"失联待核对", "stopping":"正在停止", "verified":"已验证", "candidate":"待验证", "stale":"待复核"][value] ?? value
+        ["blocked":"等待前置任务", "queued":"排队中", "running":"正在执行", "waiting_input":"待你回答", "waiting_device":"等待电脑", "awaiting_approval":"待你确认", "pausing":"正在暂停", "paused":"已暂停", "switching":"正在切换", "awaiting_review":"待验收", "succeeded":"已完成", "failed":"失败", "cancelled":"已取消", "online":"在线", "offline":"离线", "busy":"忙碌", "result_unknown":"结果待核对", "starting":"正在启动", "dispatched":"已派发", "lost":"失联待核对", "stopping":"正在停止", "verified":"已验证", "candidate":"待验证", "stale":"待复核", "not_submitted":"尚未交付", "pending":"交付待核对", "accepted":"已验收", "rejected":"已退回", "needs_input":"需要补充说明"][value] ?? value
     }
 }

@@ -34,7 +34,7 @@ Keycloak 26 的 native client 默认 scope 必须包含 `basic`，以生成 acce
 
 数据库 URL 的 CA 路径在开发 Mac 与云服务器上不同。云端证书放 `certs/postgres-ca.pem`，容器内使用 `/app/certs/postgres-ca.pem`；URL 保留 TLS 验证，不能直接复制开发电脑上的绝对路径。
 
-测试部署的环境名为 `super-agent-test`、建议端口 `13011`、issuer 后缀 `/realms/super-agent-test`。生产使用独立目录、Compose project、数据库、bucket、JWT/记忆加密密钥与 `/realms/super-agent-prod`。不要让两环境共享可写业务资源。域名 `super-agent.aimo.plus` 最终指向完成验收的环境，API 上线前不代表它已可用。
+测试部署的环境名为 `super-agent-test`、建议端口 `13011`、issuer 后缀 `/realms/aimo-plus-test`。生产使用独立目录、Compose project、数据库、bucket、JWT/记忆加密密钥与 `/realms/aimo-plus-prod`。不要让两环境共享可写业务资源。域名 `super-agent.aimo.plus` 最终指向完成验收的环境，API 上线前不代表它已可用。
 
 在**云服务器**内，配置秘密环境文件与证书后执行：
 

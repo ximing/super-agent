@@ -27,4 +27,11 @@ final class TaskGraphTests: XCTestCase {
         let rows = TaskGraph.entries(chain)
         XCTAssertEqual(rows.count, 12); XCTAssertTrue(rows.allSatisfy { $0.depth <= 3 }); XCTAssertTrue(rows.last!.relationUncertain)
     }
+    func testPlanItemScopeLineKeepsProjectSitesAndGlobalPreference() {
+        let line = TaskGraph.planItemScopeLine(MemoryScope(project: "alpha", sites: ["example.com"], globalPreference: false, statuses: ["verified"], maxVersion: nil))
+        XCTAssertEqual(line, "记忆范围：项目 alpha · 网站 example.com · 全局偏好 关")
+        let cleared = TaskGraph.planItemScopeLine(MemoryScope(project: "  ", sites: [], globalPreference: false, statuses: nil, maxVersion: nil))
+        XCTAssertEqual(cleared, "记忆范围：项目 未指定 · 网站 无 · 全局偏好 关")
+        XCTAssertNil(TaskGraph.planItemScopeLine(nil))
+    }
 }

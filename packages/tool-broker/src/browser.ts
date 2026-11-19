@@ -52,6 +52,7 @@ export class BrowserActor {
     if (this.owner === runId) { this.owner = null; this.human = false; }
   }
   setHuman(runId: string, enabled: boolean): void { this.acquire(runId); this.human = enabled; }
+  humanActive(): boolean { return this.human; }
   private serial<T>(runId: string, human: boolean, operation: () => Promise<T>): Promise<T> {
     const execute = async () => {
       this.acquire(runId);
@@ -85,12 +86,16 @@ export class BrowserActor {
   async capture(runId: string, options?: { screenshot?: boolean }): Promise<{ url: string; captured_at: string; snapshot: RecordValue; frame: Frame | null; bytes: Buffer | null; source_uncertain: boolean; source_uncertain_reason: string | null }> {
     const uncertainReason = '页面在捕获期间发生跳转，不能确定正文对应的网址';
     return this.serial(runId, false, async () => {
+      const usablePageUrl = (value: string): boolean => {
+        try { const url = new URL(value); return (url.protocol === 'http:' || url.protocol === 'https:') && url.host.length > 0; } catch { return false; }
+      };
       const readUrl = async (): Promise<{ url: string; ok: boolean }> => {
         try {
           const metadata = await this.request(runId, 'evaluate', { code: viewportExpression });
           const viewport = parseViewport(metadata);
           if (viewport) this.viewports.set(runId, viewport);
-          return { url: viewport?.url ?? '', ok: true };
+          const url = viewport?.url ?? '';
+          return usablePageUrl(url) ? { url, ok: true } : { url: '', ok: false };
         } catch { return { url: '', ok: false }; }
       };
       const once = async () => {
@@ -109,11 +114,12 @@ export class BrowserActor {
         }
         const after = await readUrl();
         const stable = before.ok && after.ok && before.url === after.url;
-        return { url: stable ? before.url : '', snapshot, frame, bytes, stable, captured_at: frame?.captured_at ?? new Date().toISOString() };
+        const navigated = before.ok && after.ok && before.url !== after.url;
+        return { url: stable ? before.url : '', snapshot, frame, bytes, stable, navigated, captured_at: frame?.captured_at ?? new Date().toISOString() };
       };
       let sample = await once();
       if (!sample.stable) sample = await once();
-      if (!sample.stable) return { url: '', captured_at: sample.captured_at, snapshot: sample.snapshot, frame: sample.frame, bytes: sample.bytes, source_uncertain: true, source_uncertain_reason: uncertainReason };
+      if (!sample.stable || !usablePageUrl(sample.url)) return { url: '', captured_at: sample.captured_at, snapshot: sample.snapshot, frame: sample.frame, bytes: sample.bytes, source_uncertain: true, source_uncertain_reason: sample.navigated ? uncertainReason : '未能确认当前页面网址' };
       return { url: sample.url, captured_at: sample.captured_at, snapshot: sample.snapshot, frame: sample.frame, bytes: sample.bytes, source_uncertain: false, source_uncertain_reason: null };
     });
   }

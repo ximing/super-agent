@@ -30,7 +30,15 @@ import SuperAgentCore
     @Published var selectedEngine: Engine = .codex
     @Published var selectedDevice = ""
     @Published var selectedModelId = ""
+    @Published var assistantDraft = ""
+    @Published var taskDrafts: [String: String] = [:]
     @Published var notificationStatus: String?
+    private(set) var isDemo = false
+    var demoRuns: [Run] = []
+    var demoTaskMessages: [Message] = []
+    var demoEvidence: [String: TaskEvidence] = [:]
+    var demoArtifacts: [Artifact] = []
+    var demoSteps: [ToolStep] = []
     weak var notifications: NativeNotifications?
     private var cursor = "0"
     private var pollTask: Task<Void, Never>?
@@ -119,7 +127,7 @@ import SuperAgentCore
     func cancelSignIn() { loginTask?.cancel(); oidc.cancel() }
     func handleLoginCallback(_ url: URL) { oidc.handleCallback(url) }
     func signOut() async {
-        pollTask?.cancel(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; lastSync = nil; error = nil; cursor = "0"
+        pollTask?.cancel(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; assistantDraft = ""; taskDrafts = [:]; isDemo = false; demoRuns = []; demoTaskMessages = []; demoEvidence = [:]; demoArtifacts = []; demoSteps = []; lastSync = nil; error = nil; cursor = "0"
     }
     func startPolling() {
         pollTask?.cancel()
@@ -138,6 +146,7 @@ import SuperAgentCore
         }
     }
     func refresh() async {
+        guard !isDemo else { lastSync = Date(); return }
         do {
             let taskList: Items<AgentTask> = try await api.request("/tasks"); tasks = taskList.items
             let deviceList: Items<Device> = try await api.request("/devices"); devices = deviceList.items
@@ -154,22 +163,30 @@ import SuperAgentCore
             lastSync = Date(); error = nil
         } catch { self.error = error.localizedDescription }
     }
-    func sendMessage(_ text: String, taskId: String? = nil) async {
+    func sendMessage(_ text: String, taskId: String? = nil, scope: MemoryScopeDraft = MemoryScopeDraft()) async {
         await operation {
-            var body: [String: JSONValue] = ["client_message_id": .string(UUID().uuidString), "text": .string(text)]
+            var body: [String: JSONValue] = ["client_message_id": .string(UUID().uuidString), "text": .string(text), "memory_scope": try RequestBodies.memoryScope(scope)]
             if let taskId { body["task_id"] = .string(taskId) }
             if !self.selectedDevice.isEmpty { body["execution_preference"] = .object(["engine": .string(self.selectedEngine.rawValue), "device_id": .string(self.selectedDevice), "selection_mode": .string("pinned")]) }
             let _: Message = try await self.api.request("/messages", method: "POST", body: body)
             await self.refresh()
         }
     }
-    func createTask(_ goal: String) async {
+    func createTask(_ goal: String, scope: MemoryScopeDraft = MemoryScopeDraft()) async {
         await operation {
             guard !self.selectedDevice.isEmpty else { throw APIError(status: 0, code: "device_required", message: "先选择执行电脑；可以在电脑页认领已安装的节点") }
             guard self.devices.first(where: { $0.id == self.selectedDevice })?.revoked != true else { throw APIError(status: 0, code: "device_revoked", message: "此电脑已撤销，请手动选择其他电脑") }
-            var body: [String: JSONValue] = ["goal": .string(goal), "engine": .string(self.selectedEngine.rawValue), "device_id": .string(self.selectedDevice)]
+            var body: [String: JSONValue] = ["goal": .string(goal), "engine": .string(self.selectedEngine.rawValue), "device_id": .string(self.selectedDevice), "memory_scope": try RequestBodies.memoryScope(scope)]
             if !self.selectedModelId.isEmpty { body["model_id"] = .string(self.selectedModelId) }
             let _: AgentTask = try await self.api.request("/tasks", method: "POST", body: body)
+            await self.refresh()
+        }
+    }
+    func raiseLimitAndRetry(task: AgentTask, reason: String, raw: String) async {
+        await operation {
+            guard let value = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw APIError(status: 0, code: "invalid_budget", message: "请输入整数上限") }
+            let updated: AgentTask = try await self.api.request("/tasks/\(task.id)/budget", method: "PUT", body: try RequestBodies.taskBudgetMerge(reason: reason, value: value), version: task.version)
+            let _: JSONValue = try await self.api.request("/tasks/\(updated.id)/actions", method: "POST", body: ["action": .string("retry")], version: updated.version)
             await self.refresh()
         }
     }
@@ -194,9 +211,9 @@ import SuperAgentCore
         do { try await api.revokeDevice(id: id); await refresh() }
         catch { self.error = error.localizedDescription }
     }
-    func saveSettings(engine: Engine, device: String, assistant: String) async {
+    func saveSettings(engine: Engine, device: String, assistant: String, memoryGlobalRead: Bool) async {
         await operation {
-            let body: [String: JSONValue] = ["default_engine": .string(engine.rawValue), "default_device_id": device.isEmpty ? .null : .string(device), "assistant_device_id": assistant.isEmpty ? .null : .string(assistant)]
+            let body = RequestBodies.executionSettings(engine: engine.rawValue, device: device, assistant: assistant, memoryGlobalRead: memoryGlobalRead)
             let result: ExecutionSettings = try await self.api.request("/settings/execution", method: "PUT", body: body, version: self.settings?.version)
             self.settings = result; self.selectedEngine = engine; self.selectedDevice = device
         }
@@ -213,15 +230,41 @@ import SuperAgentCore
             return true
         } catch { self.error = error.localizedDescription; return false }
     }
-    func connectMemory(url: String, token: String) async {
+    func connectMemory(url: String, token: String, project: String) async {
         await operation {
             guard let parsed = URL(string: url), parsed.scheme == "https", parsed.host != nil, parsed.user == nil, parsed.password == nil, parsed.query == nil, parsed.fragment == nil else { throw APIError(status: 0, code: "memory_url", message: "记忆服务需要有效的 HTTPS 地址") }
             guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw APIError(status: 0, code: "memory_token", message: "请填写你自己的记忆库访问令牌") }
-            self.memorySettings = try await self.api.request("/settings/memory", method: "PUT", body: ["url": .string(url), "token": .string(token)], version: self.memorySettings?.version)
+            do {
+                self.memorySettings = try await self.api.request("/settings/memory", method: "PUT", body: RequestBodies.memoryBinding(url: url, token: token, project: project), version: self.memorySettings?.version)
+            } catch let failure as APIError where RequestBodies.memorySettingsConflictMessage(status: failure.status, code: failure.code) != nil {
+                await self.refresh()
+                throw APIError(status: failure.status, code: failure.code, message: RequestBodies.memorySettingsConflictMessage(status: failure.status, code: failure.code) ?? failure.message)
+            }
             await self.refresh()
         }
     }
     func deleteMemory(_ memory: Memory) async { await operation { let _: JSONValue = try await self.api.request("/memories/\(memory.id)", method: "DELETE", version: memory.version); await self.refresh() } }
+    func relateMemory(_ memory: Memory, relation: String, otherId: String, validUntil: String) async -> String? {
+        guard !busy else { return "上一项操作还在进行" }
+        busy = true
+        error = nil
+        defer { busy = false }
+        do {
+            let body = try RequestBodies.memoryRelation(relation: relation, otherId: otherId, validUntil: validUntil, governanceVersion: memory.governance?.version ?? 0, operationKey: "relation:\(relation):\(UUID().uuidString)")
+            let _: Memory = try await api.request("/memories/\(memory.id)/relations", method: "POST", body: body, version: memory.version)
+            await refresh()
+            return nil
+        } catch let failure as APIError where RequestBodies.relationConflictMessage(status: failure.status, code: failure.code) != nil {
+            await refresh()
+            let message = RequestBodies.relationConflictMessage(status: failure.status, code: failure.code) ?? failure.message
+            self.error = message
+            return message
+        } catch {
+            let message = error.localizedDescription
+            self.error = message
+            return message
+        }
+    }
     func loadCosts(group: String = "device", from: String? = nil, to: String? = nil) async {
         await operation {
             var query = URLComponents(); query.queryItems = [URLQueryItem(name: "group_by", value: group)]
@@ -236,7 +279,12 @@ import SuperAgentCore
     }
     func saveBudget(monthly: String, task: String) async {
         await operation {
-            self.budget = try await self.api.request("/budgets", method: "PUT", body: ["monthly_limit_usd": monthly.isEmpty ? .null : .string(monthly), "task_limit_usd": task.isEmpty ? .null : .string(task)], version: self.budget?.version)
+            self.budget = try await self.api.request("/budgets", method: "PUT", body: RequestBodies.moneyBudgetMerge(monthly: monthly, task: task), version: self.budget?.version)
+        }
+    }
+    func saveCategoryLimits(_ draft: [String: [String: String]]) async {
+        await operation {
+            self.budget = try await self.api.request("/budgets", method: "PUT", body: try RequestBodies.categoryLimits(fromDraft: draft), version: self.budget?.version)
         }
     }
     func operation(_ action: () async throws -> Void) async {
@@ -244,4 +292,8 @@ import SuperAgentCore
         do { try await action(); error = nil } catch { self.error = error.localizedDescription }
     }
     func enableNotifications() async { await notifications?.enable() }
+    func taskDraftBinding(for id: String) -> Binding<String> {
+        Binding(get: { self.taskDrafts[id] ?? "" }, set: { self.taskDrafts[id] = $0 })
+    }
+    func markAsDemo() { isDemo = true }
 }

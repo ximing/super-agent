@@ -33,12 +33,15 @@ export interface RuntimeContext {
   developerInstructions?: string;
   /** Checked before a controllable model request. Codex cannot intercept its own inner sampling loop. */
   budget?: { beforeModelCall: () => void; beforeToolCall?: () => void; noteUsage?: (usage: UsageSample) => string | null };
+  images?: { artifact_id: string; media_type: string; sha256: string; data_base64: string }[];
 }
 export interface RuntimeResult { text: string; binding?: Record<string, string> }
 export interface RuntimeAdapter {
   execute(context: RuntimeContext): Promise<RuntimeResult>;
   steer(text: string): Promise<void>;
   stop(): Promise<void>;
+  /** False when this process cannot put image bytes into a model request. */
+  supportsVision?: () => boolean;
 }
 export function abortError(): Error { return new DOMException('Execution stopped', 'AbortError'); }
 export function checkAbort(signal: AbortSignal): void { if (signal.aborted) throw abortError(); }
