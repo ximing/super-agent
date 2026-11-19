@@ -81,6 +81,42 @@ export class BrowserActor {
       return { url: viewport?.url ?? '', captured_at: new Date().toISOString() };
     });
   }
+  /** One queued turn: URL, snapshot, optional screenshot, then URL again. A change recaptures once. */
+  async capture(runId: string, options?: { screenshot?: boolean }): Promise<{ url: string; captured_at: string; snapshot: RecordValue; frame: Frame | null; bytes: Buffer | null; source_uncertain: boolean; source_uncertain_reason: string | null }> {
+    const uncertainReason = '页面在捕获期间发生跳转，不能确定正文对应的网址';
+    return this.serial(runId, false, async () => {
+      const readUrl = async (): Promise<{ url: string; ok: boolean }> => {
+        try {
+          const metadata = await this.request(runId, 'evaluate', { code: viewportExpression });
+          const viewport = parseViewport(metadata);
+          if (viewport) this.viewports.set(runId, viewport);
+          return { url: viewport?.url ?? '', ok: true };
+        } catch { return { url: '', ok: false }; }
+      };
+      const once = async () => {
+        const before = await readUrl();
+        const snapshot = await this.request(runId, 'snapshot');
+        let frame: Frame | null = null, bytes: Buffer | null = null;
+        if (options?.screenshot) {
+          const data = await this.request(runId, 'screenshot', { format: 'jpeg', quality: 65 });
+          if (typeof data.path !== 'string') throw new Error('CSI did not return screenshot path');
+          bytes = await readFile(data.path);
+          if (bytes.length > 3 * 1024 * 1024) throw new Error('frame_too_large');
+          const viewport = this.viewports.get(runId) ?? null, dimensions = imageSize(bytes);
+          frame = { frame_id: randomUUID(), image_base64: bytes.toString('base64'), width: dimensions?.width ?? viewport?.width ?? 1280, height: dimensions?.height ?? viewport?.height ?? 800, captured_at: new Date().toISOString(), viewport_version: String(this.generation), tab_id: null };
+          this.recentFrames.set(`${runId}:${frame.frame_id}`, { frame, viewport: dimensions ? viewport : null });
+          for (const [key, entry] of this.recentFrames) if (Date.now() - Date.parse(entry.frame.captured_at) > 15_000 || this.recentFrames.size > 256) this.recentFrames.delete(key);
+        }
+        const after = await readUrl();
+        const stable = before.ok && after.ok && before.url === after.url;
+        return { url: stable ? before.url : '', snapshot, frame, bytes, stable, captured_at: frame?.captured_at ?? new Date().toISOString() };
+      };
+      let sample = await once();
+      if (!sample.stable) sample = await once();
+      if (!sample.stable) return { url: '', captured_at: sample.captured_at, snapshot: sample.snapshot, frame: sample.frame, bytes: sample.bytes, source_uncertain: true, source_uncertain_reason: uncertainReason };
+      return { url: sample.url, captured_at: sample.captured_at, snapshot: sample.snapshot, frame: sample.frame, bytes: sample.bytes, source_uncertain: false, source_uncertain_reason: null };
+    });
+  }
   async call(runId: string, action: string, args: RecordValue = {}): Promise<RecordValue> {
     return this.serial(runId, false, async () => {
       const result = await this.request(runId, action, args);

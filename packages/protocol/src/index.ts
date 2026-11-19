@@ -72,11 +72,29 @@ export interface Memory { id: string; title: string; content: string | null; typ
 export type CostSource = 'supplier_reported' | 'estimated' | 'unavailable';
 export { canTransitionRun, canStartReplacement, moneyToTicks, ticksToMoney, summarizeCosts } from './invariants.js';
 export interface CostTotal { currency: string; amount: string; source: CostSource }
-export interface CostSummary { totals: CostTotal[]; input_tokens: number; output_tokens: number; unknown_count: number; request_count: number; coverage: number; as_of: string }
+export interface CostSummary { totals: CostTotal[]; input_tokens: number; output_tokens: number; unknown_count: number; request_count: number; coverage: number; as_of: string; reserved_hold_usd?: string | null; reserved_unknown_count?: number }
 export interface CostPoint { date: string; currency: string; amount: string; source: CostSource; input_tokens: number; output_tokens: number }
 export interface CostBreakdown { key: string; label: string; currency: string; amount: string; request_count: number; unknown_count: number }
-export interface Budget { monthly_limit_usd: string | null; task_limit_usd: string | null; used_usd: string; version: number; unknown_count?: number }
+export interface Budget { monthly_limit_usd: string | null; task_limit_usd: string | null; used_usd: string; version: number; unknown_count?: number; category_limits?: Partial<Record<BudgetCategory, Partial<RuntimeBudgetLimits>>>; reserved_hold_usd?: string | null; reserved_unknown_count?: number }
 export type BudgetCategory = 'worker' | 'assistant' | 'review' | 'proactive';
+export type ActivityKind = 'run' | 'assistant' | 'review' | 'proactive';
+/** Prefix of the single activity id shared by reserve, heartbeat, usage, release, and settlement. */
+export const ACTIVITY_ID_PREFIXES = ['run', 'assistant', 'review', 'proactive', 'event'] as const;
+export type ActivityIdPrefix = typeof ACTIVITY_ID_PREFIXES[number];
+/**
+ * Canonical activity id. Worker runs use `run:<runId>`. Chat planning uses `assistant:<messageId>`.
+ * Scheduled planning uses `proactive:<messageId>`. Delivery review uses `review:<deliveryId>`.
+ * Event coordination uses `event:<eventId>` and activity_kind `assistant`.
+ * Callers must not link a cost by bare id, run id, or “the first reservation on this run”.
+ */
+export function canonicalActivityId(prefix: ActivityIdPrefix, rawId: string): string {
+  return `${prefix}:${rawId}`;
+}
+/** A heartbeat older than this does not keep an already-expired hold in force. */
+export const BUDGET_HEARTBEAT_MS = 45_000;
+export type BudgetWriteMode = 'merge' | 'replace';
+export const BUDGET_LIMIT_KEYS = ['max_total_tokens', 'max_model_calls', 'max_tool_steps', 'max_runtime_ms'] as const;
+export type BudgetLimitKey = typeof BUDGET_LIMIT_KEYS[number];
 export type BudgetStopReason = 'token_limit' | 'time_limit' | 'model_call_limit' | 'tool_step_limit' | 'budget_exhausted' | 'budget_unknown';
 /** Observable run limits. These are not a provider-enforced dollar ceiling. */
 export interface RuntimeBudgetLimits { max_total_tokens: number; max_model_calls: number; max_tool_steps: number; max_runtime_ms: number }
@@ -86,14 +104,30 @@ export const DEFAULT_BUDGET_LIMITS: Record<BudgetCategory, RuntimeBudgetLimits> 
   review: { max_total_tokens: 40_000, max_model_calls: 6, max_tool_steps: 12, max_runtime_ms: 180_000 },
   proactive: { max_total_tokens: 40_000, max_model_calls: 4, max_tool_steps: 20, max_runtime_ms: 600_000 },
 };
+/** Explicit configuration may raise a category above its default, but not without a bound. */
+export const BUDGET_LIMIT_CEILING: RuntimeBudgetLimits = { max_total_tokens: 5_000_000, max_model_calls: 2_000, max_tool_steps: 5_000, max_runtime_ms: 8 * 60 * 60 * 1000 };
 export const BUDGET_IN_FLIGHT_BOUNDARY = '停止只阻断下一次受管模型调用和工具步骤。已经发出的 Grok 请求，以及 Codex 当前内部回合，仍可能完成并记入用量。未知金额不按 0 美元计算，也不构成供应商账户硬额度。';
+export const BUDGET_RECOVERY: Record<BudgetStopReason, string> = {
+  token_limit: '这个任务的 Token 已用到当前上限。提高对应活动的 Token 上限后可以继续。',
+  model_call_limit: '这个任务的模型调用次数已用到当前上限。提高上限后可以继续。',
+  tool_step_limit: '这个任务的工具步骤已用到当前上限。提高上限后可以继续。',
+  time_limit: '这一次活动的运行时间已到上限。提高单次时长后可以再开始一次。',
+  budget_exhausted: '金额预算已用完。提高本月或本任务金额上限后，才能开始新的模型调用。',
+  budget_unknown: '还有费用没核算清楚，不能按 0 计算。确认费用或调整金额上限前，不会开始新的模型调用。',
+};
+export interface BudgetGrant {
+  grant_id: string; category: BudgetCategory; limits: RuntimeBudgetLimits; ceiling?: RuntimeBudgetLimits;
+  money_treatment: 'known' | 'unknown_not_zero' | 'unconfigured'; in_flight_boundary: string; dollar_cap: 'not_enforced';
+  status?: string; expires_at?: string; activity_kind?: ActivityKind; activity_id?: string; task_id?: string | null; run_id?: string | null;
+  stop_reason?: BudgetStopReason | null; recovery?: string;
+}
 export interface Frame { frame_id: string; image_base64: string; width: number; height: number; captured_at: string; viewport_version: string; tab_id: string | null }
 export interface ApiError { error: { code: string; message: string; retryable: boolean; request_id?: string } }
 export interface ServerEvent { event_id: string; stream_seq: string; type: string; occurred_at: string; task_id?: string | null; run_id?: string | null; entity_version?: number; payload: Record<string, unknown> }
 export interface RuntimeSelection { engine: Engine; model_id: string; local_profile_id: string }
 export interface RunStartPayload { command_id: string; tenant_id: string; task_id: string; run_id: string; device_id: string; lease_epoch: string; scope_version_id: string; capability_generation: number; runtime: RuntimeSelection; expires_at: string; lease_valid_for_ms: number; checkpoint_id: string | null; budget_grant_id: string }
 export interface WireMessage<T = Record<string, unknown>> { protocol_version: '1.0'; message_id: string; kind: string; sent_at: string; payload: T }
-export interface RunContext { run: Run; task: Task; scope: Record<string, unknown>; checkpoint: Record<string, unknown> | null; run_ticket: string; lease_valid_for_ms: number; budget?: { grant_id: string; category: BudgetCategory; limits: RuntimeBudgetLimits; money_treatment: 'known' | 'unknown_not_zero' | 'unconfigured'; in_flight_boundary: string } | null }
+export interface RunContext { run: Run; task: Task; scope: Record<string, unknown>; checkpoint: Record<string, unknown> | null; run_ticket: string; lease_valid_for_ms: number; budget?: BudgetGrant | null }
 export interface PairingStart { pairing_id: string; code: string; polling_secret: string; expires_at: string }
 export interface PairingResult { status: 'pending' | 'claimed'; device_id?: string; tenant_id?: string }
 export const TERMINAL_RUN_STATES = new Set<RunState>(['succeeded', 'failed', 'cancelled', 'paused']);

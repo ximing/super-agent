@@ -9,16 +9,16 @@ export interface AgentTask {parent_task_id?:string|null;root_task_id?:string|nul
 export interface Run { id: string; task_id: string; state: string; engine: Engine; device_id: string; model_id: string; lease_epoch: string; summary: string; result_text?: string | null; created_at: string }
 export interface Message { id: string; role: string; content: string; task_id: string | null; created_at: string }
 export interface Question { id: string; task_id: string; run_id: string; text: string; options: string[]; status: string; version: number; created_at: string }
-export interface Memory { id: string; title: string; content: string; type: string; site: string | null; status: string; version: number; updated_at: string }
+export interface Memory { id: string; title: string; content: string; type: string; site: string | null; status: string; version: number; updated_at: string; governance?: { verification?: string; valid_until?: string | null; conflicts_with?: string[]; supersedes?: string | null; superseded_by?: string | null; version?: number; claim?: string } }
 export interface MemorySettings { configured: boolean; url?: string; version?: number }
 export interface Schedule { id:string; title:string; goal:string; engine:Engine; device_id:string; interval_minutes:number; enabled:boolean; next_due_at:string|null; version:number }
 export interface Artifact { id:string; name:string; mime:string; size:number; task_id:string|null; run_id:string|null; status:string; created_at:string }
 export interface UploadDescriptor {artifact_id:string;upload_url:string;upload_headers:Record<string,string>;expires_at:string;max_size:number}
 export interface DownloadDescriptor {url:string;expires_at:string;name:string;mime:string}
-export interface CostSummary { totals: {currency: string; amount: string; source: string}[]; input_tokens: number; output_tokens: number; unknown_count: number; request_count: number; coverage: number; as_of: string }
+export interface CostSummary { totals: {currency: string; amount: string; source: string}[]; input_tokens: number; output_tokens: number; unknown_count: number; request_count: number; coverage: number; as_of: string; reserved_hold_usd?: string | null; reserved_unknown_count?: number }
 export interface CostPoint { date: string; currency: string; amount: string; source: string; input_tokens: number; output_tokens: number }
 export interface CostBreakdown { key: string; label: string; currency: string; amount: string; request_count: number; unknown_count: number }
-export interface Budget { monthly_limit_usd: string | null; task_limit_usd: string | null; used_usd: string; version: number }
+export interface Budget { monthly_limit_usd: string | null; task_limit_usd: string | null; used_usd: string; version: number; unknown_count?: number; category_limits?: Record<string, {max_total_tokens?: number; max_model_calls?: number; max_tool_steps?: number; max_runtime_ms?: number}>; reserved_hold_usd?: string | null; reserved_unknown_count?: number; explanation?: string }
 export interface Frame { frame_id: string; image_base64: string; width: number; height: number; captured_at: string; viewport_version: string; tab_id: string | null }
 export interface List<T> { items: T[]; next_cursor?: string | null }
 export interface EventBatch { items: {event_id: string; stream_seq: string; type: string}[]; cursor: string }

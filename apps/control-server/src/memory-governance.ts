@@ -110,33 +110,68 @@ export async function proposeRetrospective(tx: Tx, run: Doc, task: Doc, outcome:
   return saved;
 }
 
+export function mergeConflictIds(existing: unknown, otherId: string): string[] {
+  const ids: string[] = [];
+  if (Array.isArray(existing)) for (const id of existing) if (typeof id === 'string' && !ids.includes(id)) ids.push(id);
+  if (!ids.includes(otherId)) ids.push(otherId);
+  return ids;
+}
+
+function nextGovernanceVersion(governance: Doc | undefined): number {
+  const current = governance?.version;
+  return typeof current === 'number' && Number.isSafeInteger(current) && current >= 1 ? current + 1 : 1;
+}
+
+function requestsVerified(body: Doc): boolean {
+  if (body.verification === 'verified') return true;
+  const governance = body.governance;
+  return !!governance && typeof governance === 'object' && !Array.isArray(governance) && governance.verification === 'verified';
+}
+
+async function lockMemories(tx: Tx, ids: string[]): Promise<Map<string, Doc>> {
+  const rows = new Map<string, Doc>();
+  for (const rowId of [...new Set(ids)].sort()) {
+    const row = await tx.get('memories', rowId, true);
+    if (!row) throw new ApiError(404, 'not_found', '资源不存在');
+    rows.set(rowId, row);
+  }
+  return rows;
+}
+
 /** Relations stay on the product overlay. Recall content is not edited, deleted, or published. */
 export async function relateMemory(tx: Tx, id: string, body: Doc): Promise<Doc> {
-  const memoryId = uuid(id), relation = body.relation;
-  if (!['conflicts', 'supersedes', 'expires'].includes(relation)) throw new ApiError(422, 'invalid_memory_relation', '记忆关系无效');
+  const memoryId = uuid(id);
+  const relation = body.relation;
+  if (relation !== 'conflicts' && relation !== 'supersedes' && relation !== 'expires') throw new ApiError(422, 'invalid_memory_relation', '记忆关系无效');
   const operation = text(body.operation_key, 'operation_key', 200);
-  const current = await tx.get('memories', memoryId) ?? { id: memoryId, status: 'verified', governance: {} };
+  const otherId = relation === 'expires' ? null : uuid(body.other_id, 'other_id');
+  if (otherId !== null && otherId === memoryId) throw new ApiError(422, 'invalid_memory_relation', '记忆关系不能指向自己');
+  const locked = await lockMemories(tx, otherId !== null && relation === 'supersedes' ? [memoryId, otherId] : [memoryId]);
+  const current = locked.get(memoryId);
+  if (!current) throw new ApiError(404, 'not_found', '资源不存在');
   const operations: string[] = Array.isArray(current.governance?.operations) ? [...current.governance.operations] : [];
   if (operations.includes(operation)) return current;
-  const governance: Doc = { ...(current.governance ?? {}), operations: [...operations, operation] };
-  if (relation === 'conflicts' || relation === 'supersedes') {
-    const other = uuid(body.other_id, 'other_id');
-    if (other === memoryId) throw new ApiError(422, 'invalid_memory_relation', '记忆关系不能指向自己');
-    if (relation === 'conflicts') {
-      governance.verification = 'conflict';
-      governance.conflicts_with = [...new Set([...(governance.conflicts_with ?? []), other])];
-    } else {
-      governance.supersedes = other;
-      const previous = await tx.get('memories', other) ?? { id: other, status: 'verified', governance: {} };
-      const previousOps: string[] = Array.isArray(previous.governance?.operations) ? previous.governance.operations : [];
-      if (!previousOps.includes(operation)) await tx.put('memories', { ...previous, content: previous.content, governance: { ...(previous.governance ?? {}), operations: [...previousOps, operation], verification: 'superseded', superseded_by: memoryId } }, other);
-    }
+  if (body.governance_version !== undefined && Number(body.governance_version) !== Number(current.governance?.version ?? 0)) throw new ApiError(409, 'version_conflict', '记忆关系已变化，请刷新后重试');
+  if (requestsVerified(body) && current.governance?.verification !== 'verified') throw new ApiError(422, 'invalid_memory_relation', '关系不能把记忆标为已验证');
+  const governance: Doc = { ...(current.governance ?? {}), operations: [...operations, operation], version: nextGovernanceVersion(current.governance) };
+  let pendingOther: { id: string; doc: Doc } | null = null;
+  if (relation === 'conflicts') {
+    if (otherId === null) throw new ApiError(422, 'invalid_memory_relation', '记忆关系无效');
+    governance.verification = 'conflict';
+    governance.conflicts_with = mergeConflictIds(current.governance?.conflicts_with, otherId);
+  } else if (relation === 'supersedes') {
+    if (otherId === null) throw new ApiError(422, 'invalid_memory_relation', '记忆关系无效');
+    governance.supersedes = otherId;
+    const previous = locked.get(otherId);
+    if (!previous) throw new ApiError(404, 'not_found', '资源不存在');
+    pendingOther = { id: otherId, doc: { ...previous, governance: { ...(previous.governance ?? {}), verification: 'superseded', superseded_by: memoryId, version: nextGovernanceVersion(previous.governance) } } };
   } else {
     const until = typeof body.valid_until === 'string' ? body.valid_until : new Date().toISOString();
     if (!/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/.test(until) || !Number.isFinite(Date.parse(until))) throw new ApiError(422, 'invalid_memory_relation', '有效期需要带时区的 ISO 时间');
     governance.valid_until = new Date(Date.parse(until)).toISOString();
     governance.verification = Date.parse(until) <= Date.now() ? 'expired' : governance.verification === 'expired' ? 'candidate' : governance.verification ?? 'candidate';
   }
-  if (governance.verification === 'verified') throw new ApiError(422, 'invalid_memory_relation', '关系不能把记忆标为已验证');
+  if (governance.verification === 'verified' && current.governance?.verification !== 'verified') throw new ApiError(422, 'invalid_memory_relation', '关系不能把记忆标为已验证');
+  if (pendingOther) await tx.put('memories', pendingOther.doc, pendingOther.id);
   return tx.put('memories', { ...current, status: current.status === 'candidate' ? 'candidate' : current.status ?? 'verified', governance }, memoryId);
 }

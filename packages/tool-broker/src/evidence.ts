@@ -68,13 +68,18 @@ function redactStructured(value: unknown): { value: unknown; redacted: boolean }
 }
 
 function digest(value: string | Buffer): string { return createHash('sha256').update(value).digest('hex'); }
+const SOURCE_UNCERTAIN_REASON = '页面在捕获期间发生跳转，不能确定正文对应的网址';
+function sourceBinding(url: unknown, uncertain: boolean, reason?: string): { source_url: string | null; source_uncertain: boolean; source_uncertain_reason?: string; fresh: boolean; stale: boolean } {
+  if (!uncertain) return { source_url: safeEvidenceUrl(url), source_uncertain: false, fresh: true, stale: false };
+  return { source_url: null, source_uncertain: true, source_uncertain_reason: reason || SOURCE_UNCERTAIN_REASON, fresh: false, stale: true };
+}
 function projectOfHit(item: Record<string, unknown>): unknown {
   const governance = item.governance && typeof item.governance === 'object' ? item.governance as Record<string, unknown> : null;
   const applicability = governance?.applicability && typeof governance.applicability === 'object' ? governance.applicability as Record<string, unknown> : null;
   return applicability?.project ?? item.recall_project ?? item.project ?? null;
 }
 
-export function pageEvidence(input: { url: unknown; capturedAt: string; runId: string; stepId: string; body: unknown; maxBytes?: number }): Record<string, unknown> {
+export function pageEvidence(input: { url: unknown; capturedAt: string; runId: string; stepId: string; body: unknown; maxBytes?: number; sourceUncertain?: boolean; sourceUncertainReason?: string }): Record<string, unknown> {
   const structured = redactStructured(input.body);
   const raw = typeof structured.value === 'string' ? structured.value : JSON.stringify(structured.value ?? '');
   const cleaned = redactEvidenceText(raw);
@@ -82,24 +87,38 @@ export function pageEvidence(input: { url: unknown; capturedAt: string; runId: s
   const original = Buffer.byteLength(cleaned.text);
   const truncated = original > max;
   const body = truncated ? Buffer.from(cleaned.text).subarray(0, max).toString('utf8') : cleaned.text;
+  const binding = sourceBinding(input.url, input.sourceUncertain === true, input.sourceUncertainReason);
   return {
-    evidence_kind: 'page_capture', provenance: 'tool_broker', captured_at: input.capturedAt, source_url: safeEvidenceUrl(input.url),
+    evidence_kind: 'page_capture', provenance: 'tool_broker', captured_at: input.capturedAt, source_url: binding.source_url,
     run_id: input.runId, step_id: input.stepId, body, truncated, original_bytes: original, stored_bytes: Buffer.byteLength(body),
-    sha256: digest(body), redacted: structured.redacted || cleaned.redacted || truncated, fresh: true, stale: false, viewer_required: false,
+    sha256: digest(body), redacted: structured.redacted || cleaned.redacted || truncated, fresh: binding.fresh, stale: binding.stale,
+    source_uncertain: binding.source_uncertain, ...(binding.source_uncertain_reason ? { source_uncertain_reason: binding.source_uncertain_reason } : {}), viewer_required: false,
   };
 }
 
-export function screenshotEvidence(input: { url: unknown; capturedAt: string; runId: string; stepId: string; bytes: Buffer; width: number; height: number; imageArtifactId?: string | null }): Record<string, unknown> {
+export function screenshotEvidence(input: { url: unknown; capturedAt: string; runId: string; stepId: string; bytes: Buffer; width: number; height: number; imageArtifactId?: string | null; sourceUncertain?: boolean; sourceUncertainReason?: string }): Record<string, unknown> {
+  const binding = sourceBinding(input.url, input.sourceUncertain === true, input.sourceUncertainReason);
   return {
-    evidence_kind: 'screenshot', provenance: 'tool_broker', captured_at: input.capturedAt, source_url: safeEvidenceUrl(input.url),
+    evidence_kind: 'screenshot', provenance: 'tool_broker', captured_at: input.capturedAt, source_url: binding.source_url,
     run_id: input.runId, step_id: input.stepId, sha256: digest(input.bytes), bytes: input.bytes.length, width: input.width, height: input.height,
     image_artifact_id: input.imageArtifactId ?? null, viewer_required: false,
+    fresh: binding.fresh, stale: binding.stale, source_uncertain: binding.source_uncertain, ...(binding.source_uncertain_reason ? { source_uncertain_reason: binding.source_uncertain_reason } : {}),
     note: '截图在工具执行时保存，不依赖有人正在查看画面。画面像素需要人工打开图片产物；此清单只证明捕获时间、来源和完整性。',
   };
 }
 
-export function memoryRetrievalEvidence(input: { generatedAt: string; runId: string; stepId: string; query: string; scope: unknown; hits: unknown[] }): Record<string, unknown> {
-  const hits = input.hits.slice(0, 20).map(hit => {
+type MemoryEnvelope = { hits?: unknown[]; items?: unknown[]; fresh?: boolean; stale?: boolean; stale_reason?: string; observed_at?: string; retrieved_at?: string; cache_read_at?: string; generated_at?: string };
+function envelopeStale(source: { stale?: unknown; fresh?: unknown } | null): boolean {
+  return !!source && (source.stale === true || source.fresh === false);
+}
+function textOrNull(value: unknown): string | null { return typeof value === 'string' && value ? value : null; }
+
+export function memoryRetrievalEvidence(input: { generatedAt: string; runId: string; stepId: string; query: string; scope: unknown; hits: unknown[] | MemoryEnvelope; fresh?: boolean; stale?: boolean; stale_reason?: string; observed_at?: string; retrieved_at?: string; generated_at?: string }): Record<string, unknown> {
+  let envelope: MemoryEnvelope | null = null;
+  let rawHits: unknown[] = [];
+  if (Array.isArray(input.hits)) rawHits = input.hits;
+  else { envelope = input.hits; rawHits = Array.isArray(envelope.items) ? envelope.items : Array.isArray(envelope.hits) ? envelope.hits : []; }
+  const hits = rawHits.slice(0, 20).map(hit => {
     const item = hit && typeof hit === 'object' ? hit as Record<string, unknown> : {};
     const stale = item.stale === true || item.fresh === false;
     return {
@@ -108,10 +127,14 @@ export function memoryRetrievalEvidence(input: { generatedAt: string; runId: str
       fresh: !stale, stale, stale_reason: stale ? item.stale_reason ?? 'stale' : null, observed_at: typeof item.observed_at === 'string' ? item.observed_at : null,
     };
   });
-  const stale = hits.some(hit => hit.stale === true);
+  const stale = envelopeStale(envelope) || envelopeStale(input) || hits.some(hit => hit.stale === true);
+  const observedAt = textOrNull(envelope?.observed_at) ?? textOrNull(input.observed_at);
+  const retrievedAt = textOrNull(envelope?.retrieved_at) ?? textOrNull(envelope?.cache_read_at) ?? textOrNull(input.retrieved_at);
+  const generatedAt = textOrNull(envelope?.generated_at) ?? textOrNull(input.generated_at) ?? (input.generatedAt || new Date().toISOString());
+  const staleReason = !stale ? null : textOrNull(envelope?.stale_reason) ?? textOrNull(input.stale_reason) ?? hits.find(hit => hit.stale)?.stale_reason ?? 'stale';
   return {
-    evidence_kind: 'memory_retrieval', provenance: 'tool_broker', generated_at: input.generatedAt, captured_at: input.generatedAt,
+    evidence_kind: 'memory_retrieval', provenance: 'tool_broker', generated_at: generatedAt, captured_at: generatedAt, observed_at: observedAt, retrieved_at: retrievedAt,
     run_id: input.runId, step_id: input.stepId, query: input.query.slice(0, 500), scope: input.scope ?? null, hits,
-    fresh: !stale, stale, acceptable_as_current: !stale, viewer_required: false,
+    fresh: !stale, stale, stale_reason: staleReason, acceptable_as_current: !stale, viewer_required: false,
   };
 }

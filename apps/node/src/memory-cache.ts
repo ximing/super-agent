@@ -20,7 +20,7 @@ export class MemoryCache {
     if (!fallback) return { hit: false };
     const expired = now - Date.parse(fallback.observed_at) > this.limits.ttlMs;
     const stale = this.offline || expired || fallback.generation !== this.generation;
-    return { hit: true, stale, observed_at: fallback.observed_at, value: stale ? this.staleValue(fallback.value, fallback.observed_at, this.offline ? 'offline' : expired ? 'expired_cache' : 'invalidated') : fallback.value };
+    return { hit: true, stale, observed_at: fallback.observed_at, value: stale ? this.staleValue(fallback.value, fallback.observed_at, this.offline ? 'offline' : expired ? 'expired_cache' : 'invalidated', new Date(now).toISOString()) : fallback.value };
   }
   store(kind: 'search' | 'read', fingerprint: string, value: unknown, now = new Date().toISOString()): void {
     const key = this.storageKey(kind, fingerprint);
@@ -36,11 +36,11 @@ export class MemoryCache {
       this.entries.delete(oldest);
     }
   }
-  private staleValue(value: unknown, observedAt: string, reason: string): Record<string, unknown> {
+  private staleValue(value: unknown, observedAt: string, reason: string, cacheReadAt: string): Record<string, unknown> {
     const record: Record<string, unknown> = value && typeof value === 'object' ? { ...(value as Record<string, unknown>) } : { value };
-    record.fresh = false; record.stale = true; record.stale_reason = reason; record.observed_at = observedAt;
+    record.fresh = false; record.stale = true; record.stale_reason = reason; record.observed_at = observedAt; record.cache_read_at = cacheReadAt;
     record.cache_notice = '缓存已过期或节点离线，不能当作当前事实';
-    if (Array.isArray(record.items)) record.items = record.items.map(item => item && typeof item === 'object' ? { ...(item as Record<string, unknown>), fresh: false, stale: true, stale_reason: reason, content: null } : item);
+    if (Array.isArray(record.items)) record.items = record.items.map(item => item && typeof item === 'object' ? { ...(item as Record<string, unknown>), fresh: false, stale: true, stale_reason: reason, observed_at: observedAt, content: null } : item);
     if ('content' in record) record.content = null;
     return record;
   }

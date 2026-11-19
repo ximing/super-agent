@@ -49,22 +49,24 @@ export class AgentRecallAdapter {
     const saved=await tx.put('memory_bindings',{...candidate,actor_id:actor.id,actor_email:typeof actor.email==='string'?actor.email:null,project:typeof input.project==='string'?input.project.slice(0,128):null},tx.tenant);
     return this.public(saved);
   }
-  async convert(tx:Tx,raw:Doc):Promise<Doc>{
-    uuid(raw.id);const meta=await tx.get('memories',raw.id),tags=Array.isArray(raw.tags)?raw.tags:[];
+  present(raw:Doc,meta?:Doc|null):Doc{
+    uuid(raw.id);const tags=Array.isArray(raw.tags)?raw.tags:[];
     const tagged=tags.find((t:unknown)=>typeof t==='string'&&t.startsWith('sa-type:'))?.slice(8);
     const content=typeof raw.content==='string'?raw.content:'';
     const governed=meta?.governance?.verification;
     const status=governed==='expired'?'expired':governed==='superseded'?'superseded':meta?.status??'verified';
-    return{id:raw.id,title:meta?.title??content.split('\n').find((line:string)=>line.trim())?.replace(/^#+\s*/,'').slice(0,160)??'未命名记忆',content,type:tagged&&typeMap[tagged]?tagged:reverse[raw.type]??'experience',site:meta?.site??null,status,version:Number(raw.version)||1,created_at:raw.createdAt??raw.created_at,updated_at:raw.updatedAt??raw.updated_at??new Date().toISOString(),source:'agent-recall',recall_type:raw.type,recall_project:raw.project??null,recall_chain_id:raw.chainId??raw.id,recall_tags:tags,scope_kind:meta?.scope_kind??null,governance:meta?.governance??null};
+    return{id:raw.id,title:meta?.title??content.split('\n').find((line:string)=>line.trim())?.replace(/^#+\s*/,'').slice(0,160)??'未命名记忆',content,type:tagged&&typeMap[tagged]?tagged:reverse[raw.type]??'experience',site:meta?.site??null,status,version:Number(raw.version)||1,created_at:raw.createdAt??raw.created_at,updated_at:raw.updatedAt??raw.updated_at??new Date().toISOString(),origin:typeof raw.origin==='string'?raw.origin:null,expires_at:typeof (raw.expiresAt??raw.expires_at)==='string'?raw.expiresAt??raw.expires_at:null,session_id:typeof raw.sessionId==='string'?raw.sessionId:null,access_count:Number.isSafeInteger(raw.accessCount)?raw.accessCount:null,source:'agent-recall',recall_type:raw.type??null,recall_project:raw.project??null,recall_chain_id:raw.chainId??raw.id,recall_tags:tags,scope_kind:meta?.scope_kind??null,governance:meta?.governance??null};
   }
+  async convert(tx:Tx,raw:Doc):Promise<Doc>{return this.present(raw,await tx.get('memories',uuid(raw.id)));}
   async list(tx:Tx,query:Doc={}):Promise<Doc[]>{
     const binding=await this.binding(tx),params=new URLSearchParams({limit:String(Math.max(1,Math.min(500,Number(query.limit)||200)))});
     if(binding.project)params.set('project',binding.project);
     if(query.type&&typeMap[query.type])params.set('type',typeMap[query.type]!);
     const data=await this.call(binding,tx.tenant,`/api/memories?${params}`);
     const memories=Array.isArray(data.memories)?data.memories:[];
-    const external=await Promise.all(memories.map((m:Doc)=>this.convert(tx,m)));
-    const candidates=(await tx.all('memories')).filter(m=>m.status==='candidate'&&m.content);
+    const overlays=await tx.all('memories'),byId=new Map(overlays.map(item=>[item.id,item]));
+    const external=memories.map((m:Doc)=>this.present(m,byId.get(String(m.id))));
+    const candidates=overlays.filter(m=>m.status==='candidate'&&m.content);
     return [...external,...candidates];
   }
   private scoped(memory:Doc,access:MemoryAccess|undefined,site:unknown):Doc{

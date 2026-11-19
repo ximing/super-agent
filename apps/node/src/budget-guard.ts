@@ -14,7 +14,7 @@ export function limitsFor(category: BudgetCategory, override?: Partial<RuntimeBu
   return { max_total_tokens: cap('max_total_tokens'), max_model_calls: cap('max_model_calls'), max_tool_steps: cap('max_tool_steps'), max_runtime_ms: cap('max_runtime_ms') };
 }
 
-/** Stops the next controllable model call or tool. An already issued request can still finish. */
+/** Limits are this activity's remaining allowance (historical task spend already subtracted). Stopping applies before the next controllable call. An in-flight provider request is not a provider-account hard cap. */
 export class BudgetGuard {
   calls = 0; tools = 0; inputTokens = 0; outputTokens = 0; exceeded: BudgetStopReason | null = null;
   private readonly seen = new Map<string, { input: number; output: number }>();

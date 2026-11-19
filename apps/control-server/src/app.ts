@@ -7,7 +7,7 @@ import { Auth, type Config, type Principal, text, uuid, expires, now } from './a
 import { Store, Tx, ApiError, isDatabaseUnavailable, type Doc } from './store.js';
 import { Service, ACTIVE, engine, matchVersion, safeMoney, redactView } from './service.js';
 import { plannerAccess, relateMemory, workerAccess } from './memory-governance.js';
-import { evaluateLimits, usageTotals } from './budget-control.js';
+import { sanitizeCategoryLimits, sanitizeLimits } from './budget-policy.js';
 import { DEFAULT_BUDGET_LIMITS } from '@super-agent/protocol';
 import { signObject } from './objects.js';
 import { AgentRecallAdapter } from './recall.js';
@@ -180,13 +180,12 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('POST','/node/runs/:id/accept','device',(r,p,tx)=>service.accept(p,tx,uuid(params(r).id),body(r)));
   route('POST','/node/runs/:id/renew','device',async(r,p,tx)=>{
     const id=uuid(params(r).id),run=await tx.need('runs',id,true);if(run.device_id!==p.device||String(body(r).lease_epoch)!==String(run.lease_epoch)||!ACTIVE.includes(run.state)||Date.parse(run.lease_expires_at)<Date.now())throw new ApiError(409,'run_lease_invalid','执行租约已失效');
-    const budget=await service.budget(tx);let control=run.control??null;
-    if(budget.monthly_limit_usd!==null&&budget.unknown_count===0&&new Decimal(budget.used_usd).gte(budget.monthly_limit_usd))control={action:'pause',reason:'budget_exhausted'};
-    const grant=(await tx.all('budget_reservations')).find(reservation=>reservation.run_id===id&&reservation.status==='reserved'&&reservation.limits);
-    if(!control&&grant){const decision=evaluateLimits(grant.limits,usageTotals((await tx.all('usage_records')).filter(record=>record.run_id===id),(await tx.all('steps')).filter(step=>step.run_id===id),run.created_at));if(decision.stop)control={action:'pause',reason:decision.reason};}
+    let control=run.control??null;
+    const decision=await service.assessRunBudget(tx,run);
+    if(!control&&decision)control={action:'pause',reason:decision.reason,recovery:decision.recovery};
     if(!control&&run.pending_inputs?.length)control={action:'input',text:run.pending_inputs[0]};
     const updated=await tx.put('runs',{...run,lease_expires_at:expires(45000),control:['answer','input','browser_input'].includes(control?.action)?null:control,pending_inputs:control?.action==='input'?(run.pending_inputs??[]).slice(1):run.pending_inputs});
-    for(const reserve of (await tx.all('budget_reservations')).filter(x=>x.run_id===id&&x.status==='reserved'))await tx.put('budget_reservations',{...reserve,expires_at:expires(60000)});
+    await service.heartbeatRun(tx,id);
     const capture=(await tx.all('views')).some(v=>v.run_id===id&&Date.parse(v.expires_at)>Date.now()&&v.state!=='closed');
     return{run_ticket:await auth.runTicket(p,updated),lease_valid_for_ms:45000,...(control?{control}:{}),capture};
   });
@@ -269,7 +268,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('GET','/assistant/context','device',async(r,p,tx)=>{await assistant(r,p,tx);return{messages:(await tx.all('messages')).slice(-20),tasks:(await tx.all('tasks')).filter(t=>!['succeeded','failed','cancelled'].includes(t.status)),pending_plans:(await tx.all('plans')).filter(plan=>plan.state==='awaiting_confirmation'),pending_events:(await tx.all('coordinator_events')).filter(e=>e.status==='pending').map(publicCoordinatorEvent)};});
   route('GET','/assistant/events','device',async(r,p,tx)=>{await assistant(r,p,tx);return items((await tx.all('coordinator_events')).filter(e=>e.status===(query(r).status??'pending')).map(publicCoordinatorEvent));});
   route('GET','/assistant/events/:id/context','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.team.eventContext(tx,params(r).id);});
-  route('POST','/assistant/events/:id/complete','device',async(r,p,tx)=>{await assistant(r,p,tx);return idempotent(r,p,tx,async()=>{await graphLock(tx);return service.team.completeEvent(tx,params(r).id,body(r));});});
+  route('POST','/assistant/events/:id/complete','device',async(r,p,tx)=>{await assistant(r,p,tx);return idempotent(r,p,tx,async()=>{await graphLock(tx);const event=await tx.need('coordinator_events',uuid(params(r).id));const result=await service.team.completeEvent(tx,event.id,body(r));await service.releaseActivity(tx,`event:${event.id}`);if(event.delivery_id)await service.releaseActivity(tx,`review:${event.delivery_id}`);return result;});});
   route('GET','/assistant/tasks/:id/evidence','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.team.evidence(tx,params(r).id);});
   route('POST','/assistant/tasks/:id/reviews','device',async(r,p,tx)=>{await assistant(r,p,tx);return idempotent(r,p,tx,async()=>{await graphLock(tx);const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task);return service.team.review(tx,p,task.id,body(r));});});
   route('GET','/assistant/tasks/:id/artifacts/:artifact_id/download','device',async(r,p,tx)=>{
@@ -280,15 +279,16 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('POST','/assistant/events/:id/usage','device',async(r,p,tx)=>{
     await assistant(r,p,tx);await graphLock(tx);const event=await tx.need('coordinator_events',uuid(params(r).id)),b=body(r),device=await tx.need('devices',p.device!),selectedEngine=engine(b.engine);
     if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');
-    await service.usage(tx,{id:event.run_id,task_id:event.task_id,device_id:p.device,engine:selectedEngine,model_id:b.model_id,event_id:event.id},{...b,category:b.category==='assistant'?'assistant':'review'});return{status:'recorded'};
+    const category=['assistant','review','proactive'].includes(b.category)?b.category:event.type==='delivery.submitted'?'review':'assistant';
+    await service.usage(tx,{id:event.run_id,task_id:event.task_id,device_id:p.device,engine:selectedEngine,model_id:b.model_id,event_id:event.id},{...b,category});return{status:'recorded'};
   });
   route('POST','/assistant/messages','device',async(r,p,tx)=>{
     await assistant(r,p,tx);await graphLock(tx);const b=body(r),source=await tx.need('messages',uuid(b.source_message_id));
     const prior=(await tx.all('messages')).find(m=>m.source_message_id===source.id&&m.role==='assistant');if(prior)return prior;
     if(b.task_id)await tx.need('tasks',uuid(b.task_id));const message=await tx.put('messages',{role:'assistant',content:text(b.content,'content',100000),task_id:b.task_id??null,source_message_id:source.id});
-    await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await tx.emit('assistant.replied',message,b.task_id??null);return message;
+    await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await service.releaseActivity(tx,`assistant:${source.id}`);await tx.emit('assistant.replied',message,b.task_id??null);return message;
   });
-  route('POST','/assistant/usage','device',async(r,p,tx)=>{await assistant(r,p,tx);await graphLock(tx);const b=body(r),message=await tx.need('messages',uuid(b.message_id));const device=await tx.need('devices',p.device!);const selectedEngine=engine(b.engine);if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');await service.usage(tx,{id:message.id,task_id:null,device_id:p.device,engine:selectedEngine,model_id:b.model_id},{...b,category:'assistant'});return{status:'recorded'};});
+  route('POST','/assistant/usage','device',async(r,p,tx)=>{await assistant(r,p,tx);await graphLock(tx);const b=body(r),message=await tx.need('messages',uuid(b.message_id));const device=await tx.need('devices',p.device!);const selectedEngine=engine(b.engine);if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');const category=b.category==='proactive'?'proactive':b.category==='review'?'review':'assistant';await service.usage(tx,{id:message.id,task_id:message.task_id??null,device_id:p.device,engine:selectedEngine,model_id:b.model_id},{...b,category});return{status:'recorded'};});
   route('GET','/node/devices','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d))));});
   route('GET','/node/tasks','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(limit(await tx.all('tasks'),query(r)));});
   route('POST','/node/tasks','device',async(r,p,tx)=>{await assistant(r,p,tx);throw new ApiError(409,'confirmation_required','自由聊天派活需要先提交目标方案并确认');});
@@ -359,17 +359,19 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     if(!cancelled&&outcome==='applied')await service.team.submit(tx,updated,savedRun);await service.team.refreshBlocked(tx);await tx.emit('task.changed',updated,task.id,run.id);return updated;
   }));
 
-  route('GET','/costs/summary','client',async(r,_p,tx)=>service.summary(await service.costs(tx,query(r))));
+  route('GET','/costs/summary','client',async(r,_p,tx)=>{const summary=service.summary(await service.costs(tx,query(r)));const budget=await service.budget(tx);return{...summary,reserved_hold_usd:budget.reserved_hold_usd??'0',reserved_unknown_count:budget.reserved_unknown_count??0};});
   route('GET','/costs/records','client',async(r,_p,tx)=>items(limit(await service.costs(tx,query(r)),query(r))));
   route('GET','/costs/series','client',async(r,_p,tx)=>{
     const groups=new Map<string,Doc>();for(const record of await service.costs(tx,query(r))){if(record.cost.amount===null)continue;const date=record.occurred_at.slice(0,10),key=`${date}:${record.cost.currency}:${record.cost.source}`,g=groups.get(key)??{date,currency:record.cost.currency,source:record.cost.source,amount:'0',input_tokens:0,output_tokens:0};g.amount=new Decimal(g.amount).plus(record.cost.amount).toFixed();g.input_tokens+=record.input_tokens??0;g.output_tokens+=record.output_tokens??0;groups.set(key,g);}return items([...groups.values()]);
   });
   route('GET','/costs/breakdown','client',async(r,_p,tx)=>{
-    const by=String(query(r).group_by??'engine');if(!['device','engine','task','model'].includes(by))throw new ApiError(422,'invalid_group','分组无效');const field=by==='device'?'device_id':by==='task'?'task_id':by==='model'?'model_id':'engine',groups=new Map<string,Doc>(),devices=await tx.all('devices'),tasks=await tx.all('tasks');
-    for(const u of await service.costs(tx,query(r))){const key=String(u[field]??'assistant'),currency=u.cost.currency??'USD',identity=`${key}:${currency}`,g=groups.get(identity)??{key,label:devices.find(d=>d.id===key)?.name??tasks.find(t=>t.id===key)?.title??key,currency,amount:'0',request_count:0,unknown_count:0};g.request_count++;if(u.cost.amount===null)g.unknown_count++;else g.amount=new Decimal(g.amount).plus(u.cost.amount).toFixed();groups.set(identity,g);}return items([...groups.values()]);
+    const by=String(query(r).group_by??'engine');if(!['device','engine','task','model','category'].includes(by))throw new ApiError(422,'invalid_group','分组无效');const field=by==='device'?'device_id':by==='task'?'task_id':by==='model'?'model_id':by==='category'?'category':'engine',groups=new Map<string,Doc>(),devices=await tx.all('devices'),tasks=await tx.all('tasks');
+    const categoryLabel:Record<string,string>={worker:'执行',assistant:'助理',review:'验收',proactive:'主动规划',subagent:'子任务',memory:'记忆'};
+    for(const u of await service.costs(tx,query(r))){const key=String(u[field]??(by==='category'?'worker':'assistant')),currency=u.cost.currency??'USD',identity=`${key}:${currency}`,g=groups.get(identity)??{key,label:by==='category'?categoryLabel[key]??key:devices.find(d=>d.id===key)?.name??tasks.find(t=>t.id===key)?.title??key,currency,amount:'0',request_count:0,unknown_count:0};g.request_count++;if(u.cost.amount===null)g.unknown_count++;else g.amount=new Decimal(g.amount).plus(u.cost.amount).toFixed();groups.set(identity,g);}return items([...groups.values()]);
   });
   route('GET','/budgets','client',async(_r,_p,tx)=>service.budget(tx));
-  route('PUT','/budgets','client',async(r,_p,tx)=>{const old=await service.budget(tx);if(old.version)matchVersion(r.headers['if-match'],old,body(r).version);const b=body(r);await tx.put('budgets',{monthly_limit_usd:safeMoney(b.monthly_limit_usd??null),task_limit_usd:safeMoney(b.task_limit_usd??null)},tx.tenant);const saved=await service.budget(tx);await tx.emit('budget.changed',saved);return saved;});
+  route('PUT','/budgets','client',async(r,_p,tx)=>{const old=await service.budget(tx);if(old.version)matchVersion(r.headers['if-match'],old,body(r).version);const b=body(r);let categoryLimits=old.category_limits??null;if('category_limits' in b){if(b.category_limits==null)categoryLimits=null;else{const parsed=sanitizeCategoryLimits(b.category_limits);if(!parsed)throw new ApiError(422,'invalid_budget','活动用量上限无效');categoryLimits=parsed;}}await tx.put('budgets',{monthly_limit_usd:safeMoney(b.monthly_limit_usd??null),task_limit_usd:safeMoney(b.task_limit_usd??null),...(categoryLimits?{category_limits:categoryLimits}:{})},tx.tenant);const saved=await service.budget(tx);await tx.emit('budget.changed',saved);return saved;});
+  route('PUT','/tasks/:id/budget','client',async(r,_p,tx)=>{await graphLock(tx);const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task,body(r).version);const limits=sanitizeLimits(body(r).limits??body(r));if(!limits)throw new ApiError(422,'invalid_budget','任务用量上限无效');const updated=await tx.put('tasks',{...task,scope:{...task.scope,budget:limits}});await tx.emit('budget.changed',{reason:task.reason_code,recovery:'用量上限已更新。任务如果正在等待额度，可以重试。'},task.id);return updated;});
   route('GET','/schedules','client',async(_r,_p,tx)=>items(await tx.all('schedules')));
   route('POST','/schedules','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{const b=body(r),minutes=Number(b.interval_minutes);if(!Number.isInteger(minutes)||minutes<5||minutes>525600)throw new ApiError(422,'invalid_interval','检查周期应在5分钟至1年之间');await tx.need('devices',uuid(b.device_id));return tx.put('schedules',{title:text(b.title??b.goal,'title',200),goal:text(b.goal,'goal'),engine:engine(b.engine),device_id:b.device_id,interval_minutes:minutes,mode:'remind_and_confirm',next_due_at:expires(minutes*60000),enabled:true});}));
   route('PATCH','/schedules/:id','client',async(r,_p,tx)=>{const schedule=await tx.need('schedules',uuid(params(r).id));matchVersion(r.headers['if-match'],schedule);return tx.put('schedules',{...schedule,enabled:body(r).enabled===true});});

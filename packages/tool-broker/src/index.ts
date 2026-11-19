@@ -83,10 +83,19 @@ export class ToolBroker {
     }
   }
   private async publishEvidence(stepId: string, document: Record<string, unknown>, bytes: Buffer, name: string, mime: string): Promise<Record<string, unknown>> {
+    const uncertain = document.source_uncertain === true;
+    const fresh = document.fresh !== false && !uncertain;
+    const stale = document.stale === true || uncertain;
+    const summary: Record<string, unknown> = { evidence_kind: document.evidence_kind, captured_at: document.captured_at, source_url: uncertain ? null : document.source_url ?? null, fresh, stale, viewer_required: false };
+    if (uncertain) { summary.source_uncertain = true; summary.source_uncertain_reason = document.source_uncertain_reason ?? '页面在捕获期间发生跳转，不能确定正文对应的网址'; }
+    if (typeof document.observed_at === 'string') summary.observed_at = document.observed_at;
+    if (typeof document.retrieved_at === 'string') summary.retrieved_at = document.retrieved_at;
+    if (typeof document.generated_at === 'string') summary.generated_at = document.generated_at;
+    if (typeof document.stale_reason === 'string') summary.stale_reason = document.stale_reason;
     try {
-      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: document.source_url ?? null, step_id: stepId, fresh: document.fresh !== false, stale: document.stale === true });
-      return { evidence_kind: document.evidence_kind, captured_at: document.captured_at, source_url: document.source_url ?? null, artifact_id: artifact.id, evidence_status: artifact.status ?? 'ready', fresh: document.fresh !== false, stale: document.stale === true, viewer_required: false };
-    } catch { return { evidence_status: 'not_frozen', evidence_kind: document.evidence_kind, viewer_required: false }; }
+      const artifact = await this.artifacts().uploadBytes(bytes, name, mime, { evidence_kind: document.evidence_kind, provenance: 'tool_broker', captured_at: document.captured_at, source_url: summary.source_url, step_id: stepId, fresh, stale });
+      return { ...summary, artifact_id: artifact.id, evidence_status: artifact.status ?? 'ready' };
+    } catch { return { evidence_status: 'not_frozen', ...summary }; }
   }
   private async perform(name: string, args: Args, markUnsafe: () => void, stepId: string): Promise<unknown> {
     this.options.assertActive();
@@ -112,44 +121,42 @@ export class ToolBroker {
         const navigation = await browser.call(runId, 'navigate', { url: url.href, newTab: true, group_title: 'Super-agent 任务' });
         let evidence: Record<string, unknown> = { evidence_status: 'not_frozen', viewer_required: false };
         try {
-          const observed = await browser.observe(runId);
-          const snapshot = await browser.call(runId, 'snapshot');
-          const document = pageEvidence({ url: observed.url || url.href, capturedAt: observed.captured_at, runId, stepId, body: snapshot });
+          const captured = await browser.capture(runId);
+          const document = pageEvidence({ url: captured.source_uncertain ? null : (captured.url || url.href), capturedAt: captured.captured_at, runId, stepId, body: captured.snapshot, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
           evidence = await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json');
         } catch { /* Navigation already happened; missing evidence stays unverified. */ }
         result = { knowledge, navigation, evidence }; break;
       }
       case 'browser_snapshot': {
-        const snapshot = await browser.call(runId, 'snapshot');
-        let observed = { url: '', captured_at: new Date().toISOString() };
-        try { observed = await browser.observe(runId); } catch { /* The snapshot text is still the tool result. */ }
-        const document = pageEvidence({ url: observed.url, capturedAt: observed.captured_at, runId, stepId, body: snapshot });
-        result = { snapshot, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json') }; break;
+        const captured = await browser.capture(runId);
+        const document = pageEvidence({ url: captured.url, capturedAt: captured.captured_at, runId, stepId, body: captured.snapshot, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
+        result = { snapshot: captured.snapshot, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `page-${stepId}.json`, 'application/json') }; break;
       }
       case 'browser_click': { const selector = string(args, 'selector', 1000); markUnsafe(); result = await browser.call(runId, 'click', { selector }); break; }
       case 'browser_fill': { const selector = string(args, 'selector', 1000), value = typeof args.value === 'string' ? args.value : (() => { throw new Error('invalid_argument: value'); })(); markUnsafe(); result = await browser.call(runId, 'fill', { selector, value }); break; }
       case 'browser_keys': { const keys = string(args, 'keys', 1000); markUnsafe(); result = await browser.call(runId, 'send_keys', { keys }); break; }
       case 'browser_screenshot': {
-        const frame = await browser.frame(runId);
-        const bytes = Buffer.from(frame.image_base64, 'base64');
-        let source = '';
-        try { source = (await browser.observe(runId)).url; } catch { /* Capture time still comes from the screenshot itself. */ }
-        const image = screenshotEvidence({ url: source, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height });
+        const captured = await browser.capture(runId, { screenshot: true });
+        if (!captured.frame || !captured.bytes) throw new Error('screenshot_unavailable');
+        const frame = captured.frame, bytes = captured.bytes;
+        const image = screenshotEvidence({ url: captured.url, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
         const stored = await this.publishEvidence(stepId, image, bytes, `screenshot-${stepId}.jpg`, 'image/jpeg');
-        const manifest = screenshotEvidence({ url: source, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, imageArtifactId: typeof stored.artifact_id === 'string' ? stored.artifact_id : null });
+        const manifest = screenshotEvidence({ url: captured.url, capturedAt: frame.captured_at, runId, stepId, bytes, width: frame.width, height: frame.height, imageArtifactId: typeof stored.artifact_id === 'string' ? stored.artifact_id : null, sourceUncertain: captured.source_uncertain, sourceUncertainReason: captured.source_uncertain_reason ?? undefined });
         result = { captured: stored.evidence_status !== 'not_frozen', frame_id: frame.frame_id, width: frame.width, height: frame.height, captured_at: frame.captured_at, viewer_required: false, evidence: await this.publishEvidence(stepId, manifest, Buffer.from(JSON.stringify(manifest)), `screenshot-${stepId}.json`, 'application/json') }; break;
       }
       case 'memory_search': {
         const query = string(args, 'query'), site = args.site, limit = Math.min(20, Math.max(1, Number(args.limit ?? 5)));
         const fingerprint = JSON.stringify({ runId, query, site: site ?? null, limit });
         const found = await this.cachedMemory('search', fingerprint, () => this.options.request<{ items?: unknown[]; scope?: unknown }>('/node/memory/search', { query, site, limit }));
-        const document = memoryRetrievalEvidence({ generatedAt: new Date().toISOString(), runId, stepId, query, scope: found.scope ?? null, hits: Array.isArray(found.items) ? found.items : [] });
+        const now = new Date().toISOString();
+        const document = memoryRetrievalEvidence({ generatedAt: now, runId, stepId, query, scope: found.scope ?? null, hits: this.memoryEnvelope(found, now, 'search') });
         result = { ...found, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `memory-search-${stepId}.json`, 'application/json') }; break;
       }
       case 'memory_read': {
         const id = string(args, 'id', 100), fingerprint = JSON.stringify({ runId, id });
         const memory = await this.cachedMemory('read', fingerprint, () => this.options.request<Record<string, unknown>>('/node/memory/read', { id }));
-        const document = memoryRetrievalEvidence({ generatedAt: new Date().toISOString(), runId, stepId, query: `id:${id}`, scope: null, hits: [memory] });
+        const now = new Date().toISOString();
+        const document = memoryRetrievalEvidence({ generatedAt: now, runId, stepId, query: `id:${id}`, scope: null, hits: this.memoryEnvelope(memory, now, 'read') });
         result = { ...memory, evidence: await this.publishEvidence(stepId, document, Buffer.from(JSON.stringify(document)), `memory-read-${stepId}.json`, 'application/json') }; break;
       }
       case 'memory_propose': {
@@ -184,6 +191,13 @@ export class ToolBroker {
     }
     await this.options.onOperation?.(name, result);
     return result;
+  }
+  private memoryEnvelope(value: unknown, now: string, kind: 'search' | 'read'): { items?: unknown[]; hits?: unknown[]; fresh: boolean; stale: boolean; stale_reason?: string; observed_at: string; retrieved_at: string; generated_at: string } {
+    const record = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+    const wrapperStale = record.stale === true || record.fresh === false;
+    const observedAt = typeof record.observed_at === 'string' ? record.observed_at : now;
+    const retrievedAt = typeof record.cache_read_at === 'string' ? record.cache_read_at : typeof record.retrieved_at === 'string' ? record.retrieved_at : now;
+    return { ...(kind === 'search' ? { items: Array.isArray(record.items) ? record.items : [] } : { hits: [value] }), fresh: !wrapperStale, stale: wrapperStale, ...(typeof record.stale_reason === 'string' ? { stale_reason: record.stale_reason } : {}), observed_at: observedAt, retrieved_at: retrievedAt, generated_at: now };
   }
   private async cachedMemory<T>(kind: 'search' | 'read', fingerprint: string, load: () => Promise<T>): Promise<T> {
     try {

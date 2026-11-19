@@ -4,7 +4,7 @@ import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ToolBroker, BrowserActor, startToolBridge } from '../src/index.js';
-import { memoryFailureClass } from '../src/evidence.js';
+import { memoryFailureClass, pageEvidence } from '../src/evidence.js';
 import { imageSize } from '../src/browser.js';
 
 test('workspace file tools refuse parent traversal and symlink escape', async () => {
@@ -157,6 +157,85 @@ test('runtime bridge restricts tool discovery and execution to the context allow
     assert.equal((await fetch(`${bridge.url}/call`, { method: 'POST', headers, body: JSON.stringify({ name: 'files_read', arguments: {} }) })).status, 200);
     assert.deepEqual(calls, ['files_read']);
   } finally { await bridge.close(); }
+});
+
+test('memory cache envelopes stay stale and capture binds url to the same body', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'super-agent-evidence-'));
+  const observed = '2026-11-19T00:00:00.000Z';
+  const offline = Object.assign(new Error('down'), { status: 503, code: 'recall_unreachable' });
+  const memoryBroker = new ToolBroker({ runId: 'run', cwd: dir, browser: new BrowserActor(), signal: new AbortController().signal, assertActive: () => {}, ask: async () => '',
+    memoryCache: {
+      lookup: (kind) => kind === 'search'
+        ? { hit: true, stale: true, observed_at: observed, value: { items: [], scope: { project: 'alpha' }, fresh: false, stale: true, stale_reason: 'ttl', observed_at: observed, cache_read_at: '2026-11-19T01:00:00.000Z' } }
+        : { hit: true, stale: true, observed_at: observed, value: { id: 'm1', content: null, fresh: false, stale: true, stale_reason: 'offline', observed_at: observed, cache_read_at: '2026-11-19T01:00:00.000Z' } },
+      store: () => {}, markOffline: () => {}, drop: () => {},
+    },
+    request: async (path) => { if (path === '/node/memory/search' || path === '/node/memory/read') throw offline; throw new Error('evidence-upload-unavailable'); } });
+  const scripted = (evaluate: string[], snapshot: string[], screenshot?: string) => {
+    let urls = 0, bodies = 0; const actions: string[] = [];
+    const browser = new BrowserActor('http://csi.invalid', (async (_url: unknown, init: RequestInit) => {
+      const command = JSON.parse(String(init.body)) as { action: string }; actions.push(command.action);
+      if (command.action === 'evaluate') { const url = evaluate[Math.min(urls, evaluate.length - 1)] ?? ''; urls += 1; return Response.json({ success: true, data: { value: JSON.stringify({ width: 8, height: 8, scale: 1, url, scroll_x: 0, scroll_y: 0 }) } }); }
+      if (command.action === 'snapshot') { const text = snapshot[Math.min(bodies, snapshot.length - 1)] ?? ''; bodies += 1; return Response.json({ success: true, data: { text } }); }
+      if (command.action === 'screenshot') return Response.json({ success: true, data: { path: screenshot } });
+      return Response.json({ success: true, data: {} });
+    }) as typeof fetch);
+    return { browser, actions };
+  };
+  try {
+    const search = await memoryBroker.execute('memory_search', { query: '入口' }) as { evidence: { fresh: boolean; stale: boolean; stale_reason: string; observed_at: string; retrieved_at: string; generated_at: string } };
+    assert.equal(search.evidence.fresh, false);
+    assert.equal(search.evidence.stale, true);
+    assert.equal(search.evidence.stale_reason, 'ttl');
+    assert.equal(search.evidence.observed_at, observed);
+    assert.equal(search.evidence.retrieved_at, '2026-11-19T01:00:00.000Z');
+    assert.notEqual(search.evidence.generated_at, observed);
+    const read = await memoryBroker.execute('memory_read', { id: 'm1' }) as { content: string | null; evidence: { fresh: boolean; stale: boolean; observed_at: string; stale_reason: string } };
+    assert.equal(read.content, null);
+    assert.equal(read.evidence.fresh, false);
+    assert.equal(read.evidence.stale, true);
+    assert.equal(read.evidence.stale_reason, 'offline');
+    assert.equal(read.evidence.observed_at, observed);
+    const stable = scripted(['https://stable.example/page'], ['stable-body']);
+    const stableBroker = new ToolBroker({ runId: 'run', cwd: dir, browser: stable.browser, signal: new AbortController().signal, assertActive: () => {}, ask: async () => '', request: async <T>() => { throw new Error('evidence-upload-unavailable'); } });
+    const stableShot = await stableBroker.execute('browser_snapshot', {}) as { snapshot: { text: string }; evidence: { source_uncertain?: boolean; source_url?: string | null; fresh?: boolean } };
+    assert.deepEqual(stable.actions, ['evaluate', 'snapshot', 'evaluate']);
+    assert.equal(stableShot.snapshot.text, 'stable-body');
+    assert.notEqual(stableShot.evidence.source_uncertain, true);
+    assert.equal(stableShot.evidence.source_url, 'https://stable.example/page');
+    assert.equal(stableShot.evidence.fresh, true);
+    const settledUrls = ['https://old.example/a', 'https://new.example/b', 'https://new.example/b', 'https://new.example/b'];
+    const settled = scripted(settledUrls, ['first-body', 'second-body']);
+    const settledCapture = await settled.browser.capture('run');
+    assert.equal(settledCapture.source_uncertain, false);
+    assert.equal(settledCapture.url, 'https://new.example/b');
+    assert.equal((settledCapture.snapshot as { text: string }).text, 'second-body');
+    const settledPage = pageEvidence({ url: settledCapture.url, capturedAt: settledCapture.captured_at, runId: 'run', stepId: 'step', body: settledCapture.snapshot, sourceUncertain: settledCapture.source_uncertain, sourceUncertainReason: settledCapture.source_uncertain_reason ?? undefined });
+    assert.equal(settledPage.source_url, 'https://new.example/b');
+    assert.equal(settledPage.fresh, true);
+    assert.equal(JSON.stringify(settledPage).includes('first-body'), false);
+    const shifting = scripted(['https://first.example/a', 'https://second.example/b', 'https://third.example/c', 'https://fourth.example/d'], ['first-body', 'second-body']);
+    const shiftingBroker = new ToolBroker({ runId: 'run', cwd: dir, browser: shifting.browser, signal: new AbortController().signal, assertActive: () => {}, ask: async () => '', request: async <T>() => { throw new Error('evidence-upload-unavailable'); } });
+    const shifted = await shiftingBroker.execute('browser_snapshot', {}) as { snapshot: { text: string }; evidence: { source_uncertain?: boolean; source_url?: string | null; fresh?: boolean } };
+    assert.equal(shifted.snapshot.text, 'second-body');
+    assert.equal(shifted.evidence.source_uncertain, true);
+    assert.equal(shifted.evidence.source_url ?? null, null);
+    assert.equal(shifted.evidence.fresh, false);
+    assert.equal(JSON.stringify(shifted).includes('first-body'), false);
+    assert.equal(JSON.stringify(shifted).includes('fourth.example'), false);
+    assert.equal(JSON.stringify(shifted).includes('second.example'), false);
+    const image = join(dir, 'frame.jpg');
+    await writeFile(image, Buffer.from([0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x10, 0x00, 0x10, 0x01, 0x01, 0x11, 0x00, 0xff, 0xd9]));
+    const shot = scripted(['https://first.example/a', 'https://second.example/b', 'https://third.example/c', 'https://fourth.example/d'], ['first-body', 'second-body'], image);
+    const shotBroker = new ToolBroker({ runId: 'shot', cwd: dir, browser: shot.browser, signal: new AbortController().signal, assertActive: () => {}, ask: async () => '', request: async <T>() => { throw new Error('evidence-upload-unavailable'); } });
+    const shotResult = await shotBroker.execute('browser_screenshot', {}) as { evidence: { source_uncertain?: boolean; source_url?: string | null; fresh?: boolean } };
+    assert.ok(shot.actions.includes('snapshot'));
+    assert.ok(shot.actions.includes('screenshot'));
+    assert.equal(shotResult.evidence.source_uncertain, true);
+    assert.equal(shotResult.evidence.fresh, false);
+    assert.equal(shotResult.evidence.source_url ?? null, null);
+    assert.equal(JSON.stringify(shotResult).includes('fourth.example'), false);
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test('disabled browser is absent from discovery and rejects even forged direct calls while files remain usable', async () => {

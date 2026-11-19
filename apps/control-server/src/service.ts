@@ -5,7 +5,9 @@ import { ApiError, Store, Tx, hash, type Doc } from './store.js';
 import { storeStep } from './steps.js';
 import { TeamService,graphLock,deliverables as normalizeDeliverables } from './team.js';
 import { normalizeMemoryScope, proposeRetrospective } from './memory-governance.js';
-import { accumulatedStop, admitReservation, dollarAdmission, evaluateLimits, limitsFor, publicGrant, usageTotals } from './budget-control.js';
+import { activeHold, admitReservation, buildReservation, grantBlocked, releaseReservation, remainingLimits, renewReservation } from './budget-control.js';
+import { configuredLimits, dollarGate, holdFor, presentGrant, recovery, reservationProtected, sanitizeLimits, spendFor, taskDollarStop, usageStop } from './budget-policy.js';
+import { BUDGET_RECOVERY, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
 
 export const ACTIVE = ['dispatched','starting','running','waiting_input','stopping'];
 const TERMINAL = ['succeeded','failed','cancelled','paused'];
@@ -32,15 +34,38 @@ export class Service {
     return{...d,status:!d.last_seen_at||Date.parse(d.last_seen_at)<Date.now()-30000?'offline':active?'busy':'online'};
   }
   async settings(tx:Tx):Promise<Doc>{const stored=await tx.get('settings',tx.tenant);return stored?{memory_global_read:false,...stored}:{id:tx.tenant,default_engine:'codex',default_device_id:null,assistant_device_id:null,memory_global_read:false,version:0};}
-  async budget(tx:Tx):Promise<Doc>{const b=await tx.get('budgets',tx.tenant)??{id:tx.tenant,monthly_limit_usd:null,task_limit_usd:null,version:0};const month=(await tx.all('usage_records')).filter(u=>String(u.occurred_at).slice(0,7)===now().slice(0,7));const usage=month.filter(u=>u.cost?.currency==='USD'&&u.cost?.amount!==null);return{...b,used_usd:usage.reduce((s,u)=>s.plus(u.cost.amount),new Decimal(0)).toFixed(),unknown_count:month.length-usage.length};}
+  async budget(tx:Tx):Promise<Doc>{
+    const b=await tx.get('budgets',tx.tenant)??{id:tx.tenant,monthly_limit_usd:null,task_limit_usd:null,version:0};
+    const month=(await tx.all('usage_records')).filter(u=>String(u.occurred_at).slice(0,7)===now().slice(0,7));
+    const usage=month.filter(u=>u.cost?.currency==='USD'&&u.cost?.amount!==null);
+    const reservations=await tx.all('budget_reservations');
+    const active=reservations.filter(r=>r.status==='reserved'&&Date.parse(r.expires_at)>Date.now());
+    return{...b,used_usd:usage.reduce((s,u)=>s.plus(u.cost.amount),new Decimal(0)).toFixed(),unknown_count:month.length-usage.length,reserved_hold_usd:activeHold(active).toFixed(),reserved_unknown_count:active.filter(r=>r.amount==null||String(r.money_treatment??'').startsWith('unknown')).length,explanation:'本月金额是账号上限。每个任务另外计算自己的用量，新的一次运行只拿到扣掉已消耗后剩下的额度。运行时长按这一次活动计算，重试或换电脑不会把已用量清零。'};
+  }
+  private async activityAllowance(tx:Tx,budget:Doc,category:BudgetCategory,taskId:string|null,taskBudget:Doc|null):Promise<{ok:true;limits:RuntimeBudgetLimits;ceiling:RuntimeBudgetLimits;amount:string|null;treatment:string}|{ok:false;reason:BudgetStopReason;recovery:string;limits:RuntimeBudgetLimits}>{
+    const ceiling=configuredLimits(category,[budget.category_limits?.[category],taskBudget]);
+    const reservations=await tx.all('budget_reservations');
+    const held=!!(taskId&&budget.task_limit_usd&&reservations.some(r=>r.task_id===taskId&&r.status==='reserved'&&Date.parse(r.expires_at)>Date.now()&&r.money_treatment==='known'&&r.amount&&r.amount!=='0'));
+    const records=taskId?(await tx.all('usage_records')).filter(r=>r.task_id===taskId):[];
+    const runIds=new Set(taskId?(await tx.all('runs')).filter(r=>r.task_id===taskId).map(r=>r.id):[]);
+    const steps=(await tx.all('steps')).filter(s=>runIds.has(s.run_id));
+    const limits=remainingLimits(ceiling,spendFor(records,steps,category));
+    const money=taskId?taskDollarStop(budget,records):null;
+    const hold=holdFor(budget);
+    const admission=dollarGate(budget,reservations,hold.amount);
+    const reason:BudgetStopReason|null=held?'budget_exhausted':money??grantBlocked(limits)??(admission.ok?null:admission.reason);
+    if(reason)return{ok:false,reason,recovery:recovery(reason),limits};
+    return{ok:true,limits,ceiling,amount:hold.amount,treatment:hold.treatment};
+  }
   async createTask(tx:Tx,body:Doc,reservedId?:string):Promise<Doc>{
     await graphLock(tx);
     const settings=await this.settings(tx),selectedEngine=engine(body.engine??settings.default_engine);
     const deviceId=uuid(body.device_id??settings.default_device_id,'device_id');await tx.need('devices',deviceId);
     const goal=text(body.goal,'goal'),id=reservedId??randomUUID(),criteria=normalizeDeliverables(body.deliverables),memory=normalizeMemoryScope(body.memory_scope);
+    const budgetOverride=body.budget==null?null:sanitizeLimits(body.budget);if(body.budget!=null&&!budgetOverride)throw new ApiError(422,'invalid_budget','任务用量上限无效');
     if(body.plan_id&&!reservedId)throw new ApiError(422,'managed_plan_required','计划任务需由已确认方案原子创建');
     if(body.plan_id)await tx.need('plans',uuid(body.plan_id));
-    let task=await tx.put('tasks',{id,title:typeof body.title==='string'?body.title.slice(0,160):goal.slice(0,80),goal,deliverables:criteria,status:'queued',reason_code:null,engine:selectedEngine,model_id:body.model_id?text(body.model_id,'model_id',200):null,device_id:deviceId,current_run_id:null,scope_version_id:randomUUID(),scope:{source:body.source_message_id?'message':'explicit_user_task',source_message_id:body.source_message_id??null,confirmation_message_id:body.confirmation_message_id??null,goal,deliverables:criteria,...(memory?{memory}:{})},plan_id:body.plan_id??null,item_key:body.item_key??null,parent_task_id:null,root_task_id:id,depends_on_task_ids:[],delivery_status:'not_submitted'});
+    let task=await tx.put('tasks',{id,title:typeof body.title==='string'?body.title.slice(0,160):goal.slice(0,80),goal,deliverables:criteria,status:'queued',reason_code:null,engine:selectedEngine,model_id:body.model_id?text(body.model_id,'model_id',200):null,device_id:deviceId,current_run_id:null,scope_version_id:randomUUID(),scope:{source:body.source_message_id?'message':'explicit_user_task',source_message_id:body.source_message_id??null,confirmation_message_id:body.confirmation_message_id??null,goal,deliverables:criteria,...(memory?{memory}:{}),...(budgetOverride?{budget:budgetOverride}:{})},plan_id:body.plan_id??null,item_key:body.item_key??null,parent_task_id:null,root_task_id:id,depends_on_task_ids:[],delivery_status:'not_submitted'});
     if(body.parent_task_id||body.depends_on_task_ids)task=await this.team.attach(tx,task,body.parent_task_id,body.depends_on_task_ids);
     await tx.emit('task.created',task,id);return task;
   }
@@ -66,17 +91,11 @@ export class Service {
           const updated=await tx.put('tasks',{...task,status:'waiting_device',reason_code:'model_unavailable'});await tx.emit('task.changed',updated,task.id);continue;
         }
         const budget=await this.budget(tx),reservations=await tx.all('budget_reservations');
-        const reserveAmount=budget.task_limit_usd??(budget.monthly_limit_usd!==null?'1':'0');
-        const spent=usageTotals((await tx.all('usage_records')).filter(record=>record.task_id===task.id),[],null);
-        const over=accumulatedStop(limitsFor('worker',task.scope?.budget),spent);
-        if(over){if(task.reason_code!==over){const updated=await tx.put('tasks',{...task,status:'queued',reason_code:over});await tx.emit('budget.changed',{reason:over},task.id);}continue;}
-        const admission=dollarAdmission(budget,reservations,reserveAmount);
-        if(!admission.ok){
-          if(task.reason_code!==admission.reason){const updated=await tx.put('tasks',{...task,status:'queued',reason_code:admission.reason});await tx.emit('budget.changed',{reason:admission.reason},task.id);}continue;
-        }
+        const allowance=await this.activityAllowance(tx,budget,'worker',task.id,task.scope?.budget??null);
+        if(!allowance.ok){if(task.reason_code!==allowance.reason){const updated=await tx.put('tasks',{...task,status:'queued',reason_code:allowance.reason});await tx.emit('budget.changed',{reason:allowance.reason,recovery:allowance.recovery,remaining:allowance.limits},task.id);}continue;}
         const runId=randomUUID(),commandId=randomUUID(),grantId=randomUUID(),epoch='1',lease=expires(45000);
-        const hold=admitReservation(reservations,{run_id:runId,amount:reserveAmount,status:'reserved',expires_at:expires(120000),operation_key:`reserve:${runId}`,category:'worker',limits:limitsFor('worker',task.scope?.budget),money_treatment:budget.monthly_limit_usd===null&&budget.task_limit_usd===null?'unconfigured':budget.unknown_count>0?'unknown_not_zero':'known'});
-        if(hold.created)await tx.put('budget_reservations',hold.reservation,grantId);
+        const hold=admitReservation(reservations,buildReservation({operation_key:`reserve:${runId}`,activity_kind:'run',activity_id:runId,task_id:task.id,run_id:runId,category:'worker',limits:allowance.limits,amount:allowance.amount,expires_at:expires(120000),money_treatment:allowance.treatment}));
+        if(hold.created)await tx.put('budget_reservations',{...hold.reservation,ceiling:allowance.ceiling},grantId);
         const run=await tx.put('runs',{id:runId,task_id:task.id,device_id:device.id,engine:task.engine,model_id:model,lease_epoch:epoch,lease_expires_at:lease,state:'dispatched',summary:'等待执行电脑接受',scope_version_id:task.scope_version_id,budget_grant_id:grantId,command_id:commandId,checkpoint_id:task.checkpoint_id??null,scope:{...task.scope,dependencies:await this.team.dependencies(tx,task)},control:null});
         const command={protocol_version:'1.0',message_id:randomUUID(),kind:'run.start',sent_at:now(),payload:{command_id:commandId,tenant_id:tenant,task_id:task.id,run_id:runId,device_id:device.id,lease_epoch:epoch,scope_version_id:task.scope_version_id,capability_generation:caps.generation??1,runtime:{engine:task.engine,model_id:model,local_profile_id:cap.local_profile_id??'default'},expires_at:expires(60000),lease_valid_for_ms:45000,checkpoint_id:task.checkpoint_id??null,budget_grant_id:grantId}};
         await tx.put('commands',{...command,device_id:device.id,run_id:runId,state:'pending',expires_at:command.payload.expires_at},commandId);
@@ -120,11 +139,13 @@ export class Service {
           }
           await tx.put('views',{...view,...(viewingExpired?{state:'closed'}:{}),control_requested:false,control_state:'none'});
         }
+        const lease=await tx.get('assistant_leases',tx.tenant);
+        const leaseAlive=!!lease&&Date.parse(lease.expires_at)>Date.now();
         for(const reservation of await tx.all('budget_reservations',true)){
-          if(reservation.status==='reserved'&&Date.parse(reservation.expires_at)<=Date.now()){
-            const owner=reservation.run_id?await tx.get('runs',reservation.run_id):null;
-            if(!owner||!ACTIVE.includes(owner.state))await tx.put('budget_reservations',{...reservation,status:'expired',expired_at:now()});
-          }
+          if(reservation.status!=='reserved'||Date.parse(reservation.expires_at)>Date.now())continue;
+          const owner=reservation.run_id?await tx.get('runs',reservation.run_id):null;
+          if(reservationProtected(reservation,!!owner&&ACTIVE.includes(owner.state),leaseAlive)){await tx.put('budget_reservations',renewReservation(reservation,now(),120000));continue;}
+          await tx.put('budget_reservations',releaseReservation(reservation,'expired',now()));
         }
         const schedules=(await tx.all('schedules',true)).filter(s=>s.enabled&&Date.parse(s.next_due_at)<=Date.now());
         for(const schedule of schedules){
@@ -149,23 +170,44 @@ export class Service {
     const updated=await tx.put('tasks',{...task,status:'running',reason_code:null});await tx.emit('task.changed',updated,task.id,run.id);
     const checkpoint=run.checkpoint_id?await tx.get('checkpoints',run.checkpoint_id):null;
     const grant=run.budget_grant_id?await tx.get('budget_reservations',run.budget_grant_id):null;
-    return{run:redactView(accepted),task:updated,scope:run.scope??{},checkpoint:checkpoint?.checkpoint??null,run_ticket:await this.auth.runTicket(p,accepted),lease_valid_for_ms:45000,budget:grant?publicGrant(grant):null};
+    return{run:redactView(accepted),task:updated,scope:run.scope??{},checkpoint:checkpoint?.checkpoint??null,run_ticket:await this.auth.runTicket(p,accepted),lease_valid_for_ms:45000,budget:grant?presentGrant(grant):null};
   }
-  async releaseBudget(tx:Tx,runId:string):Promise<void>{for(const r of (await tx.all('budget_reservations')).filter(r=>r.run_id===runId&&r.status==='reserved'))await tx.put('budget_reservations',{...r,status:'released',released_at:now()});}
+  async releaseBudget(tx:Tx,runId:string):Promise<void>{for(const r of (await tx.all('budget_reservations')).filter(r=>r.run_id===runId&&r.status==='reserved'))await tx.put('budget_reservations',releaseReservation(r,'released',now()));}
+  async releaseActivity(tx:Tx,operationKey:string):Promise<void>{for(const r of (await tx.all('budget_reservations')).filter(r=>r.status==='reserved'&&(r.operation_key===operationKey||r.activity_id===operationKey)))await tx.put('budget_reservations',releaseReservation(r,'released',now()));}
   async reserveActivity(tx:Tx,body:Doc):Promise<Doc>{
-    const category=['assistant','review','proactive','worker'].includes(body.category)?body.category:'assistant';
+    await graphLock(tx);
+    const category:BudgetCategory=['assistant','review','proactive','worker'].includes(body.category)?body.category:'assistant';
     const operation=text(body.operation_key,'operation_key',200);
     const reservations=await tx.all('budget_reservations');
     const prior=admitReservation(reservations,{operation_key:operation});
-    if(!prior.created)return publicGrant(prior.reservation);
-    const budget=await this.budget(tx),amount=budget.task_limit_usd??(budget.monthly_limit_usd!==null?'1':'0');
-    const admission=dollarAdmission(budget,reservations,amount);
-    if(!admission.ok)throw new ApiError(409,admission.reason??'budget_exhausted','预算不足，未开始新的模型调用');
-    const limits=limitsFor(category,null);
-    if(body.task_id){const spent=usageTotals((await tx.all('usage_records')).filter(record=>record.task_id===body.task_id),[],null);const over=accumulatedStop(limits,spent);if(over)throw new ApiError(409,over,'任务累计限制已到，未开始新的模型调用');}
-    const saved=await tx.put('budget_reservations',{run_id:typeof body.task_id==='string'?body.task_id:null,amount,status:'reserved',expires_at:expires(120000),operation_key:operation,category,limits,money_treatment:budget.monthly_limit_usd===null&&budget.task_limit_usd===null?'unconfigured':budget.unknown_count>0?'unknown_not_zero':'known'});
-    return publicGrant(saved);
+    if(!prior.created)return presentGrant(prior.reservation);
+    const budget=await this.budget(tx);
+    const taskId=typeof body.task_id==='string'?body.task_id:null;
+    const task=taskId?await tx.get('tasks',taskId):null;
+    const allowance=await this.activityAllowance(tx,budget,category,taskId,task?.scope?.budget??null);
+    if(!allowance.ok)throw new ApiError(409,allowance.reason,allowance.recovery);
+    const kind=body.activity_kind==='run'||body.activity_kind==='assistant'||body.activity_kind==='review'||body.activity_kind==='proactive'?body.activity_kind:category==='worker'?'run':category;
+    const activityId=typeof body.activity_id==='string'&&body.activity_id.length<=200?body.activity_id:operation;
+    const runId=typeof body.run_id==='string'?body.run_id:null;
+    const saved=await tx.put('budget_reservations',{...buildReservation({operation_key:operation,activity_kind:kind,activity_id:activityId,task_id:taskId,run_id:runId,category,limits:allowance.limits,amount:allowance.amount,expires_at:expires(120000),money_treatment:allowance.treatment}),ceiling:allowance.ceiling});
+    return presentGrant(saved);
   }
+  async assessRunBudget(tx:Tx,run:Doc):Promise<{reason:BudgetStopReason;recovery:string}|null>{
+    const budget=await this.budget(tx);
+    if(budget.monthly_limit_usd!==null&&budget.unknown_count===0&&new Decimal(budget.used_usd).gte(budget.monthly_limit_usd))return{reason:'budget_exhausted',recovery:BUDGET_RECOVERY.budget_exhausted};
+    const task=await tx.need('tasks',run.task_id);
+    const ceiling=configuredLimits('worker',[budget.category_limits?.worker,task.scope?.budget]);
+    const records=(await tx.all('usage_records')).filter(r=>r.task_id===task.id);
+    const runIds=new Set((await tx.all('runs')).filter(r=>r.task_id===task.id).map(r=>r.id));
+    const steps=(await tx.all('steps')).filter(s=>runIds.has(s.run_id));
+    const spent=spendFor(records,steps,'worker');
+    const money=taskDollarStop(budget,records);
+    let reason:BudgetStopReason|null=money;
+    if(!reason&&Date.now()-Date.parse(run.created_at)>=ceiling.max_runtime_ms)reason='time_limit';
+    if(!reason)reason=usageStop(ceiling,spent);
+    return reason?{reason,recovery:recovery(reason)}:null;
+  }
+  async heartbeatRun(tx:Tx,runId:string):Promise<void>{for(const reserve of (await tx.all('budget_reservations')).filter(x=>x.run_id===runId&&x.status==='reserved'))await tx.put('budget_reservations',renewReservation(reserve,now(),120000));}
   async action(tx:Tx,id:string,body:Doc,header:unknown,cascade=true):Promise<Doc>{
     await graphLock(tx);
     const task=await tx.need('tasks',id,true);matchVersion(header,task,body.version);
@@ -252,7 +294,7 @@ export class Service {
         if(task.pending_action==='switch'&&['paused','cancelled'].includes(state)){
           next={...task,engine:task.pending_target.engine,device_id:task.pending_target.device_id,model_id:task.pending_target.model_id??null,status:'queued',reason_code:null,current_run_id:null,pending_action:null,pending_target:null};
         }else if(cancellationRequested)next={...task,status:'cancelled',pending_action:null,reason_code:null,cancellation_requested:true};
-        else next={...task,status:state==='succeeded'?(task.delivery_status&&task.delivery_status!=='not_submitted'?task.status:'awaiting_review'):state,pending_action:null,reason_code:state==='failed'?'execution_failed':state==='succeeded'&&task.delivery_status&&task.delivery_status!=='not_submitted'?task.reason_code:null};
+        else{const budgetReason=['token_limit','model_call_limit','tool_step_limit','time_limit','budget_exhausted','budget_unknown'].includes(run.control?.reason)?run.control.reason:null;next={...task,status:state==='succeeded'?(task.delivery_status&&task.delivery_status!=='not_submitted'?task.status:'awaiting_review'):state,pending_action:null,reason_code:state==='failed'?'execution_failed':state==='paused'&&budgetReason?budgetReason:state==='succeeded'&&task.delivery_status&&task.delivery_status!=='not_submitted'?task.reason_code:null};}
         if(state==='paused'&&next.status!=='cancelled')for(const view of (await tx.all('views')).filter(v=>v.run_id===run.id&&v.control_requested&&v.state!=='closed'&&Date.parse(v.control_expires_at??v.expires_at)>Date.now())){
           await tx.put('views',{...view,control_state:'active',control_expires_at:expires(60000)});
           const commandId=randomUUID();await tx.put('commands',{protocol_version:'1.0',message_id:randomUUID(),kind:'view.control',sent_at:now(),device_id:run.device_id,run_id:run.id,state:'pending',expires_at:expires(60000),payload:{command_id:commandId,run_id:run.id,view_id:view.id,enabled:true}},commandId);
@@ -282,7 +324,7 @@ export class Service {
     const normalized={run_id:run.id??null,task_id:run.task_id,device_id:run.device_id,...(run.event_id?{event_id:run.event_id}:{}),request_key:requestKey,usage_revision:revision,engine:run.engine,model_id:run.model_id,category:['assistant','review','worker','subagent','proactive','memory'].includes(p.category)?p.category:'worker',input_tokens:p.input_tokens??null,output_tokens:p.output_tokens??null,cached_input_tokens:p.cached_input_tokens??null,reasoning_tokens:p.reasoning_tokens??null,cost:{source,quality:source==='unavailable'?'missing':cost.quality??'final',amount,currency:cost.currency??null,price_version_id:cost.price_version_id??null},occurred_at:existing?.occurred_at??supplied??now()};
     if(existing){if(revision<existing.usage_revision)return;if(revision===existing.usage_revision){const a={...existing};delete a.id;delete a.version;delete a.created_at;delete a.updated_at;delete a.revisions;if(hash(a)!==hash(normalized))throw new ApiError(409,'usage_revision_conflict','同一费用版本内容不同');return;}}
     const record=await tx.put('usage_records',{...normalized,revisions:[...(existing?.revisions??[]),...(existing?[{revision:existing.usage_revision,cost:existing.cost,recorded_at:existing.updated_at}]:[])]},existing?.id??randomUUID());
-    const grant=(await tx.all('budget_reservations')).find(reservation=>reservation.run_id===run.id);
+    const grant=(await tx.all('budget_reservations')).find(reservation=>reservation.run_id===run.id||reservation.activity_id===run.id||(run.event_id&&reservation.activity_id===run.event_id));
     if(grant&&grant.status!=='reserved'&&!grant.late_usage_at)await tx.put('budget_reservations',{...grant,late_usage:true,late_usage_at:now()});
     await tx.emit('usage.changed',{id:record.id,run_id:run.id,revision,cost:record.cost},run.task_id,run.id);
   }

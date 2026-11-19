@@ -29,11 +29,13 @@ export class GrokRuntime implements RuntimeAdapter {
       const body: Obj = { model: context.modelId, input: previous ? input.splice(0) : input, tools: context.tools.map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters })), max_output_tokens: this.options.maxOutputTokens ?? 4096, store: true };
       if (previous) body.previous_response_id = previous;
       let response: Obj;
-      try { response = await this.request(fetcher, body, signal); }
+      // One flag per logical round. Set inside request() only after the pre-send abort check.
+      const roundAttempt = { sent: false };
+      try { response = await this.request(fetcher, body, signal, roundAttempt); }
       catch (error) {
-        const message = error instanceof Error ? error.message : '';
-        if (/^grok_http_|^grok_retry_exhausted$/.test(message)) {
-          const failed = { request_key: `xai:failed:${context.runId}:${round}`, input_tokens: null, cached_input_tokens: null, output_tokens: null, reasoning_tokens: null };
+        if (roundAttempt.sent) {
+          // The provider may still bill this in-flight call. One accounting attempt, not a provider-account hard cap. Missing cost_ticks means unavailable, not zero.
+          const failed = { request_key: `xai:attempt:${context.runId}:${round}`, input_tokens: null, cached_input_tokens: null, output_tokens: null, reasoning_tokens: null, occurred_at: new Date().toISOString() };
           await context.emit({ type: 'usage', usage: failed });
           context.budget?.noteUsage?.(failed);
         }
@@ -75,9 +77,15 @@ export class GrokRuntime implements RuntimeAdapter {
     }
     throw new Error('grok_round_limit_reached');
   }
-  private async request(fetcher: typeof fetch, body: Obj, signal: AbortSignal): Promise<Obj> {
+  private async request(fetcher: typeof fetch, body: Obj, signal: AbortSignal, roundAttempt: { sent: boolean }): Promise<Obj> {
+    const url = `${(this.options.baseUrl ?? 'https://api.x.ai/v1').replace(/\/$/, '')}/responses`;
     for (let attempt = 0; attempt < 4; attempt++) {
-      const response = await fetcher(`${(this.options.baseUrl ?? 'https://api.x.ai/v1').replace(/\/$/, '')}/responses`, { method: 'POST', headers: { authorization: `Bearer ${this.options.apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.any([signal, AbortSignal.timeout(this.options.requestTimeoutMs ?? 120_000)]) });
+      checkAbort(signal);
+      const payload = JSON.stringify(body);
+      const outbound = AbortSignal.any([signal, AbortSignal.timeout(this.options.requestTimeoutMs ?? 120_000)]);
+      checkAbort(signal);
+      roundAttempt.sent = true;
+      const response = await fetcher(url, { method: 'POST', headers: { authorization: `Bearer ${this.options.apiKey}`, 'content-type': 'application/json' }, body: payload, signal: outbound });
       if ((response.status === 429 || response.status >= 500) && attempt < 3) { await response.body?.cancel(); await sleep(Math.min(20_000, 1000 * 2 ** attempt), signal); continue; }
       if (!response.ok) {
         await response.body?.cancel();

@@ -63,11 +63,12 @@
 ## 记忆范围与运行预算
 
 - `POST /tasks` 和已确认计划项可带 `memory_scope:{project,sites,global_preference,statuses,max_version}`。Worker 的 search/read 使用该范围；`sites` 为空时不能读取空站点记忆。全局偏好同时要求记忆 `scope_kind=global`（或适用性 global）以及执行设置 `memory_global_read=true`。Planner 带 `task_id` 时使用该任务范围，并可以看见 candidate；不带任务时只有上述全局偏好。用户自己的 `GET /memories/:id` 仍可管理本人记忆。
-- 任务成功写本地复盘候选，不自动 `verified`，不发布到 Recall。`POST /memories/:id/relations` 需要 If-Match，`relation` 为 `conflicts|supersedes|expires`，并用 `operation_key` 幂等。它只写产品侧关系。
+- 任务成功或失败都写本地复盘候选，不自动 `verified`，不发布到 Recall。`POST /memories/:id/relations` 需要 If-Match，`relation` 为 `conflicts|supersedes|expires`，并用 `operation_key` 幂等。它只写产品侧关系。已核验记忆可以设置未来的 `valid_until`。关系使用行锁，`governance.version` 单独递增；并发添加不同冲突会合并。`supersedes` 在同一事务里更新双方。可选 `governance_version` 与锁内版本不一致时返回 409。
 - 节点记忆缓存键包含范围指纹和 generation。401/403/404 和凭据失效类 503 删除对应缓存并返回错误，不回放旧正文。只有传输失败可以返回 `stale=true`、`fresh=false` 且正文为空的结果。`GET /node/events?after=` 供设备续读 `memory.changed`；成功重连后按游标补齐并清空受影响缓存。
-- 观察产物带 `fresh`。`memory_retrieval` 同时有 `generated_at` 和每条来源的 `observed_at`。`fresh=false` 不能充当当前事实。自动 accept 所引用的观察产物必须已被本次 reviewer 读取。网页证据对正文里的 URL 副本做同样的认证参数清理。
-- `POST /assistant/budget/reserve {operation_key,category,task_id?}` 在助理、审核、主动规划和事件汇总调用模型前执行。同一 key 返回原预留。定时规划的用量类别是 `proactive`。同一任务的多次 Run 累计 Token 和模型次数；父任务不会自动吃掉子任务额度。用量回执可带 `occurred_at`，重放保持首次发生时间。
-- 预算预留继续使用 `budget_reservations`，`operation_key=reserve:<run id>`。相同 key 不第二次扣减。用量未知且设置了月额度时，新的美元准入返回 `budget_unknown`，不用 0 代替未知金额。没有配置美元额度时仍执行 Token、模型次数、工具步和运行时间限制。续租可返回 `control.action=pause` 和 `token_limit|time_limit|model_call_limit|tool_step_limit|budget_exhausted`。`dollar_cap` 固定为 `not_enforced`。已发出的 Codex 内部回合、Grok CLI 隐藏轮次和已提交的 Grok 请求不保证能收回。
+- 观察产物带 `fresh`。`memory_retrieval` 即使命中列表为空，也保留整体 `fresh`、`stale`、`stale_reason` 和 `observed_at`。三个时间分开：`observed_at` 是原始观察，`retrieved_at` 是缓存读取，`generated_at` 是证据生成。`fresh=false` 不能充当当前事实。网页正文和截图的 URL 来自同一次浏览器捕获；捕获期间网址变化会重采一次，仍然不一致则 `source_uncertain=true`，不把前一页正文标成后一页来源。自动 accept 所引用的观察产物必须已被本次 reviewer 读取。网页证据对正文里的 URL 副本做同样的认证参数清理。
+- `POST /assistant/budget/reserve {operation_key,category,task_id?,activity_kind?,activity_id?,run_id?}` 在助理、审核、主动规划和事件汇总调用模型前执行，并与 Worker 派发共用同一租户预算锁。同一 key 返回原预留，不重复占额。`run_id` 只保存真实 Run，不用任务 ID 顶替。定时规划的用量类别是 `proactive`，交付审核是 `review`，失败汇总和事件协调是 `assistant`，执行和子任务是 `worker`。分类额度只统计该类别；任务总额度另外约束执行用量。新 Run 拿到的是扣掉该任务历史消耗后的剩余 Token、模型次数和工具步。运行时长按这一次活动计算，不从任务创建时间累计。
+- `PUT /budgets` 保存月金额、任务金额和可选 `category_limits`，需要 If-Match。`PUT /tasks/:id/budget` 用 If-Match 保存该任务的用量上限，可以高于默认值，但不能超过产品上限。提高上限后重试或等待下一次派发即可继续。`GET /budgets` 和 `GET /costs/summary` 分开返回已发生金额、未知次数、预留金额和预留中未知笔数。`GET /costs/breakdown?group_by=category` 按执行、助理、验收、主动规划分组。
+- 预算预留继续使用 `budget_reservations`。预留金额不是实际费用；未知预留的 `amount` 为 null，不按 0 计入。设置了月金额时，已有未知用量或未知预留会让下一次美元准入返回 `budget_unknown`。没有配置美元额度时仍执行 Token、模型次数、工具步和运行时间限制。活动进行中会续租；仅因固定 120 秒到期不会释放仍在执行的 Run，主助理租约有效时也不会释放仍在进行的助理活动。完成后释放。迟到用量仍入账并标记 `late_usage`，`occurred_at` 保持首次真实发生时间，不改记到上传月份。续租可返回 `control.action=pause`、`reason` 和 `recovery`。`dollar_cap` 固定为 `not_enforced`。已发出的 Grok 请求在断连、超时或取消后记一笔可去重的未知尝试；发送前失败不伪造供应商调用。Codex 内部回合和 Grok CLI 隐藏轮次不构成供应商账户硬限额。
 
 ## 通知接口
 

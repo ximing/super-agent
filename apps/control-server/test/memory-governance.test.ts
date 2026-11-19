@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { AgentRecallAdapter } from '../src/recall.js';
 import { ApiError, type Doc, type Tx } from '../src/store.js';
-import { assessMemory, plannerAccess, proposeRetrospective, relateMemory, workerAccess } from '../src/memory-governance.js';
+import { assessMemory, mergeConflictIds, plannerAccess, proposeRetrospective, relateMemory, workerAccess } from '../src/memory-governance.js';
 
 function localTx(tenant = randomUUID()): Tx {
   const tables = new Map<string, Map<string, Doc>>();
   const table = (name: string) => { if (!tables.has(name)) tables.set(name, new Map()); return tables.get(name)!; };
-  return { tenant, get: async (name: string, id: string) => table(name).get(id) ?? null, all: async (name: string) => [...table(name).values()], remove: async (name: string, id: string) => { table(name).delete(id); }, put: async (name: string, doc: Doc, id: string = doc.id ?? randomUUID()) => { const value = { ...doc, id, version: (table(name).get(id)?.version ?? 0) + 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; table(name).set(id, value); return value; } } as unknown as Tx;
+  return { tenant, get: async (name: string, id: string, _lock = false) => table(name).get(id) ?? null, all: async (name: string, _lock = false) => [...table(name).values()], remove: async (name: string, id: string) => { table(name).delete(id); }, put: async (name: string, doc: Doc, id: string = doc.id ?? randomUUID()) => { const value = { ...doc, id, version: (table(name).get(id)?.version ?? 0) + 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; table(name).set(id, value); return value; } } as unknown as Tx;
 }
 function upstream() {
   const memoryId = randomUUID(), calls: Doc[] = [];
@@ -95,6 +95,62 @@ test('retrospective project scope is visible and a future expiry does not expire
   const dated = await relateMemory(tx, saved.id, { relation: 'expires', valid_until: '2099-01-01T00:00:00.000Z', operation_key: 'future-expiry' });
   assert.notEqual(dated.governance.verification, 'expired');
   assert.equal(assessMemory(await tx.get('memories', saved.id) as Doc, access, '2026-11-19T00:00:00.000Z').presentation.status, 'candidate');
+});
+
+test('verified expiry stays verified until the date passes, and a relation cannot newly verify', async () => {
+  const tx = localTx();
+  const verified = await tx.put('memories', { title: '已验证', content: '内容', status: 'verified', governance: { verification: 'verified' } }, randomUUID());
+  const future = await relateMemory(tx, verified.id, { relation: 'expires', valid_until: '2099-01-01T00:00:00.000Z', operation_key: 'future' });
+  assert.equal(future.governance.verification, 'verified');
+  assert.equal(future.governance.valid_until, '2099-01-01T00:00:00.000Z');
+  assert.equal(future.governance.version, 1);
+  const past = await relateMemory(tx, verified.id, { relation: 'expires', valid_until: '2020-01-01T00:00:00.000Z', operation_key: 'past' });
+  assert.equal(past.governance.verification, 'expired');
+  assert.equal(past.governance.version, 2);
+  const replay = await relateMemory(tx, verified.id, { relation: 'expires', valid_until: '1999-01-01T00:00:00.000Z', operation_key: 'past' });
+  assert.equal(replay.governance.version, 2);
+  assert.equal(replay.governance.verification, 'expired');
+  const candidate = await tx.put('memories', { title: '候选', content: '推断', status: 'candidate', governance: { verification: 'candidate' } }, randomUUID());
+  await assert.rejects(() => relateMemory(tx, candidate.id, { relation: 'expires', valid_until: '2099-01-01T00:00:00.000Z', operation_key: 'promote', verification: 'verified' }), (error: unknown) => error instanceof ApiError && error.status === 422 && error.code === 'invalid_memory_relation');
+  assert.equal((await tx.get('memories', candidate.id))?.governance.verification, 'candidate');
+  assert.equal((await tx.get('memories', candidate.id))?.governance.version, undefined);
+  await assert.rejects(() => relateMemory(tx, candidate.id, { relation: 'conflicts', other_id: candidate.id, operation_key: 'self' }), (error: unknown) => error instanceof ApiError && error.status === 422 && error.code === 'invalid_memory_relation');
+  const other = await tx.put('memories', { title: '其他', content: '乙', status: 'verified', governance: { verification: 'verified' } }, randomUUID());
+  const third = await tx.put('memories', { title: '第三', content: '丙', status: 'verified', governance: { verification: 'verified' } }, randomUUID());
+  const once = await relateMemory(tx, candidate.id, { relation: 'conflicts', other_id: other.id, operation_key: 'conflict-once' });
+  const twice = await relateMemory(tx, candidate.id, { relation: 'conflicts', other_id: third.id, operation_key: 'conflict-once' });
+  assert.deepEqual(once.governance.conflicts_with, [other.id]);
+  assert.deepEqual(twice.governance.conflicts_with, once.governance.conflicts_with);
+  assert.equal(twice.governance.version, 1);
+  const added = await relateMemory(tx, candidate.id, { relation: 'conflicts', other_id: third.id, operation_key: 'conflict-two' });
+  assert.deepEqual(added.governance.conflicts_with, [other.id, third.id]);
+  assert.equal(added.governance.version, 2);
+  assert.deepEqual(mergeConflictIds(['left'], 'right'), ['left', 'right']);
+  assert.deepEqual(mergeConflictIds(['left', 'right'], 'right'), ['left', 'right']);
+  assert.deepEqual(mergeConflictIds(undefined, 'right'), ['right']);
+});
+
+test('supersede locks both rows in id order and writes both sides once', async () => {
+  const tx = localTx();
+  const locks: string[] = [];
+  const get = tx.get;
+  tx.get = async (name: string, id: string, lock = false) => { if (lock) locks.push(id); return get(name, id, lock); };
+  const kept = await tx.put('memories', { title: '旧事实', content: '原始公司内容', status: 'verified', governance: { verification: 'verified' } }, randomUUID());
+  const newer = await tx.put('memories', { title: '新观察', content: '候选', status: 'verified', governance: { verification: 'verified' } }, randomUUID());
+  const saved = await relateMemory(tx, newer.id, { relation: 'supersedes', other_id: kept.id, operation_key: 'super-1' });
+  assert.deepEqual(locks, [kept.id, newer.id].sort());
+  assert.equal(saved.governance.supersedes, kept.id);
+  assert.equal(saved.governance.verification, 'verified');
+  assert.equal(saved.governance.version, 1);
+  const other = await tx.get('memories', kept.id);
+  assert.equal(other?.governance.superseded_by, newer.id);
+  assert.equal(other?.governance.verification, 'superseded');
+  assert.equal(other?.content, '原始公司内容');
+  assert.equal(other?.governance.version, 1);
+  const replay = await relateMemory(tx, newer.id, { relation: 'supersedes', other_id: kept.id, operation_key: 'super-1' });
+  assert.equal(replay.governance.version, 1);
+  assert.equal((await tx.get('memories', kept.id))?.governance.version, 1);
+  await assert.rejects(() => relateMemory(tx, newer.id, { relation: 'supersedes', other_id: randomUUID(), operation_key: 'super-missing' }), (error: unknown) => error instanceof ApiError && error.status === 404 && error.code === 'not_found');
 });
 
 test('publishing a candidate keeps the inference claim and evidence chain', async () => {

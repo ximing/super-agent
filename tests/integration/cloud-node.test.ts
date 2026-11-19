@@ -38,10 +38,30 @@ function fetchThroughInject(app: ControlApp, log: RequestLog[], replay: { comman
     log.push({ path: url.pathname, body });
     const headers: Record<string, string> = {};
     new Headers(init.headers).forEach((value, key) => { headers[key] = value; });
-    const response = await app.inject({ method: (init.method ?? 'GET') as never, url: `${url.pathname}${url.search}`, headers, ...(init.body === undefined ? {} : { payload: String(init.body) }) });
+    // The node client aborts at 20s. Honor that signal, and also stop waiting if the
+    // shared test database does not answer. A lock wait must not pin the suite until
+    // the test timeout; inject itself cannot be cancelled once PostgreSQL is blocked.
+    const cap = AbortSignal.timeout(8_000);
+    const signal = init.signal ? AbortSignal.any([init.signal, cap]) : cap;
+    if (signal.aborted) throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    const injected = app.inject({ method: (init.method ?? 'GET') as never, url: `${url.pathname}${url.search}`, headers, ...(init.body === undefined ? {} : { payload: String(init.body) }) });
+    const response = await new Promise<Awaited<ReturnType<ControlApp['inject']>>>((resolve, reject) => {
+      const onAbort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      signal.addEventListener('abort', onAbort, { once: true });
+      injected.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
     if (url.pathname === '/v1/node/commands' && response.statusCode === 200 && replay.commands) return Response.json({ items: [...response.json<{ items: WireMessage[] }>().items, ...replay.commands] });
     return new Response(response.statusCode === 204 ? null : response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
   }) as typeof fetch;
+}
+
+async function waitFor(label: string, ready: () => boolean | Promise<boolean>, timeoutMs = 15_000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await ready()) return;
+    await sleep(50);
+  }
+  throw new Error(`${label} was not observed within ${timeoutMs}ms`);
 }
 
 async function client<T>(app: ControlApp, token: string | undefined, path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}): Promise<T> {
@@ -268,8 +288,8 @@ test('cloud view/control: pause before takeover, natural-pixel input, stale fram
     }) });
     const task = await client<Task>(app, owner.access_token, '/tasks','POST',{goal:'Wait at controlled browser fixture',engine:'codex',device_id:paired.config.device_id});
     await app.control.service.dispatchTenant(owner.user.tenant_id); await agent.tick();
-    for(let i=0;i<20&&!calls.some(c=>c.action==='navigate');i++) await sleep(10);
-    assert.ok(calls.some(c=>c.action==='navigate'));
+    // Navigate follows a memory lookup. Poll the browser command instead of a 200ms window.
+    await waitFor('browser navigate', () => calls.some(c => c.action === 'navigate'));
     const running = await client<Task>(app,owner.access_token,`/tasks/${task.id}`), runId = running.current_run_id!;
     const view = await client<{id:string}>(app,owner.access_token,`/runs/${runId}/views`,'POST',{});
     await agent.tick();
@@ -279,8 +299,8 @@ test('cloud view/control: pause before takeover, natural-pixel input, stale fram
     assert.equal(takeover.status,'pausing');
     const tooEarly = await app.inject({method:'POST',url:`/v1/views/${view.id}/inputs`,headers:{authorization:`Bearer ${owner.access_token}`},payload:{...firstFrame,type:'click',x:600,y:400}});
     assert.equal(tooEarly.statusCode,409);
-    for(let i=0;i<20;i++){await sleep(10);await agent.tick();if((await client<Task>(app,owner.access_token,`/tasks/${task.id}`)).status==='paused')break;}
-    assert.equal(interrupted,true); assert.equal((await client<Task>(app,owner.access_token,`/tasks/${task.id}`)).status,'paused');
+    await waitFor('worker pause after takeover', async () => { await agent!.tick(); return (await client<Task>(app, owner.access_token, `/tasks/${task.id}`)).status === 'paused'; });
+    assert.equal(interrupted, true);
     await agent.tick();
     const frame = await client<{frame_id:string;viewport_version:string}>(app,owner.access_token,`/runs/${runId}/frame`);
     await client(app,owner.access_token,`/views/${view.id}/inputs`,'POST',{...frame,type:'click',x:600,y:400});
