@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalStore } from '../src/store.js';
 import { ticksToUsd } from '../src/agent.js';
-import type { WireMessage } from '@super-agent/protocol';
+import type { WireMessage, ToolStepUpdate } from '@super-agent/protocol';
 
 test('durable command dedupe, conflicting replay rejection and producer continuation after restart', () => {
   const dir = mkdtempSync(join(tmpdir(), 'super-agent-store-'));
@@ -41,4 +41,26 @@ test('usage revisions update one request and atomically retain unacknowledged re
 test('Grok decimal ticks preserve precision and distinguish free from unavailable', () => {
   assert.equal(ticksToUsd('38000000'), '0.0038'); assert.equal(ticksToUsd('0'), '0');
   assert.equal(ticksToUsd('10000000001'), '1.0000000001'); assert.throws(() => ticksToUsd('-1'));
+});
+
+test('tool lifecycle survives restart, dedupes reporting and never reuses a terminal step', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'super-agent-step-'));
+  let store = new LocalStore(join(dir, 'node.sqlite'));
+  const step: ToolStepUpdate = { step_id: 'step-one', tool: 'browser_click', status: 'running', started_at: '2026-11-19T00:00:00Z', completed_at: null, error_code: null };
+  const authorization = { device_id: 'device-one', lease_epoch: '1' };
+  try {
+    const first = store.recordStep('run-one', step, authorization)!;
+    assert.equal(store.recordStep('run-one', step, authorization), null);
+    store.close(); store = new LocalStore(join(dir, 'node.sqlite'));
+    assert.deepEqual(store.unfinishedSteps('run-one'), [step]);
+    const unknown: ToolStepUpdate = { ...step, status: 'result_unknown', completed_at: '2026-11-19T00:01:00Z', error_code: 'result_unknown' };
+    const second = store.recordStep('run-one', unknown, authorization)!;
+    assert.equal(second.payload.producer_id, first.payload.producer_id);
+    assert.equal(second.payload.producer_seq, '2');
+    assert.equal(store.unfinishedSteps('run-one').length, 0);
+    assert.equal(store.recordStep('run-one', unknown, authorization), null);
+    assert.throws(() => store.recordStep('run-two', unknown, authorization), /run_conflict/);
+    assert.throws(() => store.recordStep('run-one', { ...unknown, status: 'succeeded' }, authorization), /already_completed/);
+    assert.equal(store.pendingReports().length, 2);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });

@@ -32,6 +32,8 @@ public struct ExecutionSettings: Codable, Sendable {
 public struct AgentTask: Codable, Identifiable, Sendable {
     public let id: String; public let title: String; public let goal: String; public let status: String
     public let reasonCode: String?; public let engine: Engine; public let modelId: String?; public let deviceId: String?
+    public let parentTaskId: String?; public let rootTaskId: String?; public let planId: String?
+    public let dependsOnTaskIds: [String]?; public let deliverables: [String]?; public let deliveryStatus: String?
     public let deviceName: String?; public let currentRunId: String?; public let createdAt: String; public let updatedAt: String; public let version: Int
 }
 public struct Run: Codable, Identifiable, Sendable {
@@ -90,6 +92,6 @@ public enum JSONValue: Codable, Sendable, Equatable {
 }
 public enum AgentStatus {
     public static func title(_ value: String) -> String {
-        ["queued":"排队中", "running":"正在执行", "waiting_input":"待你回答", "waiting_device":"等待电脑", "awaiting_approval":"待你确认", "pausing":"正在暂停", "paused":"已暂停", "switching":"正在切换", "awaiting_review":"待验收", "succeeded":"已完成", "failed":"失败", "cancelled":"已取消", "online":"在线", "offline":"离线", "busy":"忙碌", "result_unknown":"结果待核对", "starting":"正在启动", "dispatched":"已派发", "lost":"失联待核对", "stopping":"正在停止", "verified":"已验证", "candidate":"待验证", "stale":"待复核"][value] ?? value
+        ["blocked":"等待前置任务", "queued":"排队中", "running":"正在执行", "waiting_input":"待你回答", "waiting_device":"等待电脑", "awaiting_approval":"待你确认", "pausing":"正在暂停", "paused":"已暂停", "switching":"正在切换", "awaiting_review":"待验收", "succeeded":"已完成", "failed":"失败", "cancelled":"已取消", "online":"在线", "offline":"离线", "busy":"忙碌", "result_unknown":"结果待核对", "starting":"正在启动", "dispatched":"已派发", "lost":"失联待核对", "stopping":"正在停止", "verified":"已验证", "candidate":"待验证", "stale":"待复核"][value] ?? value
     }
 }

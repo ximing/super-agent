@@ -80,3 +80,57 @@ test('Retina frame coordinates map natural image pixels to CSS viewport and reje
     await assert.rejects(browser.input('run1', { frame_id: latest.frame_id, viewport_version: latest.viewport_version, type: 'click', x: 100, y: 100 }), /stale_viewport/);
   } finally { await browser.release('run1'); await rm(dir, { recursive: true, force: true }); }
 });
+
+test('step lifecycle is stable and redacted for success, invalid input, cancellation and unknown side effects', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'super-agent-steps-'));
+  const steps: import('@super-agent/protocol').ToolStepUpdate[] = [];
+  const options = { runId: 'r1', cwd: dir, browser: new BrowserActor('http://127.0.0.1:10088', (async () => { throw Error('SECRET_URL_AND_BODY'); }) as typeof fetch), request: async <T>() => ({} as T), assertActive: () => {}, ask: async () => '', signal: new AbortController().signal, onStep: (step: import('@super-agent/protocol').ToolStepUpdate) => { steps.push(step); } };
+  const broker = new ToolBroker(options);
+  try {
+    await broker.execute('files_write', { path: 'fixture', content: 'SECRET_CONTENT' });
+    assert.deepEqual(steps.map(s => s.status), ['running', 'succeeded']);
+    assert.equal(steps[0]!.step_id, steps[1]!.step_id);
+    assert.match(steps[0]!.step_id, /^[0-9a-f-]{36}$/);
+    await assert.rejects(broker.execute('browser_click', { selector: 123 }));
+    assert.equal(steps.at(-1)!.error_code, 'invalid_arguments');
+    await assert.rejects(broker.execute('browser_click', { selector: '@e1' }));
+    assert.equal(steps.at(-1)!.status, 'result_unknown');
+    assert.equal(steps.at(-1)!.error_code, 'result_unknown');
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(new ToolBroker({ ...options, signal: controller.signal }).execute('files_read', { path: 'fixture' }), { name: 'AbortError' });
+    assert.equal(steps.at(-1)!.status, 'cancelled');
+    assert.equal(JSON.stringify(steps).includes('SECRET'), false);
+    assert.deepEqual(Object.keys(steps[0]!).sort(), ['completed_at', 'error_code', 'started_at', 'status', 'step_id', 'tool']);
+    const bridge = await startToolBridge(broker);
+    try {
+      const res = await fetch(`${bridge.url}/call`, { method: 'POST', headers: { authorization: `Bearer ${bridge.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'files_read', arguments: { path: 'fixture' } }) });
+      assert.equal(res.status, 200);
+      assert.deepEqual(steps.slice(-2).map(s => [s.tool, s.status]), [['files_read', 'running'], ['files_read', 'succeeded']]);
+    } finally { await bridge.close(); }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('runtime bridge restricts tool discovery and execution to the context allowlist', async () => {
+  const { startRuntimeToolBridge } = await import('../src/index.js');
+  const calls: string[] = [];
+  const bridge = await startRuntimeToolBridge({ tools: [{ name: 'files_read', description: 'read', parameters: {} }], signal: new AbortController().signal, executeTool: async name => { calls.push(name); return { ok: true }; } });
+  const headers = { authorization: `Bearer ${bridge.token}`, 'content-type': 'application/json' };
+  try {
+    assert.deepEqual((await (await fetch(`${bridge.url}/tools`, { headers })).json() as { name: string }[]).map(t => t.name), ['files_read']);
+    assert.equal((await fetch(`${bridge.url}/call`, { method: 'POST', headers, body: JSON.stringify({ name: 'shell_run', arguments: {} }) })).status, 400);
+    assert.deepEqual(calls, []);
+    assert.equal((await fetch(`${bridge.url}/call`, { method: 'POST', headers, body: JSON.stringify({ name: 'files_read', arguments: {} }) })).status, 200);
+    assert.deepEqual(calls, ['files_read']);
+  } finally { await bridge.close(); }
+});
+
+test('disabled browser is absent from discovery and rejects even forged direct calls while files remain usable', async () => {
+ const dir = await mkdtemp(join(tmpdir(), 'super-agent-no-browser-'));
+ const broker = new ToolBroker({ runId: 'r', cwd: dir, browser: new BrowserActor(), allowBrowser: false, request: async <T>() => ({} as T), assertActive: () => {}, ask: async () => '', signal: new AbortController().signal });
+ try {
+  assert.equal(broker.definitions().some(t => t.name.startsWith('browser_')), false);
+  await assert.rejects(broker.execute('browser_click', { selector: '@e1' }), /browser_capability_unavailable/);
+  await broker.execute('files_write', { path: 'works', content: 'yes' });
+  assert.deepEqual(await broker.execute('files_read', { path: 'works' }), { content: 'yes' });
+ } finally { await rm(dir, { recursive: true, force: true }); }
+});

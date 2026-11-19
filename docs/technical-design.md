@@ -1,10 +1,12 @@
-# 技术设计 v0.1
+# 技术设计与实现边界
 
-日期：2026-11-18。依据：[PRD](../tasks/prd-personal-super-agent.md)。接口详见[协议](protocol-v1.md)，开发顺序详见[实施计划](implementation-plan.md)。
+设计初稿：2026-11-18；实现同步：2026-11-19。依据：[PRD](../tasks/prd-personal-super-agent.md)。接口详见[协议](protocol-v1.md)，开发顺序详见[实施计划](implementation-plan.md)。
 
 ## 1. 关键决策
 
-实施更新（2026-11-18）：服务端实际路径为 `apps/control-server`，所有基础设施只在云端；记忆后端优先复用 `agent-recall`，每用户独立绑定，不另建向量服务。先前 embedding 自建选项仅为历史候选，不作为本轮实施依赖。当前资源和验证见 [实施状态](implementation-status.md)。
+本批次受管 Task DAG、独立交付验收、不可变证据快照、Coordinator 事件和通知投递已实现并通过云 TEST，尚未生产部署。当前可联调接口以[实现契约](implementation-contract.md)为准；[团队与交付](team-and-delivery.md)、[通知](notification-delivery.md)细化已落地边界。其余前瞻设计不自动视为实现。
+
+实施更新（2026-11-19）：服务端实际路径为 `apps/control-server`，所有基础设施只在云端；记忆后端优先复用 `agent-recall`，每用户独立绑定，不另建向量服务。先前 embedding 自建选项仅为历史候选，不作为本轮实施依赖。当前资源和验证见 [实施状态](implementation-status.md)。
 
 | 编号 | 决策 | 原因与代价 |
 | --- | --- | --- |
@@ -23,21 +25,21 @@
 
 ```mermaid
 flowchart TB
-    UI[Swift Mac / React Native Android] <-->|HTTPS / WSS| API[API / Gateway]
-    API <--> DB[(PostgreSQL / pgvector)]
+    UI[Swift Mac / React Native Android] <-->|HTTPS REST 补读| API[API / Gateway]
+    API <--> DB[(PostgreSQL)]
     API <--> OBJ[私有对象存储]
     JOB[Scheduler / Outbox / Notifications / Cost] <--> DB
     API <--> JOB
-    A[用户 A 主助理 Mac] <-->|出站 WSS| API
-    B[用户 A 执行 Mac] <-->|出站 WSS| API
-    C[用户 B 自有 Mac] <-->|出站 WSS| API
+    A[用户 A 主助理 Mac] <-->|出站 HTTPS| API
+    B[用户 A 执行 Mac] <-->|出站 HTTPS| API
+    C[用户 B 自有 Mac] <-->|出站 HTTPS| API
     A --> MODEL[供应商服务]
     B --> MODEL
     C --> MODEL
     A <--> MEM[云端 Memory API]
     B <--> MEM
     C <--> MEM
-    MEM <--> DB
+    MEM <--> RECALL[每用户独立 Agent Recall 绑定]
 ```
 
 Memory API 是同一服务的逻辑模块，不要求额外部署。API/Gateway 无任何 Codex/Grok 推理客户端和模型凭据表。供应商连接只出现在 Mac Runtime。对象、对话、被检索知识和画面仍进入受信任服务器，不宣称端到端保密。
@@ -78,8 +80,7 @@ Memory API 是同一服务的逻辑模块，不要求额外部署。API/Gateway 
 建议 monorepo：
 
 ```text
-apps/server/             Fastify API/Gateway、服务模块
-apps/jobs/               调度、outbox、通知、聚合，复用 server domain
+apps/control-server/     Fastify API、持久调度、通知及组件内 migrations/test
 apps/node/               Mac 节点、运行时与本地工具
 apps/macos/              SwiftUI，必要处 AppKit；独立 Xcode 工程
 apps/android/            React Native + TypeScript；必要处 Kotlin
@@ -88,18 +89,17 @@ packages/domain/         不依赖 UI/供应商的状态与授权类型
 packages/runtime-codex/  原生协议适配，不向客户端泄漏原始协议
 packages/runtime-grok/   本地模型请求循环
 packages/tool-broker/    工具契约、权限、租约、执行记录
-db/migrations/           PostgreSQL DDL、RLS、索引与回滚策略
 infra/                   镜像、反向代理、备份与部署配置
 docs/                    当前设计和协议
 ```
 
-这只是计划目录，本轮不创建业务代码骨架。原生 Swift 与 TypeScript 不共享 UI 实现，通过 schema 和兼容测试共享语义。Fastify 请求/响应 schema 来自可信仓库；模型生成的工具参数只当数据验证，不允许作为动态编译 schema。[Fastify 验证文档](https://github.com/fastify/fastify/blob/main/docs/Reference/Validation-and-Serialization.md)
+以上以实际组件路径为准；packages/domain、独立Job进程等仍是可选拆分目标，未独立落地。保留 apps/server 与 db 中先前未知编辑，不将其作为当前服务。原生 Swift 与 TypeScript 不共享 UI 实现，通过 schema 和兼容测试共享语义。Fastify 请求/响应 schema 来自可信仓库；模型生成的工具参数只当数据验证，不允许作为动态编译 schema。[Fastify 验证文档](https://github.com/fastify/fastify/blob/main/docs/Reference/Validation-and-Serialization.md)
 
 ## 4. 身份、配对与用户隔离
 
 ### 4.1 客户端登录
 
-建议采用外置 OIDC 身份服务，已有公司/个人 IdP 可复用，没有则部署专用服务；实施 P1 前选定提供方，不在业务服务自行实现密码与 MFA。
+已采用云端 Keycloak OIDC，原生 public client 使用 PKCE；业务服务不自行实现密码与 MFA。上游必须包含稳定 sub、正确 issuer 和 API audience。
 
 Mac、Android 走系统浏览器的 Authorization Code + PKCE，验证 state/nonce 与回调绑定。禁止在嵌入式登录 WebView 中截取账号密码。[原生应用 OAuth 指南](https://www.rfc-editor.org/rfc/rfc8252)
 
@@ -197,7 +197,10 @@ sequenceDiagram
     U->>S: 发消息（幂等 ID，设备/引擎选择）
     S-->>U: 已持久化
     S->>A: 有新消息（持久 inbox）
-    A->>S: 创建目标/任务与明确授权来源
+    A->>S: propose 目标/交付标准/依赖图
+    S-->>U: 待确认计划
+    U->>S: 真实后续消息确认
+    S->>S: 原子创建任务与依赖
     S->>S: 校验租户、范围、设备能力、额度与资源
     S->>W: run.start（有期限的命令与 Run 授权）
     W->>W: 持久化命令、检查环境、接受
@@ -205,8 +208,11 @@ sequenceDiagram
     W->>W: 本地模型与工具循环
     W-->>S: 进度、回执、用量、检查点
     S-->>U: 事件 / 待处理问题 / 结果
-    S->>A: Worker 完成事件
-    A->>S: 统一汇报与学习候选
+    S->>A: 持久 delivery.submitted 事件
+    A->>S: fresh 只读 reviewer 读取冻结证据
+    A->>S: reviews accept/reject/needs_input
+    S->>S: accept 后释放依赖
+    A->>S: 幂等汇总与事件消费
 ```
 
 明确交办的授权来源关联原始用户消息。主助理的任务创建调用不能伪造用户确认；扩权必须引用服务器记录的有效确认或周期规则。产品验证目标与实际交付，模型回合结束不直接设置 Task 为完成。
@@ -282,7 +288,7 @@ Runtime Host 负责 initialize/initialized、thread/start 或 resume、turn/star
 
 产品层受管子 Worker 承担跨引擎/跨设备拆解；默认继承根任务范围与预算，不得扩权。原生 Subagent 作为适配器内优化，需可追踪父子、计量与停止；无法可靠管控时不用于持有浏览器等共享写资源。
 
-每 Run 固定 `root_run_id`、`parent_run_id`、`role`。限制总深度、并发与总 Run 数，建议初值深度 2、每任务并发 3、每设备浏览器 1；这些是调度配置，不宣称供应商限制。父任务取消或切换协调全部受管后代，不只停止最上层模型流。
+当前落地的是 Task 的 plan_id/parent_task_id/root_task_id 及独立依赖边，每计划最多20项；父树与依赖DAG分别验证环。依赖仅在交付accepted后释放，取消传播到子树和依赖后继。Worker完成先awaiting_review，Coordinator通过独立只读工具核对，无法验证转人工。原生Run/Agent树、统一深度/总Run预算和更细并发配额仍是后续目标，不把Task归属当作原生供应商子Agent管理。
 
 ### 7.4 引擎/设备切换
 
@@ -353,7 +359,7 @@ Grok 本地循环能在下一次模型请求前检查 grant 与已知用量，�
 
 ## 11. 主动任务与通知
 
-本轮实现范围：定时关注采用 `remind_and_confirm`，支持用户创建、启停、删除与按间隔触发；触发送入主助理，生成目标/产出/执行位置摘要，用户确认后才执行。自动写入业务网站、复杂静默窗口和厂商后台推送不因存在规则而默认启用；以下描述为后续完整能力目标。
+本轮实现范围：定时关注采用 `remind_and_confirm`，支持用户创建、启停、删除与按间隔触发；触发送入主助理，生成目标/产出/执行位置摘要，用户确认后才执行。自动写入业务网站不因存在规则而默认授权。通知outbox、APNs/Expo、静默/DST和注销隔离本批已落地，真实凭据/签名/设备送达未验收；见[通知方案](notification-delivery.md)。以下完整主动规则字段与事件观察仍为后续目标。
 
 规则版本包含观察范围、行动权限、频率、时区、静默时段、成本上限和有效期。服务器只做确定性时间/来源过滤与触发去重，语义判断送主助理 Mac；不对每条环境事件都调用模型。
 
@@ -394,7 +400,7 @@ Grok 本地循环能在下一次模型请求前检查 grant 与已知用量，�
 | Codex 工具/子 Agent | 配置可见性、取消传播、使用统计口径 | 目标版本可观测并可停止；否则关闭受影响优化 |
 | Grok 本机配置 | Key 获取位置、模型、图片/工具能力 | 明确本机配置契约、最小闭环与费用样本 |
 | CSI 接管 | 当前 session/focus、验证码、iframe、系统弹窗 | 在真实目标网站通过三类工作样本；明确不可操作部分 |
-| OIDC | 尚无指定服务 | 选定 IdP，真机 PKCE/退出/刷新/撤销通过 |
+| OIDC | 已选 Keycloak并验证公网PKCE/会话交换；Mac原系统登录窗口仍有交接问题、备用浏览器路径成功 | 目标平台登录/刷新/退出/撤销与弱网可靠性验收 |
 | 推送 | 手机厂商、国内网络、APNs 签名 | 目标手机杀进程/弱网与 Mac 关闭窗口后通知通过 |
 | embedding | 模型、部署位置、数据许可 | 独立批准并锁定 generation；未满足时明确使用关键词检索 |
 | 实际业务 | 三个首发场景尚未提供 | 给出样本、成功判据、允许行动和异常回执 |

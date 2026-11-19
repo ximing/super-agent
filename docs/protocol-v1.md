@@ -1,6 +1,6 @@
 # 接口与事件协议 v1 草案
 
-状态：设计契约，2026-11-18。配套：[技术设计](technical-design.md)、[JSON Schema](contracts/README.md)。URL 均相对于本产品控制服务；示例标识为虚构值，不代表已部署接口。
+状态：完整设计目录，2026-11-19更新。已实现接口以[实现集成契约](implementation-contract.md)为准；表中未来目标（WSS、逐轮budget grant等）不等于已实现。新增[团队与交付](team-and-delivery.md)、[通知](notification-delivery.md)明确当前实现边界。配套：[技术设计](technical-design.md)、[JSON Schema](contracts/README.md)。URL 均相对于本产品控制服务；示例标识为虚构值，不代表已部署接口。
 
 ## 1. 通用约定
 
@@ -232,7 +232,7 @@ bootstrap 从一致数据库快照取得活跃对象摘要与 cursor；随后补
 
 ### 6.1 Task 是用户工作，Run 是一次执行
 
-Task 状态：`queued/running/waiting_input/waiting_device/awaiting_approval/pausing/paused/switching/awaiting_review/succeeded/failed/cancelled`，等待的具体原因用 `reason_code`，未执行的输入草稿留在对话或任务草稿，不伪造 Run。
+Task 状态：`queued/blocked/running/waiting_input/waiting_device/awaiting_approval/pausing/paused/switching/awaiting_review/succeeded/failed/cancelled`，等待的具体原因用 `reason_code`，未执行的输入草稿留在对话或任务草稿，不伪造 Run。
 
 Run 状态：`created/dispatched/starting/running/waiting_input/stopping/paused/succeeded/failed/cancelled/lost/result_unknown`。created/dispatched/lost 由服务端调度或恢复逻辑控制；节点只报告获准的事实状态，不能自行给别人的 Run 派发权限。
 
@@ -248,7 +248,7 @@ stateDiagram-v2
     waiting_input --> stopping
     stopping --> paused: 已静止且结果明确
     stopping --> result_unknown: 在途动作无法核实
-    running --> succeeded: 交付核验
+    running --> succeeded: 执行循环结束，Task仍待验收
     running --> failed
     starting --> failed
     dispatched --> lost: 命令过期且未接受
@@ -258,7 +258,7 @@ stateDiagram-v2
 
 这是主要迁移图；状态迁移表在实现中显式维护，不能以任意 PATCH 修改状态。paused 后继续可以同设备恢复原生 thread，但建立新的 Run；succeeded/failed/cancelled 终态不可逆。lost/result_unknown 是待核对状态，可通过 reconcile 取得事实终态，不能按普通失败立即重跑副作用。
 
-Task 只有在该版本目标的交付核验通过后进入 succeeded；需要人验收的进入 awaiting_review。任务失败可由新 Run 重试，旧 Run 终态不回退。
+所有新交付在 Run succeeded 后先进入 Task awaiting_review；独立 Coordinator 或用户逐项核验通过才使 Task succeeded/accepted 并放行依赖。任务失败可由新 Run 重试，旧 Run 终态不回退。
 
 ### 6.2 命令派发与过期
 
@@ -271,6 +271,8 @@ run.start 建议 60 秒有效期、5 秒 ACK 超时，有限退避重投同命�
 ### 6.3 检查点契约
 
 至少包含 checkpoint_schema_version、task/scope version、source run/engine/device、用户原始目标与补充引用、已完成步骤和确定回执、进行中工具与结果确定性、文件引用及可迁移性、记忆 ID/version、未解决问题、下一步、environment requirements、创建时间与 hash。
+
+当前写入需有效Run ticket/epoch/lease及active/stopping阶段；首个completed内容hash冻结，合法同内容重放只返回原ID。交付evidence/result/dependencies固定delivery.checkpoint_id和artifact_ids，新产物经条件复制至不对客户端签PUT的final key；详见[冻结证据](team-and-delivery.md)。
 
 检查点不含模型认证、Cookie、Keychain 或隐藏推理。服务器校验所有引用属于同租户且未越出 scope；目标电脑读取 artifact 需重新鉴权。缺少必要本地文件/登录态时停止在 waiting_input/device reason，不假装原环境已复制。
 

@@ -1,5 +1,6 @@
 import SwiftUI
 import Charts
+import UniformTypeIdentifiers
 import SuperAgentCore
 
 struct DevicesView: View {
@@ -59,12 +60,15 @@ struct MemoriesView: View {
     @State private var deleting: Memory?
     @State private var recallURL = ""
     @State private var recallToken = ""
+    @State private var importingConnection = false
+    @State private var importMessage: String?
     var filtered: [Memory] { model.memories.filter { search.isEmpty || ($0.title + $0.content).localizedCaseInsensitiveContains(search) } }
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack { Text("自己的记忆库").font(.headline); Spacer(); Label(model.memorySettings?.configured == true ? "已连接" : "尚未连接", systemImage: model.memorySettings?.configured == true ? "checkmark.circle" : "link").font(.caption).foregroundStyle(.secondary) }
                 HStack { TextField("agent-recall 服务 HTTPS 地址", text: $recallURL).textFieldStyle(.roundedBorder); SecureField("你的访问令牌", text: $recallToken).textFieldStyle(.roundedBorder); Button(model.memorySettings?.configured == true ? "更新连接" : "连接记忆库") { Task { await model.connectMemory(url: recallURL, token: recallToken); if model.error == nil { recallToken = "" } } }.disabled(recallURL.isEmpty || recallToken.isEmpty || model.busy) }
+                HStack { Button("从配置文件导入", systemImage: "square.and.arrow.down") { importingConnection = true }.disabled(model.busy); if let importMessage { Text(importMessage).font(.caption).foregroundStyle(.secondary) } }
                 Text("使用你自己的 agent-recall 账号。访问令牌不会回显，其他用户无法访问这份记忆。").font(.caption).foregroundStyle(.secondary)
             }.padding(24).background(.background)
             Divider()
@@ -74,6 +78,22 @@ struct MemoriesView: View {
                 ForEach(filtered) { memory in VStack(alignment: .leading, spacing: 10) { HStack { Text(memory.title).font(.headline); StatusLabel(value: memory.status); Spacer(); Text("v\(memory.version)").font(.caption).foregroundStyle(.secondary); Button(memory.status == "candidate" ? "审核发布" : "编辑") { editing = memory }; Button { deleting = memory } label: { Image(systemName: "trash") }.buttonStyle(.plain).foregroundStyle(.secondary) }; Text(memory.content).font(.body).lineSpacing(4).textSelection(.enabled); HStack { Text(memoryTypeTitle(memory.type)); if let site = memory.site { Text(site) }; Spacer(); Text(formatTime(memory.updatedAt)) }.font(.caption).foregroundStyle(.secondary) }.padding(20).background(.background, in: RoundedRectangle(cornerRadius: 12)).overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary)) }
             }.padding(.horizontal, 24).padding(.bottom, 24) }
         }.onAppear { recallURL = model.memorySettings?.url ?? "" }.onChange(of: model.memorySettings?.url) { _, value in recallURL = value ?? "" }.sheet(isPresented: $adding) { MemoryEditor(memory: nil) }.sheet(item: $editing) { MemoryEditor(memory: $0) }
+        .fileImporter(isPresented: $importingConnection, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let files):
+                guard let file = files.first else { return }
+                let scoped = file.startAccessingSecurityScopedResource(); defer { if scoped { file.stopAccessingSecurityScopedResource() } }
+                do {
+                    let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
+                    let data = try handle.read(upToCount: RecallConnectionImport.maximumBytes + 1) ?? Data()
+                    let value = try RecallConnectionImport.decode(data)
+                    recallURL = value.url; recallToken = value.token
+                    importMessage = "已读取配置；请核对地址后手动点击连接按钮。"
+                } catch { importMessage = "无法导入配置，请选择不超过 32 KiB 且包含有效 HTTPS 地址和令牌的 JSON 文件。" }
+            case .failure(let failure):
+                if (failure as NSError).code != NSUserCancelledError { importMessage = "无法读取所选配置文件，请重新选择。" }
+            }
+        }
         .confirmationDialog("删除这条记忆？新任务将不再检索它。", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) { Button("删除记忆", role: .destructive) { if let value = deleting { Task { await model.deleteMemory(value) } }; deleting = nil } }
     }
 }

@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   }
   if (command === 'start') {
     const config = await loadConfig(configPath);
-    await ensureCsiStarted(config.fake_runtime, { log: message => process.stderr.write(`${message}\n`) });
+    await ensureCsiStarted(config.fake_runtime || config.browser?.enabled === false, { log: message => process.stderr.write(`${message}\n`) });
     const agent = new NodeAgent(config);
     let stopping = false;
     const stop = () => { if (!stopping) { stopping = true; void agent.stop(); } };

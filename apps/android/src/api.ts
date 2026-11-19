@@ -1,4 +1,4 @@
-import type { AuthConfig, Session } from './types';
+import type { AuthConfig, Device, List, Session } from './types';
 
 export interface SessionStore { read(origin: string): Promise<Session | null>; write(origin: string, session: Session): Promise<void>; remove(origin: string): Promise<void> }
 export class APIError extends Error { constructor(public readonly status: number, public readonly code: string, message: string) { super(message); this.name = 'APIError'; } }
@@ -20,6 +20,13 @@ export class APIClient {
   async authConfig(): Promise<AuthConfig> { return this.request('/auth/config', {authenticated: false}); }
   async loginDevelopment(email: string, name: string) { const session = await this.request<Session>('/auth/dev', {method: 'POST', body: {email, name}, authenticated: false}); await this.setSession(session); return session; }
   async exchange(accessToken: string) { const session = await this.request<Session>('/auth/exchange', {method: 'POST', body: {access_token: accessToken}, authenticated: false}); await this.setSession(session); return session; }
+  async revokeDevice(id: string): Promise<void> {
+    const devices = await this.request<List<Device>>('/devices');
+    const device = devices.items.find(item => item.id === id);
+    if (!device) throw new APIError(404, 'device_not_found', '电脑记录已变化，请刷新后重试');
+    if (device.revoked) return;
+    await this.request(`/devices/${encodeURIComponent(id)}`, {method: 'DELETE', version: device.version});
+  }
   async request<T>(path: string, options: {method?: string; body?: unknown; version?: number; authenticated?: boolean; idempotencyKey?: string} = {}): Promise<T> {
     const method = options.method ?? 'GET';
     const key = options.idempotencyKey ?? (method === 'POST' ? this.randomId() : undefined);

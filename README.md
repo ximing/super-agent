@@ -2,7 +2,9 @@
 
 多用户私人助理工作台。Swift Mac 与 React Native Android 控制端通过云端服务派活，用户自己的 Mac 执行 Codex/Grok、操作浏览器并按需使用云端记忆。
 
-已发布 [0.1.0 预览安装包](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1)，Mac Apple Silicon 与独立 Android APK 可下载；[主分支云端检查](https://github.com/ximing/super-agent/actions/runs/44344213897)全部通过。API 已部署到 `https://super-agent.aimo.plus`。
+已发布 [Mac v0.1.1-preview.2](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.2) 与 [Android v0.1.0-preview.1](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1)。API 已部署到 `https://super-agent.aimo.plus`。
+
+当前新增团队依赖调度、独立交付验收、不可变产物快照、工具步骤和通知队列已实现，服务端云 TEST **40/40**、跨组件云测试 **5/5** 通过。本批次尚未部署生产，真实模型业务与通知真机送达仍需验收；详细范围见[实施状态](docs/implementation-status.md)。
 
 ## 运行边界
 
@@ -41,7 +43,7 @@ pnpm --filter @super-agent/android typecheck
 swift test --package-path apps/macos
 ```
 
-服务端集成测试只连接显式提供的云端 `TEST_DATABASE_URL`，迁移使用 `TEST_MIGRATION_DATABASE_URL`；没有测试库时明确 skip，不启动本地数据库。开发身份入口需明确启用且禁止用于生产。配置模板见 `.env.example`，真实 `.env.*` 文件已被 Git 忽略。
+服务端集成测试只连接显式提供的云端 `TEST_DATABASE_URL`，迁移使用 `TEST_MIGRATION_DATABASE_URL`；没有测试库时明确 skip，不启动本地数据库。已配置忽略文件时，可用 `node --env-file=.env.test node_modules/tsx/dist/cli.mjs --test apps/control-server/test/*.test.ts` 显式运行完整云 TEST 套件，勿输出配置内容。迁移由 owner 私有 checksum ledger 管理，已应用 SQL 不可修改；新增结构使用新迁移，应用角色不做 DDL。开发身份入口需明确启用且禁止用于生产。配置模板见 `.env.example`，真实 `.env.*` 文件已被 Git 忽略。
 
 ## 部署
 

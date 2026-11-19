@@ -37,3 +37,16 @@ test('existing CSI executable receives only idempotent start; output and failed 
     assert.equal(await ensureCsiStarted(false,{home,log:message=>messages.push(message)}),'unavailable');assert.equal(messages.length,1);assert.doesNotMatch(messages[0]!,/SENSITIVE/);
   }finally{await rm(home,{recursive:true,force:true});}
 });
+
+test('browser readiness checks only local daemon extension health and fails closed without blocking other work', async () => {
+  const { probeCsiBrowser } = await import('../src/startup.js');
+  const urls: string[] = [];
+  const fetcher = (async (url: string | URL | Request) => { urls.push(String(url)); return Response.json({ extension_connected: true, sessions: ['PRIVATE_USER_TAB'] }); }) as typeof fetch;
+  assert.deepEqual(await probeCsiBrowser({ fetcher }), { ready: true });
+  assert.deepEqual(urls, ['http://127.0.0.1:10088/status']);
+  assert.deepEqual(await probeCsiBrowser({ enabled: false, fetcher }), { ready: false, reason: 'browser_disabled' });
+  assert.deepEqual(urls, ['http://127.0.0.1:10088/status']);
+  assert.deepEqual(await probeCsiBrowser({ fetcher: (async () => Response.json({ extension_connected: false })) as typeof fetch }), { ready: false, reason: 'browser_extension_disconnected' });
+  assert.deepEqual(await probeCsiBrowser({ fetcher: (async () => { throw Error('PRIVATE_NETWORK_DETAIL'); }) as typeof fetch }), { ready: false, reason: 'browser_daemon_unavailable' });
+  assert.deepEqual(await probeCsiBrowser({ endpoint: 'https://external.test', fetcher }), { ready: false, reason: 'browser_invalid_local_endpoint' });
+});

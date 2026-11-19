@@ -23,7 +23,7 @@ OIDC_REDIRECT_URI=superagent://oauth/callback
 
 应通过用户云端 HTTPS 反向代理暴露 API。默认不开开发登录；`ALLOW_DEV_AUTH=true` 仅供专门的开发环境，`NODE_ENV=production` 会拒绝该组合。关闭开发认证后，必须配置 OIDC；没有配置不会降级成免登录。
 
-可选云端 S3 兼容对象存储：`S3_ENDPOINT`（HTTPS）、`S3_BUCKET`、`S3_REGION`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`（也兼容旧短名）。使用 path-style SigV4，不添加默认校验和请求，适配 RustFS。这是云端存储凭据，与用户模型 Key 完全独立。未配置时文件上传/下载明确返回 503。上传签名5分钟有效；finalize 核对对象存在与大小，用户提供的 sha256 标记为 claim，不伪装成已由服务器完整校验。
+可选云端 S3 兼容对象存储：`S3_ENDPOINT`（HTTPS）、`S3_BUCKET`、`S3_REGION`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`（也兼容旧短名）。使用 path-style SigV4，不添加默认校验和请求，适配 RustFS。这是云端存储凭据，与用户模型 Key 完全独立。未配置时文件上传/下载明确返回 503。上传签名5分钟有效且只指向 staging。finalize 在行锁内 HEAD 核对大小/ETag，再用签入签名的源 If-Match 条件复制到随机独立 final key，检查完整 XML（包含 HTTP 200 内嵌错误）与 final HEAD 后发布；对 final 只签 GET，重放 finalize 不再复制。元数据以 integrity=server_snapshot 和 finalized_at 标记新快照，历史 ready 明确为 legacy_unverified，既有验收引用不自动改写。用户提供的 sha256 仍仅作为 claim，不冒充已验证摘要。staging 前缀可配置短期生命周期，final 对象按交付保留策略管理。
 
 ## Agent Recall 记忆
 
@@ -49,15 +49,33 @@ OIDC_REDIRECT_URI=superagent://oauth/callback
 
 周期规则当前固定 `mode:remind_and_confirm`：到点产生主助理提醒/方案，仍等待用户确认后执行。它不使用合成的周期消息充当用户确认。人工接管需先等旧Run停止，同电脑其他活跃或未知Run会阻止接管；有效人工控制也阻止新Run。控制/查看租约到期会持久下发释放/停止查看，原任务保持暂停。
 
+## 受管团队和交付验收
+
+`002_team_orchestration.sql` 新增同租户任务依赖边、交付/验收和 Coordinator 事件。已应用的 `001_initial.sql` 保持不可变；版本 ledger 校验内容，后续 schema 变化用新迁移。迁移独占锁与业务共享锁互斥，图变更在行锁前按租户串行，保护确认、派发、回报和取消竞争。
+
+计划条目支持 `depends_on_keys` 和 `parent_item_key`，确认时原子映射为 Task ID；依赖图和父树分别检测环，父子归属不隐含执行顺序。未通过验收、失败、取消或未知结果的依赖阻止下游派发。任务取消传播到子树和依赖后继，活跃 Run 等待实际停止；未被 accept 的启动可直接作废。已完成的历史结果不因取消重写。
+
+Worker 的 Run `succeeded` 只表示执行结束，Task 进入 `awaiting_review`。用户或当前 Coordinator 经独立 reviews API 逐条验收，引用真实同 Task/当前 Run 的 checkpoint、step、artifact；Worker run ticket 不能自验收。空标准使用“目标完成且有可核对结果”。Coordinator 不能仅引用 Worker 原文自动接受，不能核实可选择 `needs_input`；根节点实现负责新的只读 reviewer runtime 和真实产物读取。用户最终验收通过才变为 Task `succeeded` 并释放依赖。
+
+`/assistant/events` 是持久、幂等的完成/失败/验收事件队列；context 给出该计划完整状态，complete 原子保存汇总回复并消费事件。事件独立用量以 request key/revision 入账。后续再规划绑定 source event，新方案仍需真实用户确认。取消待确认方案会永久退出 pending，旧确认不能创建任务；取消意图与终态跨新回报 envelope 保持，不重新提交交付或放行依赖。节点只能读取当前任务与已验收依赖的产物，上传/finalize 权限仍限当前 Run。
+
+检查点写入要求有效设备身份、Run ticket、epoch 与租约，只允许 active/stopping 最末保存。首个 completed 检查点按内容 hash 冻结；有效票据的同内容重放仅返回原 ID。已提交交付读取固定 checkpoint/artifact 快照，不能被较晚记录替换。
+
+工具步骤只保存/广播工具名、固定标题、状态、时间与安全错误码；丢弃参数、结果、页面、URL及原始错误。`result_unknown` 明确保留，不将副作用超时伪装成失败。已存历史步骤同样通过白名单投影，浏览器能力槽位按真实 0/1 保留。
+
+## 通知
+
+003_push_delivery.sql 新增RLS注册/偏好/投递队列及仅摘要的全局token归属。登录session绑定注册，token租户AAD加密，注销/会话撤销与换账号锁序保护旧账号投递。通用文案不含业务正文；问题回声去重、过时提醒抑制、IANA静默/DST、有限重试和Expo回执均持久化。业务和通知使用独立single-flight循环；APNs接受不代表设备已显示。环境变量与真机验收见[通知方案](../../docs/notification-delivery.md)。本批次代码/TEST完成，尚未生产部署。
+
 ## 验证
 
 `pnpm --filter @super-agent/control-server test` 包含不依赖数据库的鉴权、Recall适配与费用口径单元测试。真实集成测试只有设置 `TEST_DATABASE_URL` 与独立 `TEST_MIGRATION_DATABASE_URL` 时运行，否则显式 skip/配置错误；这些 URL 必须指向用户提供的专用云端测试库。测试会迁移并创建独立随机用户记录，不会启动 Docker、本地 PostgreSQL 或生产替代仓库。根目录已配置文件时可用 `node --env-file=.env.test node_modules/tsx/dist/cli.mjs --test apps/control-server/test/*.test.ts`，不要打印该文件内容。
 
-已在用户专用云端测试库（非owner应用角色、独立owner迁移）和私有测试S3上通过17项测试：双用户RLS/接口隔离、设备签名和挑战重放、幂等任务派发、聊天确认后原子创建任务、费用回报去重/未知金额、会话撤销、数据库临时连接故障503且无效Token仍401、人工接管过期释放、未知结果阻塞与核对恢复、S3签名上传/完成/私有下载及Recall独立账号绑定。Recall upstream测试使用mock，不读写用户真实记忆；加密与隔离则通过真实PG验证。
+已在用户专用云端测试库（非owner应用角色、独立owner迁移）和私有测试S3上通过40项测试（0 fail、0 skip，2026-11-19最终回归）：双用户RLS/接口隔离、设备签名和挑战重放、幂等任务派发、聊天确认后原子创建任务、费用回报去重/未知金额、团队依赖与独立验收、事件费用/汇总幂等、取消复活/证据替换/旧确认竞争拒绝、真实S3条件复制快照与旧PUT覆盖隔离、通知outbox/回执/过时抑制/账号切换注销隔离/慢provider不阻塞业务、工具时间线脱敏、会话撤销、数据库临时连接故障503且无效Token仍401、人工接管过期释放、未知结果阻塞与核对恢复、S3签名上传/完成/私有下载及Recall独立账号绑定。Recall upstream测试使用mock，不读写用户真实记忆；加密与隔离则通过真实PG验证。
 
 ## 目前限制
 
 - 事件与设备命令采用持久 REST 补读，前端增量轮询；尚无 WebSocket/视频传输实现，后续可接同一事件/命令源。
 - S3帧使用 `frames/<tenant>/<run>/<frame_id>` 不可变对象，避免旧元数据对应新像素；用户应为 `frames/` 前缀配置短期生命周期（建议1天）。
 - 本组件不含供应商计费查询或平台钱包；费用是设备报告/估算，未知不记零。
-- OIDC需要上游Token包含稳定sub、issuer和API audience；原生客户端使用PKCE。通知厂商推送尚未接入，当前提醒通过控制端消息/通知补读；未配置的外部能力明确不可用。
+- OIDC需要上游Token包含稳定sub、issuer和API audience；原生客户端使用PKCE。通知持久outbox、APNs/Expo发送/回执、注册与偏好API已接入并通过TEST；真实厂商配置、签名及关闭应用后的设备送达尚未验收，未配置明确unconfigured。详见[通知方案](../../docs/notification-delivery.md)。

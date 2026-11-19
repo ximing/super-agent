@@ -38,7 +38,7 @@ open 'build/Super Agent.app'
 
 ## 本机验证
 
-- `swift test`：9 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留，以及无请求体 DELETE 不发送 JSON Content-Type。
+- `swift test`：17 项 API/协议测试通过，覆盖刷新后的幂等 ID、If-Match、跨 origin 会话隔离、非法服务器地址、未知费用保留，以及无请求体 DELETE 不发送 JSON Content-Type。
 - `bash scripts/build-app.sh`：release 可执行应用已构建并进行本机签名。
 - 真实 OIDC、Recall 账号和云端端到端流程取决于用户部署的服务配置，不能由编译通过推定。
 
@@ -65,3 +65,11 @@ OIDC 登录仅请求 `openid profile email`，默认回调为 `superagent://oaut
 ```sh
 bash apps/macos/scripts/build-app.sh apps/macos/build/staging-build3
 ```
+
+## 团队任务与交付核对
+
+任务列表按方案和归属树展示“已加载任务”，详情分开展示祖先、直属子任务与执行前置条件；缺页、未知父任务与循环会明确标记，不以可见子集推算整个方案进度。工具时间线仅展示固定工具名称、状态、时间和安全错误类别，不展示原始参数、结果或隐藏模型内容；结果未知独立显示“结果待核对”。
+
+任务执行完成先进入“待验收”。人工兜底入口读取当前交付证据，逐项勾选标准、选择实际检查点/工具回执/附件，并填写依据后验收或退回；提交使用该证据快照的 Task 版本，冲突要求重新核对。需要服务端部署对应 steps/evidence/reviews API；本轮未通过真实账户操作这些新增界面。
+
+记忆页支持本机 JSON 配置导入（`{url,token}`，最多 32 KiB）。导入只填入 HTTPS 地址和 SecureField，不发请求、不自动连接；令牌不会显示在提示或错误里。请核对地址并手动点击连接按钮，配置文件的保管由用户负责。

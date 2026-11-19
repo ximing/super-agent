@@ -77,3 +77,5 @@ export class GrokRuntime implements RuntimeAdapter {
   async steer(text: string): Promise<void> { this.queuedInputs.push(text); }
   async stop(): Promise<void> { this.controller?.abort(); }
 }
+
+export { GrokCliRuntime, probeGrokCli, type GrokCliOptions, type GrokCliDiagnostic } from './cli.js';

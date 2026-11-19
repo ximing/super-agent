@@ -16,6 +16,13 @@ services:
       OIDC_REDIRECT_URI: superagent://oauth/callback
       MEMORY_ENCRYPTION_KEY: ${MEMORY_ENCRYPTION_KEY:?Set a stable dedicated memory binding encryption key}
       RECALL_ALLOWED_ORIGINS: https://recall.aimo.plus
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_TOPIC: ${APNS_TOPIC:-}
+      APNS_ENVIRONMENT: ${APNS_ENVIRONMENT:-production}
+      APNS_PRIVATE_KEY_FILE: ${APNS_PRIVATE_KEY_FILE:-}
+      EXPO_PROJECT_ID: ${EXPO_PROJECT_ID:-}
+      EXPO_ACCESS_TOKEN: ${EXPO_ACCESS_TOKEN:-}
       S3_ENDPOINT: ${S3_ENDPOINT:?Private cloud S3 endpoint required}
       S3_REGION: ${S3_REGION:-cn-beijing}
       S3_BUCKET: ${S3_BUCKET:?Environment-specific bucket required}

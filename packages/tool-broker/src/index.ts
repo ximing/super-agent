@@ -1,13 +1,14 @@
 import { createServer, type Server } from 'node:http';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile, writeFile, readdir, mkdir, realpath } from 'node:fs/promises';
 import { dirname, resolve, relative, isAbsolute } from 'node:path';
 import { spawn } from 'node:child_process';
-import type { ToolDefinition } from './runtime.js';
+import type { ToolDefinition, RuntimeContext } from './runtime.js';
 export * from './runtime.js';
 export { BrowserActor } from './browser.js';
 import { BrowserActor } from './browser.js';
 import { ArtifactTools } from './artifacts.js';
+import type { ToolStepUpdate } from '@super-agent/protocol';
 
 type Args = Record<string, unknown>;
 const string = (a: Args, key: string, limit = 100_000): string => {
@@ -24,11 +25,13 @@ export interface BrokerOptions {
   assertActive: () => void;
   ask: (text: string, options?: string[]) => Promise<string>;
   allowShell?: boolean;
+  allowBrowser?: boolean;
   assistant?: boolean;
   fetcher?: typeof fetch;
   signal: AbortSignal;
   onOperation?: (name: string, result: unknown) => void | Promise<void>;
   onUncertain?: (name: string) => void;
+  onStep?: (step: ToolStepUpdate) => void | Promise<void>;
 }
 export class ToolBroker {
   constructor(private readonly options: BrokerOptions) {}
@@ -55,36 +58,54 @@ export class ToolBroker {
     if (this.options.assistant) definitions.push(
       { name: 'tasks_list', description: 'List the user tasks and their progress without waiting for completion.', parameters: schema({}) },
       { name: 'devices_list', description: 'List the user available execution computers and configured engines.', parameters: schema({}) },
-      { name: 'task_start', description: 'Propose work on a selected computer. The user must confirm the proposed goal and deliverables before execution.', parameters: schema({ goal: str, title: str, deliverables: { type: 'array', items: str }, engine: { enum: ['codex', 'grok'] }, device_id: str, item_key: str }, ['goal', 'deliverables', 'engine', 'device_id', 'item_key']) },
+      { name: 'task_start', description: 'Propose work on a selected computer. The user must confirm the proposed goal and deliverables before execution.', parameters: schema({ goal: str, title: str, deliverables: { type: 'array', items: str }, engine: { enum: ['codex', 'grok'] }, device_id: str, item_key: str, depends_on_keys: { type: 'array', items: str, maxItems: 40 }, parent_item_key: str }, ['goal', 'deliverables', 'engine', 'device_id', 'item_key']) },
       { name: 'task_status', description: 'Read a background task status.', parameters: schema({ id: str }, ['id']) },
     );
-    return definitions;
+    return this.options.allowBrowser === false ? definitions.filter(tool => !tool.name.startsWith('browser_')) : definitions;
   }
   async execute(name: string, args: Args): Promise<unknown> {
+    const step: ToolStepUpdate = { step_id: randomUUID(), tool: this.definitions().some(tool => tool.name === name) ? name : 'other', status: 'running', started_at: new Date().toISOString(), completed_at: null, error_code: null };
+    let unsafe = false;
+    try {
+      await this.options.onStep?.(step);
+      const result = await this.perform(name, args, () => { unsafe = true; });
+      await this.options.onStep?.({ ...step, status: 'succeeded', completed_at: new Date().toISOString() });
+      return result;
+    } catch (error) {
+      const cancelled = this.options.signal.aborted || error instanceof Error && error.name === 'AbortError';
+      const message = error instanceof Error ? error.message : '';
+      const errorCode: ToolStepUpdate['error_code'] = unsafe ? 'result_unknown' : cancelled ? 'cancelled' : /outside_workspace|execution_lease|fenced|not_authorized/.test(message) ? 'not_authorized' : /invalid_|unknown_argument|missing_argument|unknown_tool|unsupported_url/.test(message) ? 'invalid_arguments' : 'tool_failed';
+      if (unsafe) this.options.onUncertain?.(name);
+      await this.options.onStep?.({ ...step, status: unsafe ? 'result_unknown' : cancelled ? 'cancelled' : 'failed', completed_at: new Date().toISOString(), error_code: errorCode });
+      throw error;
+    }
+  }
+  private async perform(name: string, args: Args, markUnsafe: () => void): Promise<unknown> {
     this.options.assertActive();
+    if (this.options.allowBrowser === false && name.startsWith('browser_')) throw new Error('browser_capability_unavailable');
     if (this.options.signal.aborted) throw new DOMException('Execution stopped', 'AbortError');
     const definition = this.definitions().find(t => t.name === name);
     if (!definition) throw new Error(`unknown_tool: ${name}`);
     // Schemas are trusted definitions, inputs remain untrusted data. Validate simple shape here.
+    if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('invalid_tool_arguments');
     const props = definition.parameters.properties as Args;
     for (const key of Object.keys(args)) if (!(key in props)) throw new Error(`unknown_argument: ${key}`);
     for (const required of definition.parameters.required as string[]) if (!(required in args)) throw new Error(`missing_argument: ${required}`);
     let result: unknown;
     const browser = this.options.browser, runId = this.options.runId;
-    let unsafeActionStarted = false;
-    try { switch (name) {
+    switch (name) {
       case 'browser_navigate': {
         const url = new URL(string(args, 'url', 4096));
         if (!['https:', 'http:'].includes(url.protocol)) throw new Error('unsupported_url_protocol');
         const knowledge = await this.options.request('/node/memory/search', { query: url.hostname, site: url.hostname, limit: 5 });
-        unsafeActionStarted = true;
+        markUnsafe();
         const navigation = await browser.call(runId, 'navigate', { url: url.href, newTab: true, group_title: 'Super-agent 任务' });
         result = { knowledge, navigation }; break;
       }
       case 'browser_snapshot': result = await browser.call(runId, 'snapshot'); break;
-      case 'browser_click': unsafeActionStarted = true; result = await browser.call(runId, 'click', { selector: string(args, 'selector', 1000) }); break;
-      case 'browser_fill': unsafeActionStarted = true; result = await browser.call(runId, 'fill', { selector: string(args, 'selector', 1000), value: typeof args.value === 'string' ? args.value : (() => { throw new Error('invalid_argument: value'); })() }); break;
-      case 'browser_keys': unsafeActionStarted = true; result = await browser.call(runId, 'send_keys', { keys: string(args, 'keys', 1000) }); break;
+      case 'browser_click': { const selector = string(args, 'selector', 1000); markUnsafe(); result = await browser.call(runId, 'click', { selector }); break; }
+      case 'browser_fill': { const selector = string(args, 'selector', 1000), value = typeof args.value === 'string' ? args.value : (() => { throw new Error('invalid_argument: value'); })(); markUnsafe(); result = await browser.call(runId, 'fill', { selector, value }); break; }
+      case 'browser_keys': { const keys = string(args, 'keys', 1000); markUnsafe(); result = await browser.call(runId, 'send_keys', { keys }); break; }
       case 'browser_screenshot': {
         const frame = await browser.frame(runId);
         await this.options.request(`/node/runs/${runId}/frames`, frame);
@@ -112,13 +133,16 @@ export class ToolBroker {
       case 'artifacts_download': result = await this.artifacts().download(args.id, string(args, 'path', 4096)); break;
       case 'artifacts_upload': result = await this.artifacts().upload(string(args, 'path', 4096), args.name, args.mime); break;
       case 'question_ask': result = { answer: await this.options.ask(string(args, 'text', 4000), Array.isArray(args.options) ? args.options.map(String).slice(0, 6) : undefined) }; break;
-      case 'shell_run': unsafeActionStarted = true; result = await this.shell(string(args, 'command', 16_000)); break;
+      case 'shell_run': { const command = string(args, 'command', 16_000); markUnsafe(); result = await this.shell(command); break; }
       case 'tasks_list': result = await this.options.request('/tasks'); break;
       case 'devices_list': result = await this.options.request('/devices'); break;
-      case 'task_start': result = await this.options.request('/node/tasks', { goal: string(args, 'goal'), title: args.title, deliverables: Array.isArray(args.deliverables) ? args.deliverables.map(String).slice(0, 20) : [], engine: args.engine, device_id: string(args, 'device_id', 100), item_key: string(args, 'item_key', 100) }); break;
+      case 'task_start': {
+        if (args.depends_on_keys !== undefined && (!Array.isArray(args.depends_on_keys) || args.depends_on_keys.length > 40 || args.depends_on_keys.some(key => typeof key !== 'string' || !key || key.length > 100))) throw new Error('invalid_depends_on_keys');
+        if (args.parent_item_key !== undefined) string(args, 'parent_item_key', 100);
+        result = await this.options.request('/node/tasks', { goal: string(args, 'goal'), title: args.title, deliverables: Array.isArray(args.deliverables) ? args.deliverables.map(String).slice(0, 20) : [], engine: args.engine, device_id: string(args, 'device_id', 100), item_key: string(args, 'item_key', 100), depends_on_keys: args.depends_on_keys ?? [], ...(args.parent_item_key ? { parent_item_key: args.parent_item_key } : {}) }); break; }
       case 'task_status': result = await this.options.request(`/tasks/${encodeURIComponent(string(args, 'id', 100))}`); break;
       default: throw new Error('unsupported_tool');
-    } } catch (error) { if (unsafeActionStarted) this.options.onUncertain?.(name); throw error; }
+    }
     await this.options.onOperation?.(name, result);
     return result;
   }
@@ -155,7 +179,7 @@ export class ToolBroker {
 }
 
 /** Private loopback transport for a Codex-launched MCP process; never a public control endpoint. */
-export async function startToolBridge(broker: ToolBroker): Promise<{ url: string; token: string; close: () => Promise<void> }> {
+export async function startToolBridge(broker: Pick<ToolBroker, 'definitions' | 'execute'>): Promise<{ url: string; token: string; close: () => Promise<void> }> {
   const token = randomBytes(32).toString('hex');
   const server: Server = createServer(async (req, res) => {
     try {
@@ -174,4 +198,14 @@ export async function startToolBridge(broker: ToolBroker): Promise<{ url: string
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('bridge_listen_failed');
   return { url: `http://127.0.0.1:${address.port}`, token, close: () => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); }) };
+}
+
+/** Constrain both discovery and execution, including planning/review runtimes without a full worker broker. */
+export function startRuntimeToolBridge(context: Pick<RuntimeContext, 'tools' | 'executeTool' | 'signal'>) {
+  const allowed = new Map(context.tools.map(tool => [tool.name, tool]));
+  return startToolBridge({ definitions: () => [...allowed.values()], execute: (name, args) => {
+    if (context.signal.aborted) throw new DOMException('Execution stopped', 'AbortError');
+    if (!allowed.has(name)) throw new Error('tool_not_authorized');
+    return context.executeTool(name, args);
+  } });
 }

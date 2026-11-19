@@ -13,6 +13,8 @@ These tests run migrations in the dedicated test database and create unique tena
 Covered flows:
 
 - Pairing/signing → dispatch/accept → explicitly labelled FakeRuntime → memory/checkpoint/status/cost → restart/replay without duplicate work or cost; cross-tenant task and cost isolation.
+- Execution success becomes `awaiting_review`; an explicit client review accepts the fixed delivery before the Task becomes `succeeded`.
+- Worker completion → durable Coordinator event → fresh scripted read-only verifier → independently fetched text artifact → accepted delivery, separate review usage and one user report → restart without model replay. The object-transfer transport in this case is an explicit fixture, not a live S3 acceptance.
 - Selected main assistant and second execution computer, chat proposal without execution, user goal confirmation, restart while waiting for confirmation, pinned Grok/device routing, idempotent confirm, cancellation without new work.
 - Active browser task pause before human takeover, screenshot subscription, natural pixel to CSS input mapping, stale frame rejection, cross-tenant frame denial, control release.
 - Scripted runtime clarification before planning, recent conversation preserved across separate model turns, no work before goal confirmation.

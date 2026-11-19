@@ -2,12 +2,15 @@ import { createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { SignJWT, jwtVerify, createRemoteJWKSet } from 'jose';
 import { ApiError, Store, Tx, hash, MIGRATION_LOCK_KEY, type Doc } from './store.js';
 import type { S3Config } from './objects.js';
+import type { NotificationConfig } from './notifications.js';
 
 export interface Config {
   databaseUrl:string; jwtSecret:string; allowDevAuth?:boolean; oidcIssuer?:string;
   oidcAudience?:string; oidcClientId?:string; oidcRedirectUri?:string;
   logger?:boolean; runScheduler?:boolean; port?:number; host?:string; s3?:S3Config;
   memoryEncryptionKey?:string; recallAllowedOrigins?:string[]; recallFetch?:typeof fetch;
+  objectFetch?:typeof fetch;
+  notifications?:Omit<NotificationConfig,'encryptionKey'>;
   oidcDiagnostic?:(event:{stage:string;name:string;code:string|null})=>void;
 }
 export interface Principal { type:'client'|'device'; tenant:string; id:string; session?:string; device?:string; user?:Doc }
@@ -133,7 +136,7 @@ export class Auth {
     return run;
   }
   async assistant(p:Principal,tx:Tx,epoch:unknown):Promise<Doc>{
-    this.device(p);const lease=await tx.get('assistant_leases',p.tenant);
+    this.device(p);const lease=await tx.get('assistant_leases',p.tenant,true);
     if(!lease||lease.device_id!==p.device||String(lease.epoch)!==String(epoch)||Date.parse(lease.expires_at)<Date.now())throw new ApiError(409,'assistant_lease_invalid','主助理租约已失效');
     return lease;
   }

@@ -35,3 +35,16 @@ export async function ensureCsiStarted(fake: boolean, options: {
     return 'unavailable';
   }
 }
+
+/** Read only daemon/extension health. Never list user tabs, read pages or start Chrome. */
+export async function probeCsiBrowser(options: { enabled?: boolean; fetcher?: typeof fetch; endpoint?: string } = {}): Promise<{ ready: boolean; reason?: string }> {
+  if (options.enabled === false) return { ready: false, reason: 'browser_disabled' };
+  try {
+    const endpoint = new URL(options.endpoint ?? 'http://127.0.0.1:10088');
+    if (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname)) return { ready: false, reason: 'browser_invalid_local_endpoint' };
+    const response = await (options.fetcher ?? fetch)(new URL('/status', endpoint), { signal: AbortSignal.timeout(2000), redirect: 'error' });
+    if (!response.ok) return { ready: false, reason: 'browser_daemon_unavailable' };
+    const status = await response.json() as { extension_connected?: unknown };
+    return status.extension_connected === true ? { ready: true } : { ready: false, reason: 'browser_extension_disconnected' };
+  } catch { return { ready: false, reason: 'browser_daemon_unavailable' }; }
+}

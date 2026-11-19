@@ -105,7 +105,10 @@ test('cloud migration ledger is owner-private, repeat/concurrent calls do not ru
       await probe.query('BEGIN');
       assert.equal((await probe.query('SELECT pg_try_advisory_xact_lock($1) AS acquired',[MIGRATION_LOCK_KEY])).rows[0].acquired,false,'DDL gate must wait for the active tenant transaction');
       releaseTenant();await tenantWork;tenantWork=undefined;
-      assert.equal((await probe.query('SELECT pg_try_advisory_xact_lock($1) AS acquired',[MIGRATION_LOCK_KEY])).rows[0].acquired,true);
+      // Other test processes may already be waiting for this same exclusive
+      // lock. Wait our turn instead of treating legitimate contention as a bug.
+      await probe.query('SELECT pg_advisory_xact_lock($1)',[MIGRATION_LOCK_KEY]);
+      assert.equal((await probe.query("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=pg_backend_pid() AND locktype='advisory' AND classid=0 AND objid=$1 AND mode='ExclusiveLock' AND granted) AS acquired",[MIGRATION_LOCK_KEY])).rows[0].acquired,true);
       let tenantEntered=false;const waiting=app.tenant(randomUUID(),async()=>{tenantEntered=true;});tenantWork=waiting;
       // Observe the actual blocked shared lock in PostgreSQL, without timing
       // sleeps or changing any ledger rows.

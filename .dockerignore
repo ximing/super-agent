@@ -11,6 +11,7 @@ node_modules
 *.sqlite*
 .super-agent
 .reports
+.secrets
 apps/macos
 apps/android
 apps/node

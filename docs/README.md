@@ -1,6 +1,6 @@
 # Personal Super-agent 技术方案
 
-状态：技术设计 v0.1，2026-11-18；已进入实现阶段，实际证据见[实施状态](implementation-status.md)。
+状态：技术设计与实现同步，2026-11-19；已进入实现阶段，实际证据见[实施状态](implementation-status.md)。
 
 产品依据：[PRD v0.3](../tasks/prd-personal-super-agent.md)。用户已认可整体架构，本目录将其细化为实现契约；未验证的供应商能力与环境条件单独标记，不视为已交付功能。
 
@@ -8,6 +8,9 @@
 | --- | --- |
 | [实施状态与缺口](implementation-status.md) | 已验证证据、已部署资源、未实现功能与待验收项目 |
 | [技术设计](technical-design.md) | 架构、模块、数据模型、隔离、运行时、记忆、成本、部署与恢复 |
+| [实现集成契约](implementation-contract.md) | 当前可联调接口与共享类型、边界 |
+| [团队与交付验收](team-and-delivery.md) | 依赖 DAG、独立验收、冻结证据与 Coordinator 事件 |
+| [通知投递](notification-delivery.md) | outbox、APNs/Expo、注销隔离、静默与实际送达边界 |
 | [接口与事件协议](protocol-v1.md) | REST、WebSocket、状态机、幂等、设备派发和检查点 |
 | [实施计划](implementation-plan.md) | 开发顺序、验证门槛、交付范围和待核实项 |
 | [契约样例](contracts/README.md) | 调度、运行状态和费用上报的 JSON Schema 与样例 |
@@ -26,11 +29,11 @@
 
 ## 本轮确定的实现选择
 
-- 云端采用模块化单体，独立 API/Gateway 和后台 Job 进程，共用代码与 PostgreSQL；暂不拆微服务。
+- 云端采用模块化单体，API 与持久业务调度/通知扫描共用代码和 PostgreSQL；当前在同一服务中使用独立防重入循环，慢通知网络不阻塞业务派发，暂不拆微服务。
 - Node.js 受支持 LTS、TypeScript、Fastify 5；实施时锁定实测版本，不在设计阶段声称某版本已完成兼容。
 - PostgreSQL 18；SQL migration 为数据定义依据，应用使用参数化查询。持久队列、outbox 和用量账本先放同库，记忆复用已有 agent-recall，不新增 pgvector 依赖。
 - 原生登录走 OIDC + PKCE，执行设备用独立密钥认证，Run 使用短期授权；模型密钥不进入这些协议。
-- 初版使用邀请开通作为可调整的默认值；OIDC 服务与 Android 推送提供方需在上线前选定。
+- OIDC 已选云端 Keycloak，原生 public client 使用 PKCE；Mac 为 APNs，Android 为 Expo 通道。推送真实凭据、签名和目标设备送达仍待验收。
 - 跨引擎/设备切换创建新 Run，通过结构化检查点交接；不迁移隐藏推理或供应商原生会话。
 - 成本按设备上报做个人观测，区分供应商返回、估算和未知；不实现平台钱包或代付结算。
 

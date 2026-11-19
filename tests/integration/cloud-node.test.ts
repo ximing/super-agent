@@ -10,7 +10,7 @@ import { NodeApi } from '../../apps/node/src/api.js';
 import { NodeAgent } from '../../apps/node/src/agent.js';
 import { initConfig, writeConfig, type NodeConfig } from '../../apps/node/src/config.js';
 import { FakeRuntime } from '../../apps/node/src/fake-runtime.js';
-import type { AuthSession, Capabilities, ListResponse, Message, Task, WireMessage, CostSummary } from '@super-agent/protocol';
+import type { AuthSession, Capabilities, ListResponse, Message, Task, WireMessage, CostSummary, TaskEvidence, CoordinatorEvent } from '@super-agent/protocol';
 import type { RuntimeContext } from '@super-agent/tool-broker/runtime';
 import { BrowserActor } from '../../packages/tool-broker/src/browser.js';
 import { sleep } from '../../packages/tool-broker/src/runtime.js';
@@ -66,7 +66,7 @@ async function pairNode(app: ControlApp, user: AuthSession, dir: string, fetcher
   return { config, api };
 }
 
-async function setupApp(): Promise<ControlApp> {
+async function setupApp(withMockObjectStorage = false): Promise<ControlApp> {
   assert.ok(runtimeUrl && migrationUrl, 'Both cloud test database URLs are required');
   const runtime = dedicatedCloudDatabase(runtimeUrl, 'TEST_DATABASE_URL'), migration = dedicatedCloudDatabase(migrationUrl, 'TEST_MIGRATION_DATABASE_URL');
   assert.equal(runtime.hostname, migration.hostname, 'Runtime and migration must target the same cloud host');
@@ -75,6 +75,7 @@ async function setupApp(): Promise<ControlApp> {
   try { await owner.migrate(); } finally { await owner.close(); }
   const memoryId = randomUUID(), actorId = randomUUID();
   return buildApp({ databaseUrl: runtimeUrl, jwtSecret: 'integration-only-secret-with-at-least-32-bytes', allowDevAuth: true, runScheduler: false,
+    ...(withMockObjectStorage ? { s3: { endpoint: 'https://objects.integration.invalid', bucket: 'explicit-test-only', region: 'test', accessKey: 'mock-only-access', secretKey: 'mock-only-secret' } } : {}),
     recallAllowedOrigins: ['https://recall.integration.invalid'], recallFetch: (async (url: string | URL | Request, options?: RequestInit) => {
       assert.equal(new URL(String(url)).origin, 'https://recall.integration.invalid');
       assert.equal((options?.headers as Record<string, string>).authorization, 'Bearer test-only-memory-token');
@@ -102,12 +103,18 @@ test('cloud PostgreSQL + real NodeAgent: pair/sign, dispatch/accept, durable fak
     const firstCommands = await paired.api.request<ListResponse<WireMessage>>('/node/commands');
     assert.equal(firstCommands.items.length, 1); replay.commands = firstCommands.items;
     let result = task;
-    for (let i = 0; i < 30 && result.status !== 'succeeded'; i++) {
+    for (let i = 0; i < 30 && result.status !== 'awaiting_review'; i++) {
       await agent.tick(); await sleep(40);
       await agent.flush();
       result = await client<Task>(app, owner.access_token, `/tasks/${task.id}`);
     }
-    assert.equal(result.status, 'succeeded'); assert.equal(executions, 1);
+    assert.equal(result.status, 'awaiting_review'); assert.equal(executions, 1);
+    const evidence = await client<TaskEvidence>(app, owner.access_token, `/tasks/${task.id}/evidence`);
+    assert.equal(evidence.run!.state, 'succeeded'); assert.ok(evidence.checkpoint);
+    assert.ok(evidence.steps.length >= 3); assert.ok(evidence.steps.every(step => step.status === 'succeeded'));
+    assert.doesNotMatch(JSON.stringify(evidence.steps), /test-only-memory-token|test-result\.txt|content|result_hash/);
+    await client(app, owner.access_token, `/tasks/${task.id}/reviews`, 'POST', { run_id: evidence.run!.id, verdict: 'accept', summary: 'Human test fixture explicitly verifies the deterministic fake result.', checks: evidence.deliverables.map((_criterion, index) => ({ deliverable_index: index, passed: true, evidence_refs: [{ kind: 'checkpoint', id: evidence.checkpoint!.id }] })) }, { 'if-match': `"${evidence.task.version}"`, 'idempotency-key': randomUUID() });
+    result = await client<Task>(app, owner.access_token, `/tasks/${task.id}`); assert.equal(result.status, 'succeeded');
     const costs = await client<CostSummary>(app, owner.access_token, '/costs/summary');
     assert.equal(costs.request_count, 1); assert.equal(costs.unknown_count, 1); assert.deepEqual(costs.totals, []);
     assert.equal(costs.input_tokens, 10); assert.equal(costs.output_tokens, 5);
@@ -124,6 +131,67 @@ test('cloud PostgreSQL + real NodeAgent: pair/sign, dispatch/accept, durable fak
     assert.ok(requestLog.some(r => r.path === '/v1/artifacts'));
     assert.ok(requestLog.some(r => r.path.endsWith('/checkpoint')));
     assert.doesNotMatch(JSON.stringify(requestLog), /BEGIN PRIVATE KEY|api_key|XAI_API_KEY|refresh_token/);
+  } finally { if (agent) { await agent.stop(); agent.close(); } if (restarted) { await restarted.stop(); restarted.close(); } await app.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('cloud coordinator: worker completion triggers a fresh read-only review, usage and durable user report', { skip: !runtimeUrl || !migrationUrl, timeout: 120_000 }, async () => {
+  // Models and S3 transfer are explicit fixtures; PostgreSQL, identity, journal, tool broker and event/review APIs are real.
+  const app = await setupApp(true), directory = mkdtempSync(join(tmpdir(), 'super-agent-cloud-review-'));
+  let agent: NodeAgent | undefined, restarted: NodeAgent | undefined;
+  let workerTurns = 0, verifierTurns = 0, published = '', objectReads = 0;
+  try {
+    const owner = await client<AuthSession>(app, undefined, '/auth/dev', 'POST', { email: `review-${randomUUID()}@integration.invalid` });
+    const log: RequestLog[] = [], fetcher = fetchThroughInject(app, log);
+    const paired = await pairNode(app, owner, directory, fetcher);
+    await client(app, owner.access_token, '/settings/execution', 'PUT', { default_engine: 'grok', default_device_id: paired.config.device_id, assistant_device_id: paired.config.device_id });
+    paired.config.assistant = true; paired.config.assistant_engine = 'grok';
+    agent = new NodeAgent(paired.config, { api: paired.api, log: () => {}, artifactFetcher: (async (url, init) => {
+      assert.equal(new URL(String(url)).origin, 'https://objects.integration.invalid');
+      assert.equal(new Headers(init?.headers).get('authorization'), null); objectReads++;
+      return new Response(published);
+    }) as typeof fetch, runtimeFactory: async () => ({
+      execute: async context => {
+        if (context.runId.startsWith('review-')) {
+          verifierTurns++;
+          const evidence = await context.executeTool('delivery_evidence', {}) as TaskEvidence;
+          const observed = await context.executeTool('delivery_artifact_read', { id: evidence.artifacts[0]!.id }) as { content: string };
+          assert.equal(observed.content, 'VERIFIED');
+          await context.executeTool('delivery_review', { verdict: 'accept', summary: '[Scripted verifier fixture] independently read the delivered object.', checks: evidence.deliverables.map((_criterion, index) => ({ deliverable_index: index, passed: true, evidence_refs: [{ kind: 'artifact', id: evidence.artifacts[0]!.id }] })) });
+          await context.emit({ type: 'usage', usage: { request_key: 'scripted-verifier-only', input_tokens: 7, cached_input_tokens: 0, output_tokens: 2, reasoning_tokens: 0 } });
+          return { text: '[Scripted verifier fixture] complete' };
+        }
+        workerTurns++;
+        await context.executeTool('files_write', { path: 'report.md', content: 'VERIFIED' });
+        const content = await context.executeTool('files_read', { path: 'report.md' }) as { content: string }; published = content.content;
+        await app.control.store.tenant(owner.user.tenant_id, tx => tx.put('artifacts', { task_id: context.taskId, run_id: context.runId, name: 'report.md', mime: 'text/markdown', size: Buffer.byteLength(published), status: 'ready', integrity: 'server_snapshot', object_key: `fixture/${randomUUID()}` }));
+        await context.emit({ type: 'usage', usage: { request_key: 'scripted-worker-only', input_tokens: 10, cached_input_tokens: 0, output_tokens: 5, reasoning_tokens: 0 } });
+        return { text: published };
+      }, stop: async () => {}, steer: async () => {},
+    }) });
+    const task = await client<Task>(app, owner.access_token, '/tasks', 'POST', { goal: 'Produce the controlled text report.', deliverables: ['Delivered report contains VERIFIED'], engine: 'grok', device_id: paired.config.device_id });
+    await app.control.service.dispatchTenant(owner.user.tenant_id);
+    let result = task;
+    for (let i = 0; i < 50 && result.status !== 'succeeded'; i++) {
+      await agent.tick(); await sleep(30); await agent.flush();
+      result = await client<Task>(app, owner.access_token, `/tasks/${task.id}`);
+    }
+    assert.equal(result.status, 'succeeded'); assert.equal(result.delivery_status, 'accepted');
+    for (let i = 0; i < 10 && agent.store.coordinatorPending().length; i++) { await agent.tick(); await sleep(30); }
+    assert.equal(workerTurns, 1); assert.equal(verifierTurns, 1); assert.equal(objectReads, 1);
+    assert.equal(agent.store.coordinatorPending().length, 0);
+    const evidence = await client<TaskEvidence>(app, owner.access_token, `/tasks/${task.id}/evidence`);
+    assert.equal(evidence.reviews.length, 1); assert.equal(evidence.reviews[0]!.verdict, 'accept');
+    assert.ok(evidence.steps.length >= 3); assert.ok(evidence.steps.every(step => step.status === 'succeeded'));
+    const events = await app.control.store.tenant(owner.user.tenant_id, tx => tx.all('coordinator_events'));
+    assert.equal(events.length, 1); assert.equal(events[0]!.status, 'completed');
+    const costs = await client<CostSummary>(app, owner.access_token, '/costs/summary');
+    assert.equal(costs.request_count, 2); assert.equal(costs.input_tokens, 17); assert.equal(costs.output_tokens, 7);
+    assert.equal((await client<ListResponse<Message>>(app, owner.access_token, '/messages')).items.filter(message => message.role === 'assistant').length, 1);
+    await agent.stop(); agent.close(); agent = undefined;
+    restarted = new NodeAgent(paired.config, { api: new NodeApi(paired.config, fetcher), runtimeFactory: async () => { throw new Error('NO MODEL REPLAY AFTER ACK'); }, log: () => {} });
+    await restarted.recover(); await restarted.tick(); await sleep(30); await restarted.stop();
+    assert.equal((await client<CostSummary>(app, owner.access_token, '/costs/summary')).request_count, 2);
+    assert.equal(workerTurns, 1); assert.equal(verifierTurns, 1);
   } finally { if (agent) { await agent.stop(); agent.close(); } if (restarted) { await restarted.stop(); restarted.close(); } await app.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
@@ -255,6 +323,78 @@ test('cloud assistant clarification keeps conversation context and proposes work
     for(let i=0;i<40&&!agent.store.get(`assistant:${answer.id}`);i++){await agent.tick();await sleep(40);}
     assert.ok(agent.store.get(`assistant:${answer.id}`));assert.equal(turns,2);
     assert.equal((await client<ListResponse<{id:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation')).items.length,1);
+    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,0);
+  }finally{if(agent){await agent.stop();agent.close();}await app.close();rmSync(directory,{recursive:true,force:true});}
+});
+
+test('cloud assistant retains failed-turn usage and recovers an interrupted journal without replaying models', {skip:!runtimeUrl||!migrationUrl,timeout:120_000}, async()=>{
+  const app=await setupApp(),directory=mkdtempSync(join(tmpdir(),'super-agent-cloud-planner-failure-'));
+  let agent:NodeAgent|undefined,restarted:NodeAgent|undefined;
+  try{
+    const owner=await client<AuthSession>(app,undefined,'/auth/dev','POST',{email:`failed-planner-${randomUUID()}@integration.invalid`});
+    const fetcher=fetchThroughInject(app,[]),paired=await pairNode(app,owner,directory,fetcher);
+    await client(app,owner.access_token,'/settings/execution','PUT',{default_engine:'grok',default_device_id:paired.config.device_id,assistant_device_id:paired.config.device_id});
+    paired.config.assistant=true;paired.config.assistant_engine='grok';paired.config.fake_runtime=false;
+    paired.config.grok.model='';
+    await paired.api.request(`/devices/${paired.config.device_id}/capabilities`,{generation:2,engines:[{engine:'grok',ready:true,models:['configured-default'],local_profile_id:'test-only'}],tools:['memory','files','questions'],slots:{browser:0,worker:1}},{method:'PUT'});
+    let turns=0;
+    agent=new NodeAgent(paired.config,{api:paired.api,log:()=>{},runtimeFactory:async()=>({execute:async(context)=>{
+      turns++;
+      assert.equal(context.modelId,'','Native Grok receives its default-model selection');
+      await context.emit({type:'usage',usage:{request_key:'scripted-failed-planner',input_tokens:null,cached_input_tokens:null,output_tokens:null,reasoning_tokens:null}});
+      throw new Error('fixture-provider-stream-disconnected');
+    },steer:async()=>{},stop:async()=>{}})});
+    const first=await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'Prepare an explicitly confirmed read-only inspection'});
+    for(let i=0;i<60&&!agent.store.get(`assistant:${first.id}`);i++){await agent.tick();await sleep(40);}
+    assert.ok(agent.store.get(`assistant:${first.id}`));
+    for(let i=0;i<5;i++){await agent.tick();await sleep(20);}
+    assert.equal(turns,1,'A failed paid prompt must never auto-retry on the next poll');
+    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,0);
+    const costs=await client<CostSummary>(app,owner.access_token,'/costs/summary');
+    assert.equal(costs.request_count,1);assert.equal(costs.unknown_count,1);
+    await agent.stop();agent.close();agent=undefined;
+
+    const interrupted=await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'An interrupted scripted planner attempt'});
+    restarted=new NodeAgent(paired.config,{api:new NodeApi(paired.config,fetcher),log:()=>{},runtimeFactory:async()=>{turns++;throw new Error('Model replay forbidden');}});
+    restarted.store.saveAssistant(interrupted.id,{phase:'running',text:'',usage:[],engine:'grok',model_id:'fixture',plan_id:randomUUID()});
+    for(let i=0;i<60&&!restarted.store.get(`assistant:${interrupted.id}`);i++){await restarted.tick();await sleep(40);}
+    assert.ok(restarted.store.get(`assistant:${interrupted.id}`));assert.equal(turns,1);
+    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,0);
+    const messages=await client<ListResponse<Message>>(app,owner.access_token,'/messages');
+    assert.ok(messages.items.some(m=>m.role==='assistant'&&m.content.includes('没有自动重试模型')));
+    assert.equal((await client<CostSummary>(app,owner.access_token,'/costs/summary')).request_count,1);
+  }finally{if(agent){await agent.stop();agent.close();}if(restarted){await restarted.stop();restarted.close();}await app.close();rmSync(directory,{recursive:true,force:true});}
+});
+
+test('cloud assistant retries a durable successful proposal after usage transport failure without changing its body', {skip:!runtimeUrl||!migrationUrl,timeout:120_000}, async()=>{
+  const app=await setupApp(),directory=mkdtempSync(join(tmpdir(),'super-agent-cloud-planner-transport-'));
+  let agent:NodeAgent|undefined;
+  try{
+    const owner=await client<AuthSession>(app,undefined,'/auth/dev','POST',{email:`planner-transport-${randomUUID()}@integration.invalid`});
+    let failUsage=true,turns=0;
+    const injected=fetchThroughInject(app,[]);
+    const fetcher:typeof fetch=async(input,init)=>{
+      if(String(input).endsWith('/assistant/usage')&&failUsage){failUsage=false;return Response.json({error:{code:'fixture_temporarily_unavailable',message:'fixture transient failure'}},{status:503});}
+      return injected(input,init);
+    };
+    const paired=await pairNode(app,owner,directory,fetcher);
+    await client(app,owner.access_token,'/settings/execution','PUT',{default_engine:'codex',default_device_id:paired.config.device_id,assistant_device_id:paired.config.device_id});
+    paired.config.assistant=true;paired.config.fake_runtime=false;
+    paired.config.codex.model='fake-test-model';
+    agent=new NodeAgent(paired.config,{api:paired.api,log:()=>{},runtimeFactory:async()=>({execute:async(context)=>{
+      turns++;
+      await context.executeTool('task_start',{item_key:'fixture',goal:'Read-only proposed fixture',deliverables:['可核对结果'],engine:'codex',device_id:paired.config.device_id});
+      await context.emit({type:'usage',usage:{request_key:'scripted-success-before-transport',input_tokens:3,cached_input_tokens:0,output_tokens:2,reasoning_tokens:0}});
+      return{text:'脚本方案已准备，请确认目标。'};
+    },steer:async()=>{},stop:async()=>{}})});
+    const message=await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'Prepare a fixture proposal only'});
+    for(let i=0;i<80&&!agent.store.get(`assistant:${message.id}`);i++){await agent.tick();await sleep(40);}
+    assert.ok(agent.store.get(`assistant:${message.id}`));assert.equal(turns,1);assert.equal(failUsage,false);
+    const pending=await client<ListResponse<{summary:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation');
+    assert.equal(pending.items.length,1);assert.match(pending.items[0]!.summary,/脚本方案已准备/);
+    const replies=(await client<ListResponse<Message>>(app,owner.access_token,'/messages')).items.filter(m=>m.role==='assistant');
+    assert.equal(replies.length,1);assert.match(replies[0]!.content,/脚本方案已准备/);assert.doesNotMatch(replies[0]!.content,/未完成/);
+    assert.equal((await client<CostSummary>(app,owner.access_token,'/costs/summary')).request_count,1);
     assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,0);
   }finally{if(agent){await agent.stop();agent.close();}await app.close();rmSync(directory,{recursive:true,force:true});}
 });

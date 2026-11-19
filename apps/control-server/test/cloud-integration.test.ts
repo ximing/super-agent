@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import { buildApp, type ControlApp } from '../src/app.js';
 import { Store } from '../src/store.js';
-import { signObject, type S3Config } from '../src/objects.js';
+import { signObject,copySource, type S3Config } from '../src/objects.js';
 import { requireCloudTestDatabase } from './cloud-guard.js';
 
 const databaseUrl=process.env.TEST_DATABASE_URL;
@@ -101,10 +101,23 @@ test('cloud PostgreSQL and private S3: authenticated artifact upload, finalize a
   const accessKey=process.env.S3_ACCESS_KEY_ID??process.env.S3_ACCESS_KEY,secretKey=process.env.S3_SECRET_ACCESS_KEY??process.env.S3_SECRET_KEY;
   if(!process.env.S3_ENDPOINT||!accessKey||!secretKey)throw new Error('Dedicated test S3 settings are required');
   const s3:S3Config={endpoint:process.env.S3_ENDPOINT,bucket:'super-agent-test',region:process.env.S3_REGION??'cn-beijing',accessKey,secretKey};
-  const app=await buildApp({databaseUrl:databaseUrl!,jwtSecret:'cloud-s3-integration-secret-at-least-32-bytes',allowDevAuth:true,runScheduler:false,s3});
-  let objectKey:string|undefined;
+  const objectKeys=new Set<string>(),ownedArtifacts=new Set<string>();let fixtureTenant='',copyCount=0;
+  let race:{source:string;url:string;headers:Record<string,string>;body:Buffer;triggered:boolean;overwrite_succeeded:boolean;condition_rejected:boolean}|null=null;
+  const rawFetch=fetch,objectFetch=(async(input:RequestInfo|URL,init?:RequestInit)=>{
+    const headers=new Headers(init?.headers);let raced=false;
+    if(init?.method==='PUT'&&headers.has('x-amz-copy-source')){
+      const url=new URL(String(input)),prefix=new URL(s3.endpoint).pathname.replace(/\/$/,'')+`/${encodeURIComponent(s3.bucket)}/`;if(!url.pathname.startsWith(prefix))throw new Error('Refusing unexpected TEST object path');const key=decodeURIComponent(url.pathname.slice(prefix.length));
+      if(!fixtureTenant||!key.startsWith(`artifacts/final/${fixtureTenant}/`)||![...ownedArtifacts].some(id=>key.startsWith(`artifacts/final/${fixtureTenant}/${id}/`)))throw new Error('Refusing a copy outside this controlled TEST fixture');
+      objectKeys.add(key);copyCount++;
+      if(race&&!race.triggered&&headers.get('x-amz-copy-source')===race.source){race.triggered=true;const changed=await rawFetch(race.url,{method:'PUT',headers:race.headers,body:race.body});assert.ok(changed.ok,'Controlled source overwrite must succeed');race.overwrite_succeeded=true;raced=true;}
+    }
+    const response=await rawFetch(input,init);
+    if(raced&&race)race.condition_rejected=[409,412].includes(response.status)||response.status===200&&/<Code>(?:PreconditionFailed|ConditionalRequestConflict)<\/Code>/.test(await response.clone().text());
+    return response;
+  }) as typeof fetch;
+  const app=await buildApp({databaseUrl:databaseUrl!,jwtSecret:'cloud-s3-integration-secret-at-least-32-bytes',allowDevAuth:true,runScheduler:false,s3,objectFetch});
   try{
-    const login=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`s3-${randomUUID()}@example.com`}});assert.equal(login.statusCode,200);const session=login.json(),headers={authorization:`Bearer ${session.access_token}`};
+    const login=await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`s3-${randomUUID()}@example.com`}});assert.equal(login.statusCode,200);const session=login.json(),headers={authorization:`Bearer ${session.access_token}`};fixtureTenant=session.user.tenant_id;
     const keys=generateKeyPairSync('ed25519');
     const pair=(await app.inject({method:'POST',url:'/v1/device-pairings',payload:{name:'Artifact fixture Mac',public_key:keys.publicKey.export({type:'spki',format:'pem'}).toString()}})).json();
     const claim=await app.inject({method:'POST',url:'/v1/device-pairings/claim',headers,payload:{code:pair.code}});assert.equal(claim.statusCode,200);const deviceId=claim.json().device_id;
@@ -121,13 +134,22 @@ test('cloud PostgreSQL and private S3: authenticated artifact upload, finalize a
     const runHeaders={...deviceHeaders,'x-run-ticket':accept.json().run_ticket};assert.equal(accept.json().task.id,task.id);
     const content=Buffer.from(`super-agent integration ${randomUUID()}`);
     const request=await app.inject({method:'POST',url:'/v1/artifacts/uploads',headers,payload:{name:'integration.txt',mime:'text/plain',size:content.length,task_id:task.id}});assert.equal(request.statusCode,200);const upload=request.json();
-    objectKey=`${session.user.tenant_id}/${upload.artifact_id}/content`;
+    ownedArtifacts.add(upload.artifact_id);const staged=await app.control.store.tenant(fixtureTenant,tx=>tx.need('artifacts',upload.artifact_id));objectKeys.add(staged.staging_object_key);
     const put=await fetch(upload.upload_url,{method:'PUT',headers:upload.upload_headers,body:content});assert.ok(put.ok,`private test upload status ${put.status}`);
-    const finalize=await app.inject({method:'POST',url:`/v1/artifacts/${upload.artifact_id}/finalize`,headers,payload:{}});assert.equal(finalize.statusCode,200);assert.equal(finalize.json().status,'ready');
+    const finalize=await app.inject({method:'POST',url:`/v1/artifacts/${upload.artifact_id}/finalize`,headers,payload:{}});assert.equal(finalize.statusCode,200);assert.equal(finalize.json().status,'ready');assert.equal(finalize.json().integrity,'server_snapshot');assert.equal(finalize.json().object_key,undefined);assert.equal(finalize.json().staging_object_key,undefined);
     const download=await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers});assert.equal(download.statusCode,200);
     const actual=await fetch(download.json().url);assert.ok(actual.ok);assert.deepEqual(Buffer.from(await actual.arrayBuffer()),content);
+    assert.equal(download.json().integrity,'server_snapshot');
+    const changed=Buffer.alloc(content.length,0x42);assert.ok((await fetch(upload.upload_url,{method:'PUT',headers:upload.upload_headers,body:changed})).ok,'The old PUT still targets staging');
+    assert.deepEqual(Buffer.from(await (await fetch(download.json().url)).arrayBuffer()),content,'Overwriting staging after finalize cannot mutate the delivery');
+    const copiesBeforeReplay=copyCount,repeat=await app.inject({method:'POST',url:`/v1/artifacts/${upload.artifact_id}/finalize`,headers,payload:{}});assert.equal(repeat.statusCode,200);assert.equal(copyCount,copiesBeforeReplay);assert.equal(repeat.json().finalized_at,finalize.json().finalized_at);assert.deepEqual(Buffer.from(await (await fetch(download.json().url)).arrayBuffer()),content);
+    const raceStart=(await app.inject({method:'POST',url:'/v1/artifacts/uploads',headers,payload:{name:'race.txt',mime:'text/plain',size:content.length,task_id:task.id}})).json();ownedArtifacts.add(raceStart.artifact_id);
+    const raceArtifact=await app.control.store.tenant(fixtureTenant,tx=>tx.need('artifacts',raceStart.artifact_id));objectKeys.add(raceArtifact.staging_object_key);
+    assert.ok((await fetch(raceStart.upload_url,{method:'PUT',headers:raceStart.upload_headers,body:content})).ok);
+    race={source:copySource(s3,raceArtifact.staging_object_key),url:raceStart.upload_url,headers:raceStart.upload_headers,body:changed,triggered:false,overwrite_succeeded:false,condition_rejected:false};
+    const raceResult=await app.inject({method:'POST',url:`/v1/artifacts/${raceStart.artifact_id}/finalize`,headers,payload:{}});assert.ok(race.triggered&&race.overwrite_succeeded);assert.ok(race.condition_rejected,'Cloud S3 must enforce the signed copy-source precondition');assert.ok([409,503].includes(raceResult.statusCode),'Cloud S3 must refuse a copy of a source changed after HEAD');assert.equal((await app.control.store.tenant(fixtureTenant,tx=>tx.need('artifacts',raceStart.artifact_id))).status,'staged');
     const unsigned=new URL(download.json().url);unsigned.search='';assert.notEqual((await fetch(unsigned)).status,200,'Private object must reject unsigned reads');
-    const workerList=await app.inject({method:'GET',url:'/v1/artifacts',headers:runHeaders});assert.equal(workerList.statusCode,200);assert.deepEqual(workerList.json().items.map((a:any)=>a.id),[upload.artifact_id]);assert.equal(workerList.json().items[0].object_key,undefined);
+    const workerList=await app.inject({method:'GET',url:'/v1/artifacts',headers:runHeaders});assert.equal(workerList.statusCode,200);assert.ok(workerList.json().items.some((a:any)=>a.id===upload.artifact_id&&a.integrity==='server_snapshot'));assert.equal(workerList.json().items[0].object_key,undefined);
     assert.equal((await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers:runHeaders})).statusCode,200,'Current worker can read user task input without a source run');
     assert.equal((await app.inject({method:'GET',url:`/v1/artifacts?task_id=${foreignTask.id}`,headers:runHeaders})).statusCode,404);
     const foreignUpload=await app.inject({method:'POST',url:'/v1/artifacts/uploads',headers,payload:{name:'foreign.txt',mime:'text/plain',size:1,task_id:foreignTask.id}});assert.equal(foreignUpload.statusCode,200);
@@ -137,7 +159,7 @@ test('cloud PostgreSQL and private S3: authenticated artifact upload, finalize a
     assert.equal((await app.inject({method:'POST',url:`/v1/artifacts/${upload.artifact_id}/finalize`,headers:runHeaders,payload:{}})).statusCode,404,'A new run cannot finalize another run upload');
     const other=(await app.inject({method:'POST',url:'/v1/auth/dev',payload:{email:`s3-other-${randomUUID()}@example.com`}})).json();
     assert.equal((await app.inject({method:'GET',url:`/v1/artifacts/${upload.artifact_id}/download`,headers:{authorization:`Bearer ${other.access_token}`}})).statusCode,404);
-  }finally{if(objectKey)await fetch(signObject(s3,'DELETE',objectKey),{method:'DELETE'});await app.close();}
+  }finally{let failed=false;for(const key of objectKeys){try{const response=await rawFetch(signObject(s3,'DELETE',key),{method:'DELETE'});if(!response.ok&&response.status!==404)failed=true;}catch{failed=true;}}await app.close();assert.equal(failed,false,'Controlled TEST staging/final objects must be cleaned up');}
 });
 
 test('cloud PostgreSQL: Recall actor bindings are encrypted, tenant scoped and cannot share an external account', {skip:!databaseUrl,timeout:120000},async()=>{

@@ -9,18 +9,24 @@ struct TasksView: View {
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
-                HStack { Text("\(model.tasks.count) 项工作").font(.caption).foregroundStyle(.secondary); Spacer(); Button { newTask = true } label: { Image(systemName: "plus") }.help("派新任务") }.padding(16)
+                HStack { Text("已加载 \(model.tasks.count) 项工作").font(.caption).foregroundStyle(.secondary); Spacer(); Button { newTask = true } label: { Image(systemName: "plus") }.help("派新任务") }.padding(16)
                 List(selection: $selected) {
-                    ForEach(model.tasks) { task in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(task.title).font(.body.weight(.medium)).lineLimit(2)
-                            StatusLabel(value: task.status)
-                            Text(task.deviceName ?? task.engine.rawValue.capitalized).font(.caption).foregroundStyle(.secondary)
-                        }.padding(.vertical, 9).tag(task.id)
+                    ForEach(TaskGraph.groups(model.tasks)) { group in
+                        Section(group.title) {
+                            ForEach(group.entries) { entry in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(entry.task.title).font(.body.weight(.medium)).lineLimit(2)
+                                    StatusLabel(value: entry.task.status)
+                                    Text(entry.task.deviceName ?? entry.task.engine.rawValue.capitalized).font(.caption).foregroundStyle(.secondary)
+                                    if entry.parentUnavailable { Text("上级不在已加载分组中").font(.caption2).foregroundStyle(.secondary) }
+                                    if entry.relationUncertain { Text("更深层任务或层级待核对").font(.caption2).foregroundStyle(.secondary) }
+                                }.padding(.vertical, 9).padding(.leading, CGFloat(entry.depth * 12)).tag(entry.task.id)
+                            }
+                        }
                     }
                 }.listStyle(.inset)
             }.frame(minWidth: 240, idealWidth: 290, maxWidth: 350)
-            if let task = model.tasks.first(where: { $0.id == selected }) { TaskDetailView(task: task).id(task.id).frame(maxWidth: .infinity) }
+            if let task = model.tasks.first(where: { $0.id == selected }) { TaskDetailView(task: task, onSelectTask: { selected = $0 }).id(task.id).frame(maxWidth: .infinity) }
             else { EmptyState(icon: "checklist", title: "选择一项任务", detail: "查看它的目标、执行电脑、运行记录和需要你处理的事项。") }
         }.sheet(isPresented: $newTask) {
             VStack(alignment: .leading, spacing: 18) { Text("交办一项工作").font(.title2.weight(.semibold)); ExecutionPicker(); TextEditor(text: $goal).frame(height: 160).border(.quaternary); Text("描述目标与交付物。明确交办的范围内，助理会自主执行。").font(.callout).foregroundStyle(.secondary); HStack { Button("取消") { newTask = false }; Spacer(); Button("创建任务") { let value = goal; goal = ""; newTask = false; Task { await model.createTask(value) } }.buttonStyle(.borderedProminent).disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.selectedDevice.isEmpty) } }.padding(28).frame(width: 600)
@@ -30,6 +36,7 @@ struct TasksView: View {
 struct TaskDetailView: View {
     @EnvironmentObject var model: WorkspaceModel
     let task: AgentTask
+    let onSelectTask: (String) -> Void
     @State private var runs: [Run] = []
     @State private var messages: [Message] = []
     @State private var input = ""
@@ -47,10 +54,12 @@ struct TaskDetailView: View {
                 HStack(spacing: 25) { Label(task.engine.rawValue.capitalized, systemImage: "sparkle"); Label(task.deviceName ?? model.devices.first(where: { $0.id == task.deviceId })?.name ?? "等待设备", systemImage: "desktopcomputer"); if let modelId = task.modelId { Text(modelId) } }.font(.callout).foregroundStyle(.secondary)
                 if let reason = task.reasonCode { Label(reason, systemImage: "info.circle").font(.callout).foregroundStyle(.orange) }
                 ForEach(model.questions.filter { $0.taskId == task.id }) { QuestionRow(question: $0) }
+                TaskRelationsView(task: task, onSelect: onSelectTask)
+                if task.status == "awaiting_review" { DeliveryReviewView(taskId: task.id) }
                 Divider()
                 Text("运行记录").font(.headline)
                 if runs.isEmpty { Text("任务尚未开始执行。").foregroundStyle(.secondary) }
-                ForEach(runs) { run in HStack(alignment: .top, spacing: 12) { Image(systemName: "circle.dotted").foregroundStyle(Palette.blue); VStack(alignment: .leading, spacing: 6) { HStack { Text(run.engine.rawValue.capitalized).fontWeight(.medium); StatusLabel(value: run.state); Spacer(); Text(formatTime(run.createdAt)).font(.caption).foregroundStyle(.secondary) }; Text(run.resultText.flatMap { $0.isEmpty ? nil : $0 } ?? (run.summary.isEmpty ? run.modelId : run.summary)).font(.callout).textSelection(.enabled) } }.padding(.vertical, 5) }
+                ForEach(runs) { run in HStack(alignment: .top, spacing: 12) { Image(systemName: "circle.dotted").foregroundStyle(Palette.blue); VStack(alignment: .leading, spacing: 6) { HStack { Text(run.engine.rawValue.capitalized).fontWeight(.medium); StatusLabel(value: run.state); Spacer(); Text(formatTime(run.createdAt)).font(.caption).foregroundStyle(.secondary) }; Text(run.resultText.flatMap { $0.isEmpty ? nil : $0 } ?? (run.summary.isEmpty ? run.modelId : run.summary)).font(.callout).textSelection(.enabled); ToolTimelineView(runId: run.id, state: run.state) } }.padding(.vertical, 5) }
                 if let runId = task.currentRunId { BrowserFrameView(runId: runId) }
                 TaskArtifactsView(taskId: task.id)
                 Divider()

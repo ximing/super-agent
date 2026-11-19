@@ -3,9 +3,9 @@ export interface User { id: string; email: string; name: string; tenant_id: stri
 export interface Session { access_token: string; refresh_token: string; expires_in: number; user: User }
 export interface AuthConfig { mode: 'development' | 'oidc'; issuer?: string; client_id?: string; authorization_endpoint?: string; token_endpoint?: string; redirect_uri?: string }
 export interface EngineCapability { engine: Engine; ready: boolean; models: string[]; reason?: string }
-export interface Device { id: string; name: string; status: string; last_seen_at: string | null; version: number; capabilities: { generation: number; engines: EngineCapability[]; tools: string[]; slots: { browser: number; worker: number } } }
+export interface Device { revoked?: boolean; id: string; name: string; status: string; last_seen_at: string | null; version: number; capabilities: { generation: number; engines: EngineCapability[]; tools: string[]; slots: { browser: number; worker: number } } }
 export interface ExecutionSettings { default_engine: Engine; default_device_id: string | null; assistant_device_id: string | null; version: number }
-export interface AgentTask { id: string; title: string; goal: string; status: string; reason_code: string | null; engine: Engine; model_id: string | null; device_id: string | null; device_name?: string | null; current_run_id: string | null; created_at: string; updated_at: string; version: number }
+export interface AgentTask {parent_task_id?:string|null;root_task_id?:string|null;plan_id?:string|null;depends_on_task_ids?:string[];deliverables?:string[];delivery_status?:'not_submitted'|'pending'|'accepted'|'rejected'|'needs_input'|null; id: string; title: string; goal: string; status: string; reason_code: string | null; engine: Engine; model_id: string | null; device_id: string | null; device_name?: string | null; current_run_id: string | null; created_at: string; updated_at: string; version: number }
 export interface Run { id: string; task_id: string; state: string; engine: Engine; device_id: string; model_id: string; lease_epoch: string; summary: string; result_text?: string | null; created_at: string }
 export interface Message { id: string; role: string; content: string; task_id: string | null; created_at: string }
 export interface Question { id: string; task_id: string; run_id: string; text: string; options: string[]; status: string; version: number; created_at: string }
@@ -22,3 +22,10 @@ export interface Budget { monthly_limit_usd: string | null; task_limit_usd: stri
 export interface Frame { frame_id: string; image_base64: string; width: number; height: number; captured_at: string; viewport_version: string; tab_id: string | null }
 export interface List<T> { items: T[]; next_cursor?: string | null }
 export interface EventBatch { items: {event_id: string; stream_seq: string; type: string}[]; cursor: string }
+
+export interface ToolStep {id:string;run_id:string;tool:string;title:string;status:'running'|'succeeded'|'failed'|'cancelled'|'result_unknown';started_at:string|null;completed_at:string|null;error_code:'tool_failed'|'invalid_arguments'|'not_authorized'|'cancelled'|'result_unknown'|null;created_at:string;version:number}
+
+export interface EvidenceReference {kind:'artifact'|'step'|'checkpoint';id:string}
+export interface DeliveryRecord {id:string;run_id:string;status:'pending'|'accepted'|'rejected'|'needs_input';deliverables:string[];artifact_ids:string[];version:number}
+export interface TaskEvidence {task:AgentTask;run:Run|null;delivery:DeliveryRecord|null;deliverables:string[];checkpoint:{id:string;created_at:string}|null;steps:ToolStep[];artifacts:Artifact[]}
+export interface ReviewInput {run_id:string;verdict:'accept'|'reject'|'needs_input';summary:string;checks:{deliverable_index:number;passed:boolean;evidence_refs:EvidenceReference[]}[]}

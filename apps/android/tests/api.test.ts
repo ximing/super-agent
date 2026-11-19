@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {APIClient, validateServer, type SessionStore} from '../src/api';
+import {APIClient, APIError, validateServer, type SessionStore} from '../src/api';
 import type {Session} from '../src/types';
 
 const session:Session={access_token:'test-access',refresh_token:'test-refresh',expires_in:600,user:{id:'u',email:'test@example.com',name:'Test',tenant_id:'t'}};
@@ -35,4 +35,11 @@ test('bodyless DELETE is valid for Fastify JSON parsing and preserves authorizat
   const transport=(async(_url:unknown,init:RequestInit)=>{called=true;assert.equal(init.method,'DELETE');assert.equal(init.body,undefined);const headers=new Headers(init.headers);assert.equal(headers.get('Content-Type'),null);assert.equal(headers.get('Accept'),'application/json');assert.equal(headers.get('If-Match'),'"12"');assert.equal(headers.get('Authorization'),'Bearer test-access');return new Response(null,{status:204});}) as typeof fetch;
   const client=new APIClient(store(),()=> 'id',transport);await client.configure('https://agent.example');await client.setSession(session);
   await client.request('/memories/test-memory',{method:'DELETE',version:12});assert.equal(called,true);
+});
+
+test('device revocation reads current version, preserves session and surfaces conflicts',async()=>{
+  const calls:RequestInit[]=[];
+  const transport=(async(_url:unknown,init:RequestInit)=>{calls.push(init);if(init.method==='GET')return new Response(JSON.stringify({items:[{id:'fixture-device',version:42}]}),{status:200});const headers=new Headers(init.headers);assert.equal(init.method,'DELETE');assert.equal(init.body,undefined);assert.equal(headers.get('Content-Type'),null);assert.equal(headers.get('If-Match'),'"42"');assert.equal(headers.get('Authorization'),'Bearer test-access');return new Response(JSON.stringify({error:{code:'version_conflict',message:'Refresh required'}}),{status:409});}) as typeof fetch;
+  const client=new APIClient(store(),()=> 'id',transport);await client.configure('https://agent.example');await client.setSession(session);
+  await assert.rejects(client.revokeDevice('fixture-device'),error=>error instanceof APIError&&error.status===409&&error.code==='version_conflict');assert.equal(calls.length,2);assert.equal(client.session,session);
 });

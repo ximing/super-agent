@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
 import { dirname } from 'node:path';
-import type { WireMessage, RunContext } from '@super-agent/protocol';
+import type { WireMessage, RunContext, ToolStepUpdate } from '@super-agent/protocol';
 type Row = Record<string, unknown>;
 
 /** Local durable inbox/outbox. No model credentials are ever stored here. */
@@ -21,7 +21,9 @@ export class LocalStore {
       CREATE TABLE IF NOT EXISTS local_runs(run_id TEXT PRIMARY KEY,context TEXT NOT NULL,state TEXT NOT NULL,binding TEXT,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS usage_revisions(identity TEXT PRIMARY KEY,revision INTEGER NOT NULL,payload_hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS assistant_outbox(message_id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS coordinator_outbox(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_receipts(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,tool TEXT NOT NULL,result_hash TEXT NOT NULL,completed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS tool_steps(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
     `);
   }
   get<T>(key: string): T | undefined { const row = this.db.prepare('SELECT value FROM kv WHERE key=?').get(key) as Row | undefined; return row ? JSON.parse(String(row.value)) as T : undefined; }
@@ -85,7 +87,29 @@ export class LocalStore {
   saveAssistant(messageId: string, payload: Record<string, unknown>): void { this.db.prepare('INSERT INTO assistant_outbox VALUES(?,?,?) ON CONFLICT(message_id) DO UPDATE SET payload=excluded.payload').run(messageId, JSON.stringify(payload), new Date().toISOString()); }
   assistantPending(): { messageId: string; payload: Record<string, unknown> }[] { return (this.db.prepare('SELECT * FROM assistant_outbox ORDER BY created_at').all() as Row[]).map(row => ({ messageId: String(row.message_id), payload: JSON.parse(String(row.payload)) as Record<string, unknown> })); }
   assistantDone(messageId: string): void { this.db.prepare('DELETE FROM assistant_outbox WHERE message_id=?').run(messageId); }
+  saveCoordinator(eventId: string, payload: unknown): void { this.db.prepare('INSERT INTO coordinator_outbox VALUES(?,?,?) ON CONFLICT(event_id) DO UPDATE SET payload=excluded.payload').run(eventId, JSON.stringify(payload), new Date().toISOString()); }
+  coordinatorPending<T>(): { eventId: string; payload: T }[] { return (this.db.prepare('SELECT * FROM coordinator_outbox ORDER BY created_at').all() as Row[]).map(row => ({ eventId: String(row.event_id), payload: JSON.parse(String(row.payload)) as T })); }
+  coordinatorDone(eventId: string): void { this.db.prepare('DELETE FROM coordinator_outbox WHERE event_id=?').run(eventId); }
   operation(runId: string, tool: string, result: unknown): void { this.db.prepare('INSERT INTO tool_receipts VALUES(?,?,?,?,?)').run(randomUUID(), runId, tool, createHash('sha256').update(JSON.stringify(result ?? null)).digest('hex'), new Date().toISOString()); }
   receipts(runId: string): Record<string, unknown>[] { return this.db.prepare('SELECT id,tool,result_hash,completed_at FROM tool_receipts WHERE run_id=? ORDER BY completed_at,rowid').all(runId) as Record<string, unknown>[]; }
+  /** A step update and its delivery must commit together, including across node restarts. */
+  recordStep(runId: string, step: ToolStepUpdate, authorization: { device_id: string; lease_epoch: string }): WireMessage | null {
+    this.db.exec('BEGIN IMMEDIATE'); this.inTransaction = true;
+    try {
+      const safe: ToolStepUpdate = { step_id: step.step_id, tool: step.tool, status: step.status, started_at: step.started_at, completed_at: step.completed_at, error_code: step.error_code };
+      const serialized = JSON.stringify(safe);
+      const old = this.db.prepare('SELECT run_id,status,payload FROM tool_steps WHERE id=?').get(step.step_id) as Row | undefined;
+      if (old && old.run_id !== runId) throw new Error('tool_step_run_conflict');
+      if (old?.payload === serialized) { this.db.exec('COMMIT'); return null; }
+      if (old && old.status !== 'running') throw new Error('tool_step_already_completed');
+      this.db.prepare('INSERT INTO tool_steps VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,payload=excluded.payload').run(step.step_id, runId, step.status, serialized);
+      const message = this.enqueue('step.updated', { ...authorization, ...safe, run_id: runId }, runId);
+      this.db.exec('COMMIT'); return message;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    finally { this.inTransaction = false; }
+  }
+  unfinishedSteps(runId: string): ToolStepUpdate[] {
+    return (this.db.prepare("SELECT payload FROM tool_steps WHERE run_id=? AND status='running' ORDER BY rowid").all(runId) as Row[]).map(row => JSON.parse(String(row.payload)) as ToolStepUpdate);
+  }
   close(): void { this.db.close(); }
 }

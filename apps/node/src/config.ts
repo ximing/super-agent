@@ -18,8 +18,10 @@ export interface NodeConfig {
   allow_shell: boolean;
   fake_runtime: boolean;
   codex: { enabled: boolean; command: string; model: string; sandbox: 'workspace-write' | 'danger-full-access' };
-  grok: { enabled: boolean; model: string; key_env: string; key_file?: string; keychain_service?: string; base_url: string };
+  grok: { enabled: boolean; mode?: 'api' | 'cli'; command?: string; model: string; key_env: string; key_file?: string; keychain_service?: string; base_url: string };
   assistant: boolean;
+  assistant_engine?: 'codex' | 'grok';
+  browser?: { enabled: boolean };
   proxy_url?: string;
 }
 export const defaultConfigPath = () => process.env.SUPER_AGENT_NODE_CONFIG ?? join(homedir(), '.super-agent', 'node.json');

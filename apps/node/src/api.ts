@@ -16,7 +16,7 @@ export class NodeApi {
     const result = await this.raw<{ access_token: string; expires_in: number }>('/devices/auth/token', { device_id: this.config.device_id, nonce: challenge.nonce, signature });
     this.token = result.access_token; this.expires = Date.now() + result.expires_in * 1000;
   }
-  async request<T = Record<string, unknown>>(path: string, body?: unknown, options: { runTicket?: string; assistantEpoch?: string; method?: string; idempotencyKey?: string } = {}): Promise<T> {
+  async request<T = Record<string, unknown>>(path: string, body?: unknown, options: { runTicket?: string; assistantEpoch?: string; method?: string; idempotencyKey?: string; version?: number } = {}): Promise<T> {
     if (this.expires - Date.now() < 30_000) await this.authenticate();
     try { return await this.raw<T>(path, body, { ...options, token: this.token }); }
     catch (error) {
@@ -24,9 +24,10 @@ export class NodeApi {
       throw error;
     }
   }
-  async raw<T = Record<string, unknown>>(path: string, body?: unknown, options: { token?: string; runTicket?: string; assistantEpoch?: string; method?: string; idempotencyKey?: string } = {}): Promise<T> {
+  async raw<T = Record<string, unknown>>(path: string, body?: unknown, options: { token?: string; runTicket?: string; assistantEpoch?: string; method?: string; idempotencyKey?: string; version?: number } = {}): Promise<T> {
+    if (options.version !== undefined && (!Number.isSafeInteger(options.version) || options.version < 1)) throw new Error('invalid_entity_version');
     const response = await this.fetcher(`${this.config.server_url}/v1${path}`, {
-      method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...(options.runTicket ? { 'x-run-ticket': options.runTicket } : {}), ...(options.assistantEpoch ? { 'x-assistant-epoch': options.assistantEpoch } : {}), ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}) },
+      method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...(options.runTicket ? { 'x-run-ticket': options.runTicket } : {}), ...(options.assistantEpoch ? { 'x-assistant-epoch': options.assistantEpoch } : {}), ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}), ...(options.version === undefined ? {} : { 'if-match': `"${options.version}"` }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000),
     });
     if (!response.ok) {

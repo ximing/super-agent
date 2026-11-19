@@ -36,7 +36,7 @@ launchctl print "gui/$(id -u)/com.superagent.node"
 
 生成的 plist 只持久化安全 PATH：当前 Node 可执行文件目录、当前 PATH 中的绝对目录及常规 Homebrew/系统目录；不复制模型 Key、代理凭据或其他环境变量。程序与配置路径支持空格。若升级或移动 Node、Codex 或项目目录，重新生成 plist 并在正式 Mac 上更新注册；也可在本机配置中把 `codex.command` 指向稳定的绝对路径。
 
-真实模式每次 `start` 会检查已有 `~/.csi/bin/csi` 的可执行权限并调用官方幂等 `start`。不会自动 install、stop 或 restart。CSI 缺失或启动失败时只输出固定诊断，节点仍可处理非浏览器任务；FakeRuntime 完全跳过此步骤。CSI 安装器不注册登录自启，节点启动检查负责补上重启后的启动；扩展和已登录的 Chrome 仍需可用。
+本机 `browser.enabled=false` 时不启动 CSI、不列出浏览器工具。启用浏览器时，能力探测只读 CSI `/status`，必须扩展连接才广告 browser；文件/记忆任务不依赖它。真实模式每次 `start` 会检查已有 `~/.csi/bin/csi` 的可执行权限并调用官方幂等 `start`。不会自动 install、stop 或 restart。CSI 缺失或启动失败时只输出固定诊断，节点仍可处理非浏览器任务；FakeRuntime 完全跳过此步骤。CSI 安装器不注册登录自启，节点启动检查负责补上重启后的启动；扩展和已登录的 Chrome 仍需可用。
 
 保持正式 Mac 的用户会话登录、Chrome 扩展运行、网络与所需系统代理可用，并按需要配置系统电源设置避免任务期间休眠。LaunchAgent 属于用户登录会话，不能替代登录界面中的桌面会话。日志位于 `~/.super-agent/launchd/node.log` 和 `node-error.log`。
 
@@ -92,7 +92,7 @@ node apps/node/dist/cli.js start --config /tmp/super-agent-test-node/node.json
 - Codex 默认使用版本化 app-server 的实验 dynamicTools，未启用时应报错，不伪装 MCP 已正常工作；另提供本地 stdio MCP bridge 实现供支持的配置接入。
 - 预算/停止对在途原生模型请求与本机全权限绕过无法提供绝对封顶；网站提交结果不明时需要核对。
 - GUI 浏览器依赖 macOS 登录会话、CSI daemon 与 Chrome 扩展；系统弹窗、验证码、跨域 iframe 仍可能需要用户介入。
-- 实际 Grok 调用需要用户已配置 Key/模型；测试使用本机 mock HTTP，不声称已验证付费云账号。
+- Grok 支持两种本机模式：原有 Responses API Key/模型，以及官方原生 Grok Build CLI 1.0.89 既有登录。原生 CLI 已通过独立单文件受限真实回合；正式产品 Task、浏览器业务与云端记忆绑定仍需分别验收。
 - 已用真实云端专用 PostgreSQL 与进程内 Fastify inject 验证节点配对、执行、重启去重、方案确认、第二台电脑路由与画面接管。测试运行时、CSI 和 Agent Recall 上游是明确的 mock；真实供应商推理、实际 Chrome 登录态和公网部署仍需要部署环境验证。
 
 ## 云端跨组件验证
@@ -102,3 +102,15 @@ node apps/node/dist/cli.js start --config /tmp/super-agent-test-node/node.json
 运行中每2秒默认检查执行续租与停止，可在节点配置中用 `renew_interval_ms` 调整；它与 `poll_interval_ms` 一起影响用户停止与接管响应。主助理租约单独维护，避免长规划回合过期。
 
 协议来源：[Codex app-server](https://learn.chatgpt.com/docs/app-server)、[Grok function calling](https://docs.x.ai/developers/tools/function-calling)。
+
+## 官方 Grok CLI 与可移植 Worker 包
+
+复用正式 Mac 已登录的官方 Grok Build 1.0.89 时，在本机配置中设置 `grok.mode="cli"`、`grok.command` 为稳定绝对路径、`grok.model=""` 使用默认模型，并用 `assistant_engine="grok"` 选择本机主助理默认引擎。API 模式仍可使用上述本机 Key 来源；CLI 模式完全不读取 Key 配置，不向服务端传模型认证。默认模型在控制端显示为 `configured-default`。原有 Grok MCP 与全局配置保持原样，任务使用隔离工具配置和原认证文件路径；详见 [Grok runtime](../../packages/runtime-grok/README.md)。
+
+构建稳定后，可只打包 Worker 所需的 5 个 workspace（不包含服务端、数据库、用户配置或任何认证文件）：
+
+```sh
+node apps/node/scripts/bundle.mjs /absolute/new/super-agent-worker-release
+```
+
+将新目录完整复制到正式 Mac 的长期 release 目录即可，不需要目标机器安装 pnpm。使用目标机 Node 24.14+ 运行包里的 `apps/node/dist/cli.js`。每个 release 保持独立，本机 `--config`/data_dir 放在 release 之外；更新时无需复制或覆盖 Grok/Codex 登录文件。正式配对先 `init`、`pair`，由用户在产品中认领后再 `start`，首次以前台验证，按需另行注册用户 LaunchAgent。
