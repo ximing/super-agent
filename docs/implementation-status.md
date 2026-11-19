@@ -10,7 +10,7 @@
 - 控制服务与节点构建通过；服务端 21 项 + 跨组件 4 项测试在同一轮并行回归 **25/25、0 skip**，使用真实专用云 test 数据库和私有 S3。覆盖隔离、签名重放拒绝、确认与计费幂等、会话撤销、记忆绑定、接管回收、文件权限、版本迁移和 DDL/业务互斥。数据库连接故障明确返回可重试 503。
 - 跨组件测试使用真实 NodeAgent/SQLite/Fastify 与云 PG；模型使用明确 FakeRuntime，CSI 使用明确 mock。验证聊天确认前无 Task、确认后仅一个 Task 到指定第二台电脑/Grok、重启去重、澄清上下文、暂停接管与 Retina 坐标换算。
 - Android typecheck、5 项 API/安全配置测试和 763 modules Hermes JS 导出通过。独立 release APK 已由最新 GHA 构建通过，CI 和下载后均核验内嵌 Hermes 字节码、不依赖 Metro，APK 签名校验通过；包约 56 MiB，Android 7+。内部测试签名与正式发布签名分开。
-- Swift 编译、5 项 XCTest、release appbundle 与本机签名通过；离线登录页截图已检查，原生“读取登录配置”已实连公网 API 并启用安全登录。正式分发签名/公证尚需用户 Apple 开发者配置。
+- Swift 编译、9 项 XCTest、release appbundle 与本机签名通过；新增严格回调与设备撤销并发版本校验。云 CI 最终安装包已在本机启动并保留产品登录会话，已撤销设备不会作为执行目标。正式分发签名/公证尚需用户 Apple 开发者配置。
 - 真实云端 OIDC S256 授权、callback state、Token 交换、JWT 签名/audience、产品会话与注销撤销通过；临时 Keycloak 测试用户已删除。已修复 Keycloak 26 client 默认 scope 缺 basic 导致无 sub 的配置问题。
 - 使用本机已连接的 Recall 账号验证产品绑定与直接读取既有内容通过；临时产品绑定已按 version 删除，未修改既有记忆内容。PAT 未输出、未进入公开仓库。
 - 真实 CSI/Chrome 已验证 BrowserActor 快照、JPEG 帧/视口尺寸和接管 CDP 点击；测试仅操作新建公开示例页，未读取用户其他标签页。
@@ -29,8 +29,8 @@
 | `super-agent-test` / `super-agent-prod` S3 | 已创建/验证，Put/Get/Delete smoke test 通过 |
 | Recall | 每用户独立加密绑定、既有记录读取、候选审核发布与搜索适配已实现；真实账号绑定/列表与隔离测试已通过 |
 | OIDC | 云端 Keycloak、test/prod realms、native PKCE client、公网 HTTPS 与真实 Token/产品会话交换已验证 |
-| GitHub | [代码 ffecb56 的完整检查](https://github.com/ximing/super-agent/actions/runs/44444519702)全绿；服务代码未变，[61639c3 服务镜像](https://github.com/ximing/super-agent/actions/runs/44344248181)仍为当前生产版本 |
-| 安装包 | [v0.1.1-preview.1 Mac 登录改进包](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.1)已由云 CI 构建并公开发布；Android 沿用 [v0.1.0-preview.1 APK](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1) |
+| GitHub | [代码 ba2dcc0 的完整检查](https://github.com/ximing/super-agent/actions/runs/44446095351)全绿；服务代码未变，[61639c3 服务镜像](https://github.com/ximing/super-agent/actions/runs/44344248181)仍为当前生产版本 |
+| 安装包 | [v0.1.1-preview.2 Mac 登录与设备管理包](https://github.com/ximing/super-agent/releases/tag/v0.1.1-preview.2)已由云 CI 构建并公开发布，本机实测会话恢复；Android 沿用 [v0.1.0-preview.1 APK](https://github.com/ximing/super-agent/releases/tag/v0.1.0-preview.1) |
 | API | `https://super-agent.aimo.plus` 已切换 `super_agent_prod` / prod S3 / prod OIDC，容器 healthy；生产角色非 superuser/非 BYPASSRLS，任务 FORCE RLS，未授权401、开发登录404 |
 | 本地 Docker | 用户确认全清后执行；当前 Colima 的容器/镜像/卷均为 0，默认 context 未发现第二个可用引擎 |
 
@@ -61,7 +61,7 @@
 
 另行区分：Grok 真实账号、公司网站、真实多 Mac 接续、Android 真机及长时间弱网运行是尚未完成的验收；正式签名/公证是发布配置工作。它们不等于上述未实现功能。
 
-登录复测：本机 `ASWebAuthenticationSession` 请求已启动但未弹窗，系统交接根因尚未确认。Mac 新增显式“改用浏览器登录”，复用 PKCE 并严格校验、一次性消费回调；用户已沿此路径完成首次改密和生产登录，现场核对已进入真实工作台。新增阶段提示、取消与超时，8 项 Swift 测试通过。身份配置接口另曾出现 5 秒后返回不完整配置的间歇降级，仍需补可靠性处理；不将备用路径成功等同于原系统窗口问题已解决。
+登录复测：本机 `ASWebAuthenticationSession` 请求已启动但未弹窗，系统交接根因尚未确认。Mac 新增显式“改用浏览器登录”，复用 PKCE 并严格校验、一次性消费回调；用户已沿此路径完成首次改密和生产登录，现场核对已进入真实工作台。新增阶段提示、取消与超时；连同设备撤销共 9 项 Swift 测试通过。身份配置接口另曾出现 5 秒后返回不完整配置的间歇降级，仍需补可靠性处理；不将备用路径成功等同于原系统窗口问题已解决。
 
 首版定时关注支持创建/启停/删除，触发后提醒并准备待确认目标，确认后执行。应用前台用持久 REST 增量轮询；尚未实现 WSS 和服务端厂商推送，不声称应用关闭后已能收到远程通知。
 
