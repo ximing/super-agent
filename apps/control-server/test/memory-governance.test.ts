@@ -8,7 +8,8 @@ import { assessMemory, mergeConflictIds, plannerAccess, proposeRetrospective, re
 function localTx(tenant = randomUUID()): Tx {
   const tables = new Map<string, Map<string, Doc>>();
   const table = (name: string) => { if (!tables.has(name)) tables.set(name, new Map()); return tables.get(name)!; };
-  return { tenant, get: async (name: string, id: string, _lock = false) => table(name).get(id) ?? null, all: async (name: string, _lock = false) => [...table(name).values()], remove: async (name: string, id: string) => { table(name).delete(id); }, put: async (name: string, doc: Doc, id: string = doc.id ?? randomUUID()) => { const value = { ...doc, id, version: (table(name).get(id)?.version ?? 0) + 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }; table(name).set(id, value); return value; } } as unknown as Tx;
+  const put = async (name: string, doc: Doc, id: string = doc.id ?? randomUUID()) => { const value = { ...doc, id, version: (table(name).get(id)?.version ?? 0) + 1, created_at: table(name).get(id)?.created_at ?? new Date().toISOString(), updated_at: new Date().toISOString() }; table(name).set(id, value); return value; };
+  return { tenant, get: async (name: string, id: string, _lock = false) => table(name).get(id) ?? null, all: async (name: string, _lock = false) => [...table(name).values()], remove: async (name: string, id: string) => { table(name).delete(id); }, put, insertNew: async (name: string, doc: Doc, id: string = doc.id ?? randomUUID()) => table(name).has(id) ? null : put(name, doc, id) } as unknown as Tx;
 }
 function upstream() {
   const memoryId = randomUUID(), calls: Doc[] = [];
@@ -52,6 +53,14 @@ test('global preferences require an explicit global scope and authorization', as
   assert.equal(assessMemory({ ...memory, scope_kind: null }, open).allowed, false);
   assert.equal(assessMemory(memory, closed).allowed, false);
   assert.equal(assessMemory({ ...memory, type: 'experience', scope_kind: null, site: null }, workerAccess({ scope: { memory: { sites: ['internal.example.com'] } } }, null)).allowed, false);
+  const taskOnly = workerAccess({ scope: { memory: { global_preference: true, sites: [] } } }, null, { memory_global_read: false });
+  assert.equal(taskOnly.global_preference, false);
+  assert.equal(assessMemory(memory, taskOnly).allowed, false);
+  const authorized = workerAccess({ scope: { memory: { global_preference: true, sites: [] } } }, null, { memory_global_read: true });
+  assert.equal(authorized.global_preference, true);
+  assert.equal(assessMemory(memory, authorized).allowed, true);
+  assert.equal(plannerAccess({ memory_global_read: false }, null, { scope: { memory: { global_preference: true, sites: ['internal.example.com'] } } }).global_preference, false);
+  assert.equal(plannerAccess({ memory_global_read: true }, null, null).global_preference, true);
 });
 
 test('candidates stay unverified and retrospective writes are idempotent without publishing', async () => {
@@ -164,4 +173,34 @@ test('publishing a candidate keeps the inference claim and evidence chain', asyn
   assert.equal(published.governance.source_run_id, 'run-1');
   assert.equal(published.governance.applicability.project, 'isolated-test');
   assert.equal(mock.calls.some(call => call.method === 'DELETE'), false);
+});
+
+test('a recall-only memory gets an overlay on relation and unknown ids insert nothing', async () => {
+  const mock = upstream(), adapter = new AgentRecallAdapter({ encryptionKey: 'overlay-test-key', fetch: mock.mocked }), tx = localTx();
+  await adapter.bind(tx, { url: 'https://recall.aimo.plus', token: 'alice-pat' });
+  const inserted: Doc[] = [];
+  const insertNew = tx.insertNew.bind(tx);
+  tx.insertNew = async (name: string, doc: Doc, id?: string) => { inserted.push(doc); return insertNew(name, doc, id ?? doc.id); };
+  const resolve = async (scope: Tx, id: string) => { try { return await adapter.read(scope, id); } catch (error) { if (error instanceof ApiError && error.status === 404) return null; throw error; } };
+  assert.equal(await tx.get('memories', mock.memoryId), null);
+  const saved = await relateMemory(tx, mock.memoryId, { relation: 'expires', operation_key: 'overlay-expiry', valid_until: '2099-01-01T00:00:00.000Z' }, resolve);
+  assert.equal(inserted.length, 1);
+  assert.equal(inserted[0].governance.version, 0);
+  assert.equal(inserted[0].governance.source, 'recall_overlay');
+  assert.equal(inserted[0].content, undefined);
+  assert.equal(inserted[0].status, 'verified');
+  assert.equal(saved.governance.source, 'recall_overlay');
+  assert.equal(saved.governance.version, 1);
+  assert.equal(saved.content, undefined);
+  assert.notEqual(saved.governance.verification, 'verified');
+  assert.equal(saved.governance.valid_until, '2099-01-01T00:00:00.000Z');
+  assert.equal(mock.calls.some(call => call.method === 'POST' || call.method === 'PATCH' || call.method === 'DELETE'), false);
+  const missing = randomUUID();
+  await assert.rejects(() => relateMemory(tx, missing, { relation: 'expires', operation_key: 'missing-overlay', valid_until: '2099-01-01T00:00:00.000Z' }, resolve), (error: unknown) => error instanceof ApiError && error.status === 404 && error.code === 'not_found');
+  assert.equal(await tx.get('memories', missing), null);
+  const foreign = localTx();
+  await adapter.bind(foreign, { url: 'https://recall.aimo.plus', token: 'alice-pat', project: 'beta' });
+  await assert.rejects(() => relateMemory(foreign, mock.memoryId, { relation: 'expires', operation_key: 'wrong-project', valid_until: '2099-01-01T00:00:00.000Z' }, resolve), (error: unknown) => error instanceof ApiError && error.status === 404);
+  assert.equal(await foreign.get('memories', mock.memoryId), null);
+  assert.equal(mock.calls.some(call => call.method === 'POST' || call.method === 'PATCH' || call.method === 'DELETE'), false);
 });

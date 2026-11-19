@@ -1,7 +1,7 @@
 import { Decimal } from 'decimal.js';
-import { BUDGET_IN_FLIGHT_BOUNDARY, BUDGET_LIMIT_CEILING, BUDGET_RECOVERY, DEFAULT_BUDGET_LIMITS, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
+import { BUDGET_IN_FLIGHT_BOUNDARY, BUDGET_LIMIT_CEILING, BUDGET_LIMIT_KEYS, BUDGET_RECOVERY, DEFAULT_BUDGET_LIMITS, type BudgetCategory, type BudgetLimitKey, type BudgetStopReason, type BudgetWriteMode, type RuntimeBudgetLimits } from '@super-agent/protocol';
 import { accumulatedStop, dollarAdmission, publicGrant, usageByCategory, usageTotals, type BudgetUsage } from './budget-control.js';
-import type { Doc } from './store.js';
+import { ApiError, type Doc } from './store.js';
 
 const LIMIT_KEYS = ['max_total_tokens', 'max_model_calls', 'max_tool_steps', 'max_runtime_ms'] as const;
 const CATEGORIES: BudgetCategory[] = ['worker', 'assistant', 'review', 'proactive'];
@@ -91,12 +91,12 @@ export function holdFor(budget: Doc): { amount: string | null; treatment: 'known
   return { amount: null, treatment: 'unknown_not_zero' };
 }
 
-export function dollarGate(budget: Doc, reservations: Doc[], amount: string | null, now = Date.now()): { ok: boolean; reason: BudgetStopReason | null } {
+export function dollarGate(budget: Doc, reservations: Doc[], amount: string | null, now = Date.now(), activeRunIds: ReadonlySet<string> = new Set()): { ok: boolean; reason: BudgetStopReason | null } {
   const monthly = budget.monthly_limit_usd !== null && budget.monthly_limit_usd !== undefined;
   // A null hold is unknown. Probe with zero only so an existing known hold is still summed;
   // the stored reservation keeps amount null and blocks the next dollar admission.
   if (amount === null && !monthly && budget.task_limit_usd !== '0') return { ok: true, reason: null };
-  const decision = dollarAdmission(budget, reservations, amount ?? '0', now);
+  const decision = dollarAdmission(budget, reservations, amount ?? '0', now, activeRunIds);
   return { ok: decision.ok, reason: (decision.reason as BudgetStopReason | null) ?? null };
 }
 
@@ -114,12 +114,96 @@ export function taskDollarStop(budget: Doc, records: Doc[]): BudgetStopReason | 
   return null;
 }
 
-export function reservationProtected(reservation: Doc, activeRun: boolean, assistantLeaseAlive: boolean, now = Date.now()): boolean {
-  if (reservation.status !== 'reserved') return false;
-  if (Date.parse(reservation.expires_at) > now) return true;
-  if ((reservation.activity_kind === 'run' || (!reservation.activity_kind && reservation.run_id)) && activeRun) return true;
-  if (['assistant', 'review', 'proactive'].includes(reservation.activity_kind) && assistantLeaseAlive) return true;
-  return false;
+export function budgetWriteMode(value: unknown): BudgetWriteMode {
+  if (value === undefined || value === 'merge') return 'merge';
+  if (value === 'replace') return 'replace';
+  throw new ApiError(422, 'invalid_budget', '预算写入模式无效');
+}
+
+function readLimitPatch(input: unknown, ignoreForeign: boolean): Partial<Record<BudgetLimitKey, number | null>> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ApiError(422, 'invalid_budget', '任务用量上限无效');
+  const source = input as Record<string, unknown>;
+  const patch: Partial<Record<BudgetLimitKey, number | null>> = {};
+  let count = 0;
+  for (const key of Object.keys(source)) {
+    if (!(BUDGET_LIMIT_KEYS as readonly string[]).includes(key)) {
+      if (ignoreForeign) continue;
+      throw new ApiError(422, 'invalid_budget', '任务用量上限无效');
+    }
+    count += 1;
+    const raw = source[key];
+    if (raw === null) { patch[key as BudgetLimitKey] = null; continue; }
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 1 || value > BUDGET_LIMIT_CEILING[key as BudgetLimitKey]) throw new ApiError(422, 'invalid_budget', '任务用量上限无效');
+    patch[key as BudgetLimitKey] = value;
+  }
+  if (!count) throw new ApiError(422, 'invalid_budget', '任务用量上限无效');
+  return patch;
+}
+
+/** Flat `{ max_model_calls: 2 }` and `{ mode?, limits }` both work. Default mode is merge. */
+export function taskBudgetUpdate(body: Doc): { mode: BudgetWriteMode; patch: Partial<Record<BudgetLimitKey, number | null>> } {
+  const mode = budgetWriteMode(body.mode);
+  if (body.limits !== undefined && (body.limits === null || typeof body.limits !== 'object' || Array.isArray(body.limits))) throw new ApiError(422, 'invalid_budget', '任务用量上限无效');
+  return { mode, patch: readLimitPatch(body.limits !== undefined ? body.limits : body, body.limits === undefined) };
+}
+
+export function mergeLimitOverride(stored: Partial<RuntimeBudgetLimits> | null | undefined, patch: Partial<Record<BudgetLimitKey, number | null>>, mode: BudgetWriteMode): Partial<RuntimeBudgetLimits> | null {
+  const next: Partial<RuntimeBudgetLimits> = {};
+  if (mode === 'merge' && stored && typeof stored === 'object' && !Array.isArray(stored)) {
+    for (const key of BUDGET_LIMIT_KEYS) {
+      const value = Number(stored[key]);
+      if (Number.isSafeInteger(value) && value > 0) next[key] = value;
+    }
+  }
+  for (const key of BUDGET_LIMIT_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) continue;
+    if (patch[key] === null) delete next[key];
+    else next[key] = patch[key] as number;
+  }
+  return Object.keys(next).length ? next : null;
+}
+
+export function mergeCategoryLimits(stored: Partial<Record<BudgetCategory, Partial<RuntimeBudgetLimits>>> | null | undefined, input: unknown, mode: BudgetWriteMode): Partial<Record<BudgetCategory, Partial<RuntimeBudgetLimits>>> | null {
+  if (input === null) return null;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new ApiError(422, 'invalid_budget', '活动用量上限无效');
+  const source = input as Record<string, unknown>;
+  for (const key of Object.keys(source)) if (!CATEGORIES.includes(key as BudgetCategory)) throw new ApiError(422, 'invalid_budget', '活动用量上限无效');
+  const base: Partial<Record<BudgetCategory, Partial<RuntimeBudgetLimits>>> = {};
+  if (mode === 'merge' && stored && typeof stored === 'object') {
+    for (const category of CATEGORIES) {
+      const merged = mergeLimitOverride(stored[category], {}, 'merge');
+      if (merged) base[category] = merged;
+    }
+  }
+  for (const category of CATEGORIES) {
+    if (!Object.prototype.hasOwnProperty.call(source, category)) continue;
+    const raw = source[category];
+    if (raw === null) { delete base[category]; continue; }
+    const patch = readLimitPatch(raw, false);
+    const merged = mergeLimitOverride(mode === 'replace' ? null : base[category], patch, mode === 'replace' ? 'replace' : 'merge');
+    if (merged) base[category] = merged;
+    else delete base[category];
+  }
+  return Object.keys(base).length ? base : null;
+}
+
+function keptMoney(body: Doc, key: 'monthly_limit_usd' | 'task_limit_usd', stored: unknown): string | null {
+  if (!Object.prototype.hasOwnProperty.call(body, key)) return stored == null ? null : requireMoney(stored);
+  return requireMoney(body[key]);
+}
+
+function requireMoney(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || !/^\d+(\.\d{1,10})?$/.test(value) || new Decimal(value).gt('1000000000')) throw new ApiError(422, 'invalid_amount', '金额需要为非负十进制字符串');
+  return new Decimal(value).toFixed();
+}
+
+/** Omitted money or category fields stay. Explicit null clears that field. Category keys merge unless mode is replace. */
+export function nextAccountBudget(stored: Doc, body: Doc): Doc {
+  const mode = budgetWriteMode(body.mode);
+  const categoryLimits = Object.prototype.hasOwnProperty.call(body, 'category_limits') ? mergeCategoryLimits(stored.category_limits, body.category_limits, mode) : stored.category_limits ?? null;
+  return { monthly_limit_usd: keptMoney(body, 'monthly_limit_usd', stored.monthly_limit_usd), task_limit_usd: keptMoney(body, 'task_limit_usd', stored.task_limit_usd), ...(categoryLimits ? { category_limits: categoryLimits } : {}) };
 }
 
 export function spendFor(records: Doc[], steps: Doc[], category: string): BudgetUsage {

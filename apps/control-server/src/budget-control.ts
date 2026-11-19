@@ -1,5 +1,5 @@
 import { Decimal } from 'decimal.js';
-import { BUDGET_IN_FLIGHT_BOUNDARY, DEFAULT_BUDGET_LIMITS, type ActivityKind, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
+import { BUDGET_HEARTBEAT_MS, BUDGET_IN_FLIGHT_BOUNDARY, DEFAULT_BUDGET_LIMITS, type ActivityKind, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
 import type { Doc } from './store.js';
 
 export type { ActivityKind };
@@ -56,10 +56,6 @@ function knownHoldAmount(amount: unknown): string | null {
   }
 }
 
-function reservedUnexpired(reservation: Doc, now: number): boolean {
-  return reservation.status === 'reserved' && Date.parse(reservation.expires_at) > now;
-}
-
 // Null, missing, or unknown-treatment amounts are not zero-dollar holds.
 function unknownHold(reservation: Doc): boolean {
   const treatment = reservation.money_treatment;
@@ -67,19 +63,38 @@ function unknownHold(reservation: Doc): boolean {
   return knownHoldAmount(reservation.amount) == null;
 }
 
-export function activeHold(reservations: Doc[], now = Date.now()): Decimal {
+export interface ReservationLiveness { activeRunIds: ReadonlySet<string>; now: number }
+
+/** The only in-force rule for admission, task holds, reserved totals, and tick renewal. */
+export function reservationInForce(reservation: Doc, liveness: ReservationLiveness): boolean {
+  if (reservation.status !== 'reserved') return false;
+  const now = liveness.now;
+  if (Date.parse(reservation.expires_at) > now) return true;
+  const kind = reservation.activity_kind;
+  const runId = typeof reservation.run_id === 'string' ? reservation.run_id : '';
+  if ((kind === 'run' || (kind == null && runId)) && runId && liveness.activeRunIds.has(runId)) return true;
+  if (kind === 'assistant' || kind === 'review' || kind === 'proactive') {
+    const beat = Date.parse(reservation.heartbeat_at);
+    return Number.isFinite(beat) && now - beat <= BUDGET_HEARTBEAT_MS;
+  }
+  return false;
+}
+
+export function activeHold(reservations: Doc[], now = Date.now(), activeRunIds: ReadonlySet<string> = new Set()): Decimal {
+  const liveness = { activeRunIds, now };
   return reservations.reduce((sum: Decimal, reservation) => {
-    if (!reservedUnexpired(reservation, now) || unknownHold(reservation)) return sum;
+    if (!reservationInForce(reservation, liveness) || unknownHold(reservation)) return sum;
     const amount = knownHoldAmount(reservation.amount);
     return amount == null ? sum : sum.plus(amount);
   }, new Decimal(0));
 }
 
-export function dollarAdmission(budget: Doc, reservations: Doc[], nextAmount: string, now = Date.now()): { ok: boolean; reason: string | null } {
+export function dollarAdmission(budget: Doc, reservations: Doc[], nextAmount: string, now = Date.now(), activeRunIds: ReadonlySet<string> = new Set()): { ok: boolean; reason: string | null } {
   if (budget.task_limit_usd === '0' || (nextAmount === '0' && budget.task_limit_usd === '0')) return { ok: false, reason: 'budget_exhausted' };
   if (budget.monthly_limit_usd !== null && budget.monthly_limit_usd !== undefined) {
-    if ((budget.unknown_count ?? 0) > 0 || reservations.some(reservation => reservedUnexpired(reservation, now) && unknownHold(reservation))) return { ok: false, reason: 'budget_unknown' };
-    if (new Decimal(budget.used_usd ?? '0').plus(activeHold(reservations, now)).plus(nextAmount).gt(budget.monthly_limit_usd)) return { ok: false, reason: 'budget_exhausted' };
+    const liveness = { activeRunIds, now };
+    if ((budget.unknown_count ?? 0) > 0 || reservations.some(reservation => reservationInForce(reservation, liveness) && unknownHold(reservation))) return { ok: false, reason: 'budget_unknown' };
+    if (new Decimal(budget.used_usd ?? '0').plus(activeHold(reservations, now, activeRunIds)).plus(nextAmount).gt(budget.monthly_limit_usd)) return { ok: false, reason: 'budget_exhausted' };
   }
   return { ok: true, reason: null };
 }
@@ -152,7 +167,7 @@ export function buildReservation(input: ReservationInput): Doc {
     status: 'reserved',
     expires_at: input.expires_at,
     renewed_at: null,
-    heartbeat_at: null,
+    heartbeat_at: new Date().toISOString(),
     money_treatment: input.money_treatment,
     late_usage: false,
   };
@@ -165,6 +180,16 @@ export function renewReservation(existing: Doc, nowIso: string, extendMs: number
 export function releaseReservation(existing: Doc, status: 'released' | 'settled' | 'expired', nowIso: string): Doc {
   if (TERMINAL_RESERVATION.has(existing.status)) return existing;
   return { ...existing, status, released_at: nowIso };
+}
+
+/** Close or expire a hold. Amount is the reservation, never a copy of measured cost. */
+export function settleReservation(existing: Doc, linked: Doc[], nowIso: string, closing: 'close' | 'expire'): Doc {
+  if (TERMINAL_RESERVATION.has(existing.status)) return existing;
+  if (closing === 'expire') return { ...existing, status: 'expired', settlement_state: 'open', released_at: nowIso };
+  const unknownCount = linked.filter(row => row?.cost?.amount == null).length;
+  if (!linked.length) return { ...existing, status: 'released', settlement_state: 'awaiting_usage', settlement_unknown_count: 0, released_at: nowIso };
+  if (unknownCount > 0) return { ...existing, status: 'released', settlement_state: 'unknown', settlement_unknown_count: unknownCount, released_at: nowIso };
+  return { ...existing, status: 'settled', settlement_state: 'settled', settlement_unknown_count: 0, released_at: nowIso };
 }
 
 export function reservationExpired(existing: Doc, nowMs: number): boolean {

@@ -13,7 +13,7 @@ function upstream(){
   const aId=randomUUID(),bId=randomUUID(),memoryId=randomUUID(),calls:Doc[]=[];
   const rows=new Map<string,Doc[]>([['alice',[{id:memoryId,content:'已有个人知识：发布平台入口',type:'fact',tags:['existing'],version:2,chainId:memoryId,project:null,updatedAt:'2026-11-18T12:00:00Z'}]],['bob',[]]]);
   const mocked=(async(input:URL|string|Request,init?:RequestInit)=>{
-    const url=new URL(String(input)),token=new Headers(init?.headers).get('authorization')?.replace('Bearer ',''),who=token==='alice-pat'?'alice':token==='bob-pat'?'bob':null;
+    const url=new URL(String(input)),token=new Headers(init?.headers).get('authorization')?.replace('Bearer ',''),who=token==='alice-pat'||token==='alice-pat-2'?'alice':token==='bob-pat'?'bob':null;
     calls.push({path:url.pathname,method:init?.method??'GET',who,body:init?.body?JSON.parse(String(init.body)):null});
     if(!who)return Response.json({error:'unauthorized'},{status:401});
     if(url.pathname==='/api/auth/me')return Response.json({user:{id:who==='alice'?aId:bId,email:`${who}@example.com`}});
@@ -37,11 +37,17 @@ function upstream(){
 test('Recall binding encrypts each user PAT with tenant AAD and never returns it',async()=>{
   const mock=upstream(),adapter=new AgentRecallAdapter({encryptionKey:'a-private-test-encryption-key',fetch:mock.mocked}),tx=localTx();
   assert.equal((await adapter.settings(tx)).configured,false);
-  const result=await adapter.bind(tx,{url:'https://recall.aimo.plus',token:'alice-pat'});
-  assert.equal(result.configured,true);assert.equal(result.account.email,'alice@example.com');assert.equal(JSON.stringify(result).includes('alice-pat'),false);
+  const result=await adapter.bind(tx,{url:'https://recall.aimo.plus',token:'alice-pat',project:'alpha'});
+  assert.equal(result.configured,true);assert.equal(result.project,'alpha');assert.equal(result.account.email,'alice@example.com');assert.equal(JSON.stringify(result).includes('alice-pat'),false);
+  const kept=await adapter.bind(tx,{url:'https://recall.aimo.plus',token:'alice-pat-2'});
+  assert.equal(kept.project,'alpha');
+  const changed=await adapter.bind(tx,{url:'https://recall.aimo.plus',token:'alice-pat-2',project:'beta'});
+  assert.equal(changed.project,'beta');
+  const cleared=await adapter.bind(tx,{url:'https://recall.aimo.plus',token:'alice-pat-2',project:null});
+  assert.equal(cleared.project,null);
   const stored=await tx.get('memory_bindings',tx.tenant);assert.ok(stored?.secret);assert.equal(JSON.stringify(stored).includes('alice-pat'),false);
   assert.throws(()=>adapter.decrypt(randomUUID(),stored!.secret),error=>error instanceof ApiError&&error.code==='recall_binding_unavailable');
-  assert.equal(adapter.decrypt(tx.tenant,stored!.secret),'alice-pat');
+  assert.equal(adapter.decrypt(tx.tenant,stored!.secret),'alice-pat-2');
 });
 
 test('separate Recall bindings read existing authoritative records without modifying them',async()=>{
@@ -50,7 +56,8 @@ test('separate Recall bindings read existing authoritative records without modif
   const existing=await adapter.list(a);assert.equal(existing[0]?.id,mock.memoryId);assert.equal(existing[0]?.version,2);assert.equal(existing[0]?.source,'agent-recall');
   assert.equal((await adapter.list(b)).length,0);
   await assert.rejects(()=>adapter.read(b,mock.memoryId),error=>error instanceof ApiError&&error.status===404);
-  const found=await adapter.search(a,{query:'发布平台',limit:5,site:'internal.example.com'});assert.equal(found.items[0]?.id,mock.memoryId);
+  const found=await adapter.search(a,{query:'发布平台',limit:5,site:'internal.example.com'});assert.equal(found.items[0]?.id,mock.memoryId);assert.equal(found.items[0]?.semantic_score,null);
+  const related=await adapter.related(a,mock.memoryId);assert.equal(related.semantic_conflict,'user_decision');assert.equal(related.semantic_scores,false);assert.equal(related.items.every((item:Doc)=>item.semantic_conflict===false),true);
   assert.equal(mock.calls.filter(c=>['PATCH','DELETE'].includes(c.method)||c.path==='/api/memories'&&c.method==='POST').length,0);
 });
 

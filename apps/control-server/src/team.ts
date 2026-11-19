@@ -3,6 +3,7 @@ import { ApiError,hash,type Doc,type Tx } from './store.js';
 import { text,uuid,type Principal } from './auth.js';
 import { publicStep } from './steps.js';
 import { deviceEvidenceSatisfied, isIndependentObservation, observationTools } from './acceptance-evidence.js';
+import { proposeUserCorrection } from './memory-governance.js';
 
 export const DEFAULT_DELIVERABLE='目标完成且有可核对结果';
 export async function graphLock(tx:Tx):Promise<void>{await tx.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`team-graph:${tx.tenant}`]);}
@@ -24,10 +25,18 @@ export function validatePlanGraph(items:Doc[]):void{
 }
 export function publicTask(t:Doc):Doc{
   const keys=['id','title','goal','status','reason_code','engine','model_id','device_id','device_name','current_run_id','created_at','updated_at','version','parent_task_id','root_task_id','plan_id','depends_on_task_ids','deliverables','delivery_status'];
-  return Object.fromEntries(keys.filter(k=>t[k]!==undefined).map(k=>[k,t[k]]));
+  return {...Object.fromEntries(keys.filter(k=>t[k]!==undefined).map(k=>[k,t[k]])),memory_scope:t.scope?.memory??null,budget:t.scope?.budget??null};
+}
+/** List and write responses keep the stored document and also project the fields clients edit. */
+export function taskView(t:Doc):Doc{
+  return {...t,memory_scope:t.scope?.memory??null,budget:t.scope?.budget??null};
 }
 export function publicRun(r:Doc|null,result:string|null=null):Doc|null{return r?Object.fromEntries(['id','task_id','state','engine','device_id','model_id','lease_epoch','summary','created_at'].map(k=>[k,r[k]]).concat([['result_text',result]])):null;}
-export function publicArtifact(a:Doc):Doc{return{...Object.fromEntries(['id','name','mime','size','task_id','run_id','status','created_at'].map(k=>[k,a[k]])),integrity:a.integrity==='server_snapshot'?'server_snapshot':'legacy_unverified',finalized_at:a.integrity==='server_snapshot'?a.finalized_at??null:null,...(a.evidence_kind?{evidence_kind:a.evidence_kind,provenance:a.provenance??null,captured_at:a.captured_at??null,source_url:a.source_url??null,fresh:a.fresh!==false,stale:a.stale===true}:{})};}
+export function publicArtifact(a:Doc):Doc{
+  const page=a.evidence_kind==='page_capture'||a.evidence_kind==='screenshot';
+  const uncertain=a.evidence_kind?a.source_uncertain===true||(page&&!(typeof a.source_url==='string'&&a.source_url.length>0)):false;
+  return {...Object.fromEntries(['id','name','mime','size','task_id','run_id','status','created_at'].map(k=>[k,a[k]])),integrity:a.integrity==='server_snapshot'?'server_snapshot':'legacy_unverified',finalized_at:a.integrity==='server_snapshot'?a.finalized_at??null:null,...(a.evidence_kind?{evidence_kind:a.evidence_kind,provenance:a.provenance??null,captured_at:a.captured_at??null,source_url:uncertain?null:a.source_url??null,fresh:uncertain?false:a.fresh!==false,stale:uncertain?true:a.stale===true,source_uncertain:uncertain}:{})};
+}
 export function publicCoordinatorEvent(e:Doc):Doc{return Object.fromEntries(['id','type','task_id','run_id','plan_id','delivery_id','source_message_id','status','reason_code','created_at','version'].map(k=>[k,e[k]??null]));}
 
 export class TeamService {
@@ -129,7 +138,7 @@ export class TeamService {
     await tx.put('task_deliveries',{...delivery,status:verdict==='accept'?'accepted':verdict==='reject'?'rejected':'needs_input',review_id:review.id});
     const updated=await tx.put('tasks',{...task,status:verdict==='accept'?'succeeded':'awaiting_review',delivery_status:verdict==='accept'?'accepted':verdict==='reject'?'rejected':'needs_input',reason_code:verdict==='accept'?null:verdict==='reject'?'delivery_rejected':'delivery_needs_input'});
     await tx.emit('task.reviewed',review,task.id,run.id);await tx.emit('task.changed',publicTask(updated),task.id,run.id);
-    if(verdict==='reject')await this.event(tx,'delivery.rejected',updated,run,delivery.id,null,review.id);
+    if(verdict==='reject'){await this.event(tx,'delivery.rejected',updated,run,delivery.id,null,review.id);if(p.type==='client')await proposeUserCorrection(tx,updated,run,review.summary);}
     await this.refreshBlocked(tx);await this.settled(tx,task.plan_id??null);return review;
   }
   async dependencies(tx:Tx,task:Doc):Promise<Doc[]>{

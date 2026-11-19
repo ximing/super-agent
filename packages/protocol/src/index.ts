@@ -6,19 +6,22 @@ export type RunState = 'created' | 'dispatched' | 'starting' | 'running' | 'wait
 export interface ListResponse<T> { items: T[]; next_cursor?: string | null }
 export interface User { id: string; email: string; name: string; tenant_id: string }
 export interface AuthSession { access_token: string; refresh_token: string; expires_in: number; user: User }
-export interface EngineCapability { engine: Engine; ready: boolean; models: string[]; local_profile_id?: string; reason?: string }
+export interface EngineCapability { engine: Engine; ready: boolean; models: string[]; local_profile_id?: string; reason?: string; vision?: 'unsupported' | 'available'; vision_reason?: string }
 export interface Capabilities { generation: number; engines: EngineCapability[]; tools: string[]; slots: { browser: number; worker: number } }
 export interface Device { id: string; name: string; status: 'online' | 'offline' | 'busy'; last_seen_at: string | null; capabilities: Capabilities; version: number; revoked?: boolean }
-export interface ExecutionSettings { default_engine: Engine; default_device_id: string | null; assistant_device_id: string | null; version: number }
+export interface ExecutionSettings { default_engine: Engine; default_device_id: string | null; assistant_device_id: string | null; memory_global_read?: boolean; version: number }
+export interface MemoryBinding { provider: 'agent-recall'; configured: boolean; url: string | null; project: string | null; account: { id: string; email: string | null } | null; version: number }
 export interface Task { id: string; title: string; goal: string; status: TaskStatus; reason_code: string | null; engine: Engine; model_id: string | null; device_id: string | null; device_name?: string | null; current_run_id: string | null; created_at: string; updated_at: string; version: number;
   parent_task_id?: string | null; root_task_id?: string | null; plan_id?: string | null;
   depends_on_task_ids?: string[]; deliverables?: string[]; delivery_status?: DeliveryStatus | null;
+  memory_scope?: MemoryScope | null; budget?: Partial<RuntimeBudgetLimits> | null;
 }
 export type DeliveryStatus = 'not_submitted' | 'pending' | 'accepted' | 'rejected' | 'needs_input';
 export interface PlanItem {
   item_key: string; title: string; goal: string; deliverables: string[];
   engine: Engine; device_id: string; model_id?: string;
   depends_on_keys?: string[]; parent_item_key?: string | null;
+  memory_scope?: MemoryScope | null;
 }
 export type EvidenceReference = { kind: 'artifact' | 'step' | 'checkpoint'; id: string };
 export interface DeliveryCheck { deliverable_index: number; passed: boolean; evidence_refs: EvidenceReference[] }
@@ -59,7 +62,18 @@ export interface ToolStepUpdate {
 export interface ToolStep extends Omit<ToolStepUpdate, 'step_id'> {
   id: string; run_id: string; title: string; created_at: string; version: number;
 }
-export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; task_id: string | null; created_at: string }
+export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; task_id: string | null; created_at: string; memory_scope?: MemoryScope | null; schedule_id?: string | null }
+export type ObservationSource = 'task_result' | 'page';
+export interface ObservationSuggestion { id: string; status: 'pending' | 'confirmed' | 'dismissed'; goal: string; reason: string; fingerprint: string; task_id?: string | null; created_at: string }
+export interface ObservationRule {
+  id: string; kind: 'observation'; title: string; enabled: boolean; device_id: string; engine: Engine;
+  project: string | null; sites: string[]; source: ObservationSource; goal: string; cooldown_minutes: number;
+  task_id?: string | null; match?: 'status' | 'delivery' | 'reason' | null; value?: string | null; url?: string | null; condition?: string | null;
+  next_eligible_at: string; last_status: string; last_fingerprint: string | null; consecutive_failures: number;
+  suggestions: ObservationSuggestion[]; version: number;
+}
+export interface TakeoverCheck { name: 'authority' | 'reconciliation' | 'engine' | 'browser' | 'site_login' | 'artifacts'; status: 'pass' | 'fail' | 'unknown'; detail: string }
+export type MemoryProvenance = 'user_statement' | 'tool_observation' | 'model_inference';
 export interface Question { id: string; task_id: string; run_id: string; text: string; options: string[]; status: 'open' | 'answered' | 'cancelled'; version: number; created_at: string }
 export type MemoryType = 'preference' | 'website' | 'procedure' | 'project' | 'experience';
 export type MemoryStatus = 'candidate' | 'verified' | 'stale' | 'expired' | 'superseded';
@@ -115,11 +129,42 @@ export const BUDGET_RECOVERY: Record<BudgetStopReason, string> = {
   budget_exhausted: '金额预算已用完。提高本月或本任务金额上限后，才能开始新的模型调用。',
   budget_unknown: '还有费用没核算清楚，不能按 0 计算。确认费用或调整金额上限前，不会开始新的模型调用。',
 };
+export interface MemoryScope {
+  project: string | null;
+  sites: string[];
+  global_preference: boolean;
+  statuses: string[];
+  max_version: number | null;
+}
+/**
+ * `requested` is inside `ceiling` when it cannot read anything the ceiling forbids.
+ * A null project ceiling allows a narrower project. A null max_version ceiling allows a lower cap.
+ * Empty sites and global_preference false are closed, not wildcards.
+ */
+export function memoryScopeWithin(requested: MemoryScope, ceiling: MemoryScope): boolean {
+  if (ceiling.project && requested.project !== ceiling.project) return false;
+  if (requested.sites.some(site => !ceiling.sites.includes(site))) return false;
+  if (requested.global_preference && !ceiling.global_preference) return false;
+  if (requested.statuses.some(status => !ceiling.statuses.includes(status))) return false;
+  if (ceiling.max_version != null && (requested.max_version == null || requested.max_version > ceiling.max_version)) return false;
+  return true;
+}
 export interface BudgetGrant {
-  grant_id: string; category: BudgetCategory; limits: RuntimeBudgetLimits; ceiling?: RuntimeBudgetLimits;
+  grant_id: string; category: BudgetCategory; limits: RuntimeBudgetLimits | null; ceiling?: RuntimeBudgetLimits;
   money_treatment: 'known' | 'unknown_not_zero' | 'unconfigured'; in_flight_boundary: string; dollar_cap: 'not_enforced';
   status?: string; expires_at?: string; activity_kind?: ActivityKind; activity_id?: string; task_id?: string | null; run_id?: string | null;
+  device_id?: string | null; executable?: boolean; prior_activity_id?: string | null; attempt?: number;
   stop_reason?: BudgetStopReason | null; recovery?: string;
+}
+/** A stored grant may be reread after it ends. Only a reserved, unexpired grant for this activity and device may start work. */
+export function grantExecutable(grant: Pick<BudgetGrant, 'status' | 'expires_at' | 'limits' | 'activity_id' | 'device_id'>, expected: { activityId: string; deviceId?: string | null; now?: number }): boolean {
+  if (!grant.limits) return false;
+  if (grant.status !== 'reserved') return false;
+  const now = expected.now ?? Date.now();
+  if (!grant.expires_at || !Number.isFinite(Date.parse(grant.expires_at)) || Date.parse(grant.expires_at) <= now) return false;
+  if (grant.activity_id !== expected.activityId) return false;
+  if (expected.deviceId && grant.device_id && grant.device_id !== expected.deviceId) return false;
+  return true;
 }
 export interface Frame { frame_id: string; image_base64: string; width: number; height: number; captured_at: string; viewport_version: string; tab_id: string | null }
 export interface ApiError { error: { code: string; message: string; retryable: boolean; request_id?: string } }

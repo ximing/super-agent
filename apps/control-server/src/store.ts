@@ -43,6 +43,11 @@ export class Tx {
     const result=await this.client.query(`INSERT INTO ${table(name)} (tenant_id,id,data) VALUES ($1,$2,$3) ON CONFLICT (tenant_id,id) DO UPDATE SET data=EXCLUDED.data,version=${table(name)}.version+1,updated_at=now() RETURNING id,data,version,created_at,updated_at`,[this.tenant,id,clean]);
     return row(result.rows[0]);
   }
+  async insertNew(name: string, data: Doc, id = data.id as string || randomUUID()): Promise<Doc | null> {
+    const clean={...data}; delete clean.version; delete clean.created_at; delete clean.updated_at; clean.id=id;
+    const result=await this.client.query(`INSERT INTO ${table(name)} (tenant_id,id,data) VALUES ($1,$2,$3) ON CONFLICT (tenant_id,id) DO NOTHING RETURNING id,data,version,created_at,updated_at`,[this.tenant,id,clean]);
+    return result.rows[0] ? row(result.rows[0]) : null;
+  }
   async remove(name:string,id:string):Promise<void>{await this.client.query(`DELETE FROM ${table(name)} WHERE tenant_id=$1 AND id=$2`,[this.tenant,id]);}
   async emit(type:string,payload:Doc,taskId:string|null=null,runId:string|null=null):Promise<void>{
     const seq=await this.client.query('INSERT INTO sa_streams (tenant_id,seq) VALUES ($1,1) ON CONFLICT (tenant_id) DO UPDATE SET seq=sa_streams.seq+1 RETURNING seq',[this.tenant]);

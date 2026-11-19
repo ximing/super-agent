@@ -5,17 +5,21 @@ import { randomUUID } from 'node:crypto';
 import { Decimal } from 'decimal.js';
 import { Auth, type Config, type Principal, text, uuid, expires, now } from './auth.js';
 import { Store, Tx, ApiError, isDatabaseUnavailable, type Doc } from './store.js';
-import { Service, ACTIVE, engine, matchVersion, safeMoney, redactView } from './service.js';
-import { plannerAccess, relateMemory, workerAccess } from './memory-governance.js';
-import { sanitizeCategoryLimits, sanitizeLimits } from './budget-policy.js';
-import { DEFAULT_BUDGET_LIMITS } from '@super-agent/protocol';
+import { Service, ACTIVE, engine, matchVersion, redactView, conflictingMessage, assistantUsageActivity, eventUsageActivity, replyActivityId } from './service.js';
+import { normalizeMemoryScope, plannerAccess, relateMemory, setPreferenceEnabled, workerAccess } from './memory-governance.js';
+import { decideSuggestion, observationInput, reportObservation } from './observations.js';
+import { readEvents, sseFrame } from './events-stream.js';
+import { assertSwitchTarget, takeoverPreflight } from './takeover.js';
+import { mergeLimitOverride, nextAccountBudget, taskBudgetUpdate } from './budget-policy.js';
+import { DEFAULT_BUDGET_LIMITS, canonicalActivityId } from '@super-agent/protocol';
 import { signObject } from './objects.js';
 import { AgentRecallAdapter } from './recall.js';
 import { PlanService } from './plans.js';
-import { publicStep,publicEvent } from './steps.js';
-import { graphLock,publicCoordinatorEvent,publicArtifact } from './team.js';
+import { publicStep } from './steps.js';
+import { graphLock,publicCoordinatorEvent,publicArtifact,taskView } from './team.js';
 import { storeCheckpoint } from './checkpoints.js';
 import { finalizeArtifact } from './artifact-finalizer.js';
+import { evidenceRecord } from './acceptance-evidence.js';
 import { NotificationService } from './notifications.js';
 
 export type ControlApp=FastifyInstance&{control:{store:Store;service:Service;notifications:NotificationService;tick:()=>Promise<void>}};
@@ -121,9 +125,9 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     await tx.emit('settings.changed',settings);return settings;
   });
 
-  route('GET','/tasks','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return items(limit(await tx.all('tasks'),query(r)));});
-  route('POST','/tasks','client',async(r,p,tx)=>idempotent(r,p,tx,()=>service.createTask(tx,body(r))));
-  route('GET','/tasks/:id','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return tx.need('tasks',uuid(params(r).id));});
+  route('GET','/tasks','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return items(limit((await tx.all('tasks')).map(taskView),query(r)));});
+  route('POST','/tasks','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>taskView(await service.createTask(tx,body(r)))));
+  route('GET','/tasks/:id','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return taskView(await tx.need('tasks',uuid(params(r).id)));});
   route('GET','/tasks/:id/runs','client',async(r,_p,tx)=>{
     const t=await tx.need('tasks',uuid(params(r).id)),checkpoints=(await tx.all('checkpoints')).filter(c=>c.task_id===t.id),deliveries=await tx.all('task_deliveries');
     return items((await tx.all('runs')).filter(run=>run.task_id===t.id).map(run=>{
@@ -132,6 +136,14 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     }));
   });
   route('POST','/tasks/:id/actions','client',async(r,p,tx)=>idempotent(r,p,tx,()=>service.action(tx,uuid(params(r).id),body(r),r.headers['if-match'])));
+  route('GET','/tasks/:id/takeover','client',async(r,_p,tx)=>takeoverPreflight(tx,params(r).id,String(query(r).device_id??''),String(query(r).engine??'')));
+  route('POST','/tasks/:id/takeover','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{
+    const b=body(r);if(b.acknowledge_login!==true)throw new ApiError(409,'site_login_unverified','网站登录态需要你在目标电脑上确认');
+    const preflight=await takeoverPreflight(tx,params(r).id,uuid(b.device_id),engine(b.engine));
+    assertSwitchTarget(preflight);
+    if(preflight.checks.some((check:Doc)=>check.name==='artifacts'&&check.status==='fail'))throw new ApiError(409,'artifact_integrity','冻结产物缺少完整性摘要，不能接任');
+    return service.action(tx,uuid(params(r).id),{action:'switch',target:{engine:b.engine,device_id:b.device_id,model_id:b.model_id??null},version:b.version},r.headers['if-match']);
+  }));
   route('POST','/tasks/:id/inputs','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{await graphLock(tx);const t=await tx.need('tasks',uuid(params(r).id)),content=text(body(r).text,'text');const message=await tx.put('messages',{role:'user',content,task_id:t.id,client_message_id:randomUUID()});if(t.current_run_id){const run=await tx.need('runs',t.current_run_id,true);await tx.put('runs',{...run,pending_inputs:[...(run.pending_inputs??[]),content]});}await tx.emit('message.created',message,t.id);return message;}));
   route('GET','/runs/:id/steps','client',async(r,_p,tx)=>{const run=await tx.need('runs',uuid(params(r).id));return items((await tx.all('steps')).filter(s=>s.run_id===run.id).map(publicStep));});
   route('GET','/tasks/:id/evidence','client',async(r,_p,tx)=>service.team.evidence(tx,params(r).id));
@@ -147,10 +159,10 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   }));
   route('GET','/messages','client',async(r,_p,tx)=>items(limit((await tx.all('messages')).filter(m=>!query(r).task_id||m.task_id===query(r).task_id),query(r))));
   route('POST','/messages','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{
-    await graphLock(tx);const b=body(r),clientId=uuid(b.client_message_id,'client_message_id'),existing=(await tx.all('messages')).find(m=>m.client_message_id===clientId);
-    if(existing){if(existing.content!==b.text)throw new ApiError(409,'message_conflict','消息标识已使用');return existing;}
+    await graphLock(tx);const b=body(r),clientId=uuid(b.client_message_id,'client_message_id'),content=text(b.text,'text'),memoryScope=b.memory_scope===undefined?null:normalizeMemoryScope(b.memory_scope),existing=(await tx.all('messages')).find(m=>m.client_message_id===clientId);
+    if(existing){if(conflictingMessage(existing,content,memoryScope))throw new ApiError(409,'message_conflict','消息标识已使用');return existing;}
     if(b.task_id)await tx.need('tasks',uuid(b.task_id));if(b.execution_preference?.device_id)await tx.need('devices',uuid(b.execution_preference.device_id));
-    const message=await tx.put('messages',{role:'user',content:text(b.text,'text'),task_id:b.task_id??null,client_message_id:clientId,execution_preference:b.execution_preference??null});
+    const message=await tx.put('messages',{role:'user',content,task_id:b.task_id??null,client_message_id:clientId,execution_preference:b.execution_preference??null,...(memoryScope?{memory_scope:memoryScope}:{})});
     if(b.task_id){const task=await tx.need('tasks',b.task_id,true);if(task.current_run_id){const run=await tx.need('runs',task.current_run_id,true);if(ACTIVE.includes(run.state))await tx.put('runs',{...run,pending_inputs:[...(run.pending_inputs??[]),message.content]});}}
     await tx.emit('message.created',message,message.task_id);return message;
   }));
@@ -170,13 +182,25 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('GET','/memories','client',async(r,_p,tx)=>items(await recall.list(tx,query(r))));
   route('POST','/memories','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{const m=await recall.create(tx,body(r),typeof r.headers['idempotency-key']==='string'?`${p.id}:${r.headers['idempotency-key']}`:undefined);await tx.emit('memory.changed',{id:m.id,version:m.version});return m;}));
   route('GET','/memories/:id','client',async(r,_p,tx)=>recall.read(tx,uuid(params(r).id)));
-  route('PATCH','/memories/:id','client',async(r,_p,tx)=>{const id=uuid(params(r).id),old=await recall.read(tx,id);matchVersion(r.headers['if-match'],old);const m=await recall.update(tx,id,body(r),old.version);await tx.emit('memory.changed',{id:m.id,previous_id:id,version:m.version});return m;});
+  route('PATCH','/memories/:id','client',async(r,_p,tx)=>{
+    const id=uuid(params(r).id),b=body(r),old=await recall.read(tx,id);matchVersion(r.headers['if-match'],old);
+    if(b.preference_enabled===true||b.preference_enabled===false){
+      if(old.type!=='preference')throw new ApiError(422,'invalid_memory_type','只有长期偏好可以关闭或恢复');
+      if(!await tx.get('memories',id))await tx.insertNew('memories',{title:old.title,content:old.content,type:'preference',site:old.site??null,status:old.status==='candidate'?'candidate':'verified',scope_kind:old.scope_kind??null,governance:{preference_enabled:b.preference_enabled,verification:old.status==='candidate'?'candidate':'verified',version:1}},id);
+      else await setPreferenceEnabled(tx,id,b.preference_enabled===true);
+      const saved=await recall.read(tx,id);await tx.emit('memory.changed',{id:saved.id,preference_enabled:b.preference_enabled,version:saved.version});return saved;
+    }
+    const m=await recall.update(tx,id,b,old.version);await tx.emit('memory.changed',{id:m.id,previous_id:id,version:m.version});return m;
+  });
   route('DELETE','/memories/:id','client',async(r,_p,tx)=>{const id=uuid(params(r).id),old=await recall.read(tx,id);matchVersion(r.headers['if-match'],old);await recall.remove(tx,id,old.version);await tx.emit('memory.changed',{id,deleted:true});return{status:'deleted'};});
-  route('POST','/memories/:id/relations','client',async(r,_p,tx)=>{const id=uuid(params(r).id),current=await recall.read(tx,id);matchVersion(r.headers['if-match'],current,body(r).version);await relateMemory(tx,id,body(r));const saved=await recall.read(tx,id);await tx.emit('memory.changed',{id:saved.id,version:saved.version,relation:true});return saved;});
+  route('POST','/memories/:id/relations','client',async(r,_p,tx)=>{const id=uuid(params(r).id),current=await recall.read(tx,id);matchVersion(r.headers['if-match'],current,body(r).version);await relateMemory(tx,id,body(r),async(scope,memoryId)=>{try{return await recall.read(scope,memoryId);}catch(error){if(error instanceof ApiError&&error.status===404)return null;throw error;}});const saved=await recall.read(tx,id);await tx.emit('memory.changed',{id:saved.id,version:saved.version,relation:true});return saved;});
+  route('GET','/memories/:id/related','client',async(r,_p,tx)=>recall.related(tx,uuid(params(r).id)));
 
   route('GET','/node/commands','device',async(_r,p,tx)=>items((await tx.all('commands')).filter(c=>c.device_id===p.device&&c.state==='pending'&&Date.parse(c.expires_at)>Date.now()).map(c=>({protocol_version:c.protocol_version,message_id:c.message_id,kind:c.kind,sent_at:c.sent_at,payload:c.payload}))));
-  route('GET','/node/events','device',async(r,_p,tx)=>{const after=String(query(r).after??'0');if(!/^\d{1,20}$/.test(after))throw new ApiError(422,'invalid_cursor','事件游标无效');const result=await tx.client.query('SELECT data FROM sa_events WHERE tenant_id=$1 AND seq>$2 ORDER BY seq LIMIT 100',[tx.tenant,after]);const events=result.rows.map(row=>publicEvent(row.data));return{items:events,cursor:events.at(-1)?.stream_seq??after};});
-  route('POST','/assistant/budget/reserve','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.reserveActivity(tx,body(r));});
+  route('GET','/node/events','device',async(r,_p,tx)=>readEvents(tx,query(r).after));
+  route('POST','/node/observations/:id/report','device',async(r,p,tx)=>reportObservation(tx,params(r).id,p.device!,body(r)));
+  route('POST','/assistant/budget/reserve','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.reserveActivity(tx,body(r),p.device);});
+  route('POST','/assistant/budget/heartbeat','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.heartbeatActivity(tx,text(body(r).activity_id,'activity_id',200));});
   route('POST','/node/runs/:id/accept','device',(r,p,tx)=>service.accept(p,tx,uuid(params(r).id),body(r)));
   route('POST','/node/runs/:id/renew','device',async(r,p,tx)=>{
     const id=uuid(params(r).id),run=await tx.need('runs',id,true);if(run.device_id!==p.device||String(body(r).lease_epoch)!==String(run.lease_epoch)||!ACTIVE.includes(run.state)||Date.parse(run.lease_expires_at)<Date.now())throw new ApiError(409,'run_lease_invalid','执行租约已失效');
@@ -207,7 +231,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     await tx.put('runs',{...run,state:'waiting_input'});await tx.put('tasks',{...task,status:'waiting_input'});await tx.emit('question.created',q,run.task_id,run.id);return q;
   });
   const memoryAccess=async(r:FastifyRequest,p:Principal,tx:Tx)=>{
-    if(r.headers['x-run-ticket']){const run=await runAuth(r,p,tx);return workerAccess(await tx.need('tasks',run.task_id),await tx.get('memory_bindings',tx.tenant));}
+    if(r.headers['x-run-ticket']){const run=await runAuth(r,p,tx);return workerAccess(await tx.need('tasks',run.task_id),await tx.get('memory_bindings',tx.tenant),await service.settings(tx));}
     await assistant(r,p,tx);const requested=body(r).task_id;const task=requested?await tx.need('tasks',uuid(requested)):null;
     return plannerAccess(await service.settings(tx),await tx.get('memory_bindings',tx.tenant),task);
   };
@@ -223,7 +247,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     const evidenceKind=['page_capture','screenshot','memory_retrieval'].includes(b.evidence_kind)?b.evidence_kind:null;
     if(b.provenance!=null&&b.provenance!=='tool_broker')throw new ApiError(422,'invalid_evidence','证据来源无效');
     if(b.provenance==='tool_broker'&&!evidenceKind)throw new ApiError(422,'invalid_evidence','工具证据类型无效');
-    const id=randomUUID(),key=`artifacts/staging/${tx.tenant}/${id}/content`,artifact=await tx.put('artifacts',{id,task_id:taskId,run_id:run?.id??null,name:text(b.name,'name',300),mime:text(b.mime??'application/octet-stream','mime',200),size,sha256:typeof b.sha256==='string'?b.sha256:null,staging_object_key:key,object_key:key,status:'staged',...(evidenceKind?{evidence_kind:evidenceKind,provenance:'tool_broker',captured_at:typeof b.captured_at==='string'?b.captured_at.slice(0,40):null,source_url:typeof b.source_url==='string'?b.source_url.slice(0,2000):null,step_id:typeof b.step_id==='string'?b.step_id.slice(0,80):null,fresh:b.fresh!==false,stale:b.fresh===false||b.stale===true}:{})});
+    const id=randomUUID(),key=`artifacts/staging/${tx.tenant}/${id}/content`,artifact=await tx.put('artifacts',{id,task_id:taskId,run_id:run?.id??null,name:text(b.name,'name',300),mime:text(b.mime??'application/octet-stream','mime',200),size,sha256:typeof b.sha256==='string'?b.sha256:null,staging_object_key:key,object_key:key,status:'staged',...(evidenceKind?evidenceRecord(evidenceKind,b):{})});
     return{artifact_id:id,upload_url:signObject(config.s3,'PUT',key),upload_headers:{'Content-Type':artifact.mime},expires_at:expires(300000),max_size:50*1024*1024};
   });
   route('POST','/artifacts/:id/finalize','either',async(r,p,tx)=>{
@@ -268,7 +292,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('GET','/assistant/context','device',async(r,p,tx)=>{await assistant(r,p,tx);return{messages:(await tx.all('messages')).slice(-20),tasks:(await tx.all('tasks')).filter(t=>!['succeeded','failed','cancelled'].includes(t.status)),pending_plans:(await tx.all('plans')).filter(plan=>plan.state==='awaiting_confirmation'),pending_events:(await tx.all('coordinator_events')).filter(e=>e.status==='pending').map(publicCoordinatorEvent)};});
   route('GET','/assistant/events','device',async(r,p,tx)=>{await assistant(r,p,tx);return items((await tx.all('coordinator_events')).filter(e=>e.status===(query(r).status??'pending')).map(publicCoordinatorEvent));});
   route('GET','/assistant/events/:id/context','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.team.eventContext(tx,params(r).id);});
-  route('POST','/assistant/events/:id/complete','device',async(r,p,tx)=>{await assistant(r,p,tx);return idempotent(r,p,tx,async()=>{await graphLock(tx);const event=await tx.need('coordinator_events',uuid(params(r).id));const result=await service.team.completeEvent(tx,event.id,body(r));await service.releaseActivity(tx,`event:${event.id}`);if(event.delivery_id)await service.releaseActivity(tx,`review:${event.delivery_id}`);return result;});});
+  route('POST','/assistant/events/:id/complete','device',async(r,p,tx)=>{await assistant(r,p,tx);return idempotent(r,p,tx,async()=>{await graphLock(tx);const event=await tx.need('coordinator_events',uuid(params(r).id));const result=await service.team.completeEvent(tx,event.id,body(r));await service.releaseActivity(tx,canonicalActivityId('event',event.id));if(event.delivery_id)await service.releaseActivity(tx,canonicalActivityId('review',event.delivery_id));return result;});});
   route('GET','/assistant/tasks/:id/evidence','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.team.evidence(tx,params(r).id);});
   route('POST','/assistant/tasks/:id/reviews','device',async(r,p,tx)=>{await assistant(r,p,tx);return idempotent(r,p,tx,async()=>{await graphLock(tx);const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task);return service.team.review(tx,p,task.id,body(r));});});
   route('GET','/assistant/tasks/:id/artifacts/:artifact_id/download','device',async(r,p,tx)=>{
@@ -279,16 +303,15 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('POST','/assistant/events/:id/usage','device',async(r,p,tx)=>{
     await assistant(r,p,tx);await graphLock(tx);const event=await tx.need('coordinator_events',uuid(params(r).id)),b=body(r),device=await tx.need('devices',p.device!),selectedEngine=engine(b.engine);
     if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');
-    const category=['assistant','review','proactive'].includes(b.category)?b.category:event.type==='delivery.submitted'?'review':'assistant';
-    await service.usage(tx,{id:event.run_id,task_id:event.task_id,device_id:p.device,engine:selectedEngine,model_id:b.model_id,event_id:event.id},{...b,category});return{status:'recorded'};
+    await service.usage(tx,eventUsageActivity(event,p.device!,selectedEngine,b.model_id,b),b);return{status:'recorded'};
   });
   route('POST','/assistant/messages','device',async(r,p,tx)=>{
     await assistant(r,p,tx);await graphLock(tx);const b=body(r),source=await tx.need('messages',uuid(b.source_message_id));
     const prior=(await tx.all('messages')).find(m=>m.source_message_id===source.id&&m.role==='assistant');if(prior)return prior;
     if(b.task_id)await tx.need('tasks',uuid(b.task_id));const message=await tx.put('messages',{role:'assistant',content:text(b.content,'content',100000),task_id:b.task_id??null,source_message_id:source.id});
-    await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await service.releaseActivity(tx,`assistant:${source.id}`);await tx.emit('assistant.replied',message,b.task_id??null);return message;
+    await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await service.releaseActivity(tx,replyActivityId(source));await tx.emit('assistant.replied',message,b.task_id??null);return message;
   });
-  route('POST','/assistant/usage','device',async(r,p,tx)=>{await assistant(r,p,tx);await graphLock(tx);const b=body(r),message=await tx.need('messages',uuid(b.message_id));const device=await tx.need('devices',p.device!);const selectedEngine=engine(b.engine);if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');const category=b.category==='proactive'?'proactive':b.category==='review'?'review':'assistant';await service.usage(tx,{id:message.id,task_id:message.task_id??null,device_id:p.device,engine:selectedEngine,model_id:b.model_id},{...b,category});return{status:'recorded'};});
+  route('POST','/assistant/usage','device',async(r,p,tx)=>{await assistant(r,p,tx);await graphLock(tx);const b=body(r),message=await tx.need('messages',uuid(b.message_id));const device=await tx.need('devices',p.device!);const selectedEngine=engine(b.engine);if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');await service.usage(tx,assistantUsageActivity(message,p.device!,selectedEngine,b.model_id,b),b);return{status:'recorded'};});
   route('GET','/node/devices','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d))));});
   route('GET','/node/tasks','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(limit(await tx.all('tasks'),query(r)));});
   route('POST','/node/tasks','device',async(r,p,tx)=>{await assistant(r,p,tx);throw new ApiError(409,'confirmation_required','自由聊天派活需要先提交目标方案并确认');});
@@ -370,14 +393,18 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     for(const u of await service.costs(tx,query(r))){const key=String(u[field]??(by==='category'?'worker':'assistant')),currency=u.cost.currency??'USD',identity=`${key}:${currency}`,g=groups.get(identity)??{key,label:by==='category'?categoryLabel[key]??key:devices.find(d=>d.id===key)?.name??tasks.find(t=>t.id===key)?.title??key,currency,amount:'0',request_count:0,unknown_count:0};g.request_count++;if(u.cost.amount===null)g.unknown_count++;else g.amount=new Decimal(g.amount).plus(u.cost.amount).toFixed();groups.set(identity,g);}return items([...groups.values()]);
   });
   route('GET','/budgets','client',async(_r,_p,tx)=>service.budget(tx));
-  route('PUT','/budgets','client',async(r,_p,tx)=>{const old=await service.budget(tx);if(old.version)matchVersion(r.headers['if-match'],old,body(r).version);const b=body(r);let categoryLimits=old.category_limits??null;if('category_limits' in b){if(b.category_limits==null)categoryLimits=null;else{const parsed=sanitizeCategoryLimits(b.category_limits);if(!parsed)throw new ApiError(422,'invalid_budget','活动用量上限无效');categoryLimits=parsed;}}await tx.put('budgets',{monthly_limit_usd:safeMoney(b.monthly_limit_usd??null),task_limit_usd:safeMoney(b.task_limit_usd??null),...(categoryLimits?{category_limits:categoryLimits}:{})},tx.tenant);const saved=await service.budget(tx);await tx.emit('budget.changed',saved);return saved;});
-  route('PUT','/tasks/:id/budget','client',async(r,_p,tx)=>{await graphLock(tx);const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task,body(r).version);const limits=sanitizeLimits(body(r).limits??body(r));if(!limits)throw new ApiError(422,'invalid_budget','任务用量上限无效');const updated=await tx.put('tasks',{...task,scope:{...task.scope,budget:limits}});await tx.emit('budget.changed',{reason:task.reason_code,recovery:'用量上限已更新。任务如果正在等待额度，可以重试。'},task.id);return updated;});
-  route('GET','/schedules','client',async(_r,_p,tx)=>items(await tx.all('schedules')));
+  route('PUT','/budgets','client',async(r,_p,tx)=>{const old=await service.budget(tx);if(old.version)matchVersion(r.headers['if-match'],old,body(r).version);await tx.put('budgets',nextAccountBudget(old,body(r)),tx.tenant);const saved=await service.budget(tx);await tx.emit('budget.changed',saved);return saved;});
+  route('PUT','/tasks/:id/budget','client',async(r,_p,tx)=>{await graphLock(tx);const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task,body(r).version);const update=taskBudgetUpdate(body(r));const budget=mergeLimitOverride(task.scope?.budget,update.patch,update.mode);const scope={...task.scope};if(budget)scope.budget=budget;else delete scope.budget;const updated=await tx.put('tasks',{...task,scope});await tx.emit('budget.changed',{reason:task.reason_code,recovery:'用量上限已更新。任务如果正在等待额度，可以重试。'},task.id);return taskView(updated);});
+  route('GET','/events','client',async(r,_p,tx)=>readEvents(tx,query(r).after??r.headers['last-event-id']));
+  route('GET','/schedules','client',async(_r,_p,tx)=>items((await tx.all('schedules')).filter(schedule=>schedule.kind!=='observation')));
+  route('GET','/observation-rules','client',async(_r,_p,tx)=>items((await tx.all('schedules')).filter(schedule=>schedule.kind==='observation')));
+  route('POST','/observation-rules','client',async(r,_p,tx)=>idempotent(r,_p,tx,async()=>{const input=observationInput(body(r));await tx.need('devices',input.device_id);if(input.task_id)await tx.need('tasks',input.task_id);return tx.put('schedules',{...input,next_eligible_at:new Date().toISOString(),last_status:'idle',last_fingerprint:null,consecutive_failures:0,suggestions:[],history:[]});}));
+  route('PATCH','/observation-rules/:id','client',async(r,_p,tx)=>{const current=await tx.need('schedules',uuid(params(r).id),true);if(current.kind!=='observation')throw new ApiError(404,'not_found','观察规则不存在');matchVersion(r.headers['if-match'],current,body(r).version);const input=observationInput({...current,...body(r)},current);if(input.device_id)await tx.need('devices',input.device_id);return tx.put('schedules',{...current,...input},current.id);});
+  route('POST','/observation-rules/:id/suggestions/:suggestionId','client',async(r,_p,tx)=>decideSuggestion(tx,params(r).id,params(r).suggestionId,text(body(r).action,'action',20),task=>service.createTask(tx,task)));
   route('POST','/schedules','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{const b=body(r),minutes=Number(b.interval_minutes);if(!Number.isInteger(minutes)||minutes<5||minutes>525600)throw new ApiError(422,'invalid_interval','检查周期应在5分钟至1年之间');await tx.need('devices',uuid(b.device_id));return tx.put('schedules',{title:text(b.title??b.goal,'title',200),goal:text(b.goal,'goal'),engine:engine(b.engine),device_id:b.device_id,interval_minutes:minutes,mode:'remind_and_confirm',next_due_at:expires(minutes*60000),enabled:true});}));
   route('PATCH','/schedules/:id','client',async(r,_p,tx)=>{const schedule=await tx.need('schedules',uuid(params(r).id));matchVersion(r.headers['if-match'],schedule);return tx.put('schedules',{...schedule,enabled:body(r).enabled===true});});
   route('DELETE','/schedules/:id','client',async(r,_p,tx)=>{const schedule=await tx.need('schedules',uuid(params(r).id));matchVersion(r.headers['if-match'],schedule);await tx.remove('schedules',schedule.id);return{status:'deleted'};});
   route('GET','/notifications','client',async(_r,_p,tx)=>items(await tx.all('notifications')));
-  route('GET','/events','client',async(r,_p,tx)=>{const after=String(query(r).after??'0');if(!/^\d{1,20}$/.test(after))throw new ApiError(422,'invalid_cursor','事件游标无效');const result=await tx.client.query('SELECT data FROM sa_events WHERE tenant_id=$1 AND seq>$2 ORDER BY seq LIMIT 500',[tx.tenant,after]);const events=result.rows.map(row=>publicEvent(row.data));return{items:events,cursor:events.at(-1)?.stream_seq??after};});
   route('POST','/sync/bootstrap','client',async(_r,_p,tx)=>{const result=await tx.client.query('SELECT seq FROM sa_streams WHERE tenant_id=$1',[tx.tenant]);return{tasks:await tx.all('tasks'),devices:await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d))),questions:(await tx.all('questions')).filter(q=>q.status==='open'),cursor:String(result.rows[0]?.seq??'0')};});
 
   let timer:ReturnType<typeof setInterval>|undefined;
@@ -386,6 +413,26 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     if(!notificationWork)void notificationTick().catch(error=>app.log.error({code:error?.code},'Notification tick failed'));
   },1000);timer.unref();}
   app.addHook('onClose',async()=>{closing=true;if(timer)clearInterval(timer);await Promise.allSettled([serviceWork,notificationWork]);await store.close();});
+  app.get('/v1/events/stream',async (req,reply)=>{
+    const principal=await authenticate(req);auth.client(principal);
+    const after=String((req.query as Doc)?.after??req.headers['last-event-id']??'0');
+    if(!/^\d{1,20}$/.test(after))throw new ApiError(422,'invalid_cursor','事件游标无效');
+    reply.hijack();
+    const raw=reply.raw;
+    raw.writeHead(200,{'content-type':'text/event-stream; charset=utf-8','cache-control':'no-cache, no-transform',connection:'keep-alive'});
+    let cursor=after,closed=false;
+    raw.on('close',()=>{closed=true;});
+    const started=Date.now();
+    try{
+      while(!closed&&Date.now()-started<25_000){
+        const page=await store.tenant(principal.tenant,tx=>readEvents(tx,cursor));
+        for(const event of page.items){if(closed)break;raw.write(sseFrame(event));cursor=String(event.stream_seq??cursor);}
+        if(closed||Date.now()-started>=25_000)break;
+        await new Promise(resolve=>setTimeout(resolve,2000));
+      }
+      if(!closed)raw.write(sseFrame({stream_seq:cursor,type:'cursor',payload:{cursor}}));
+    }finally{if(!closed)raw.end();}
+  });
   return app;
 }
 export const createApp=buildApp;

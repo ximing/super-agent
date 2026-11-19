@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { memoryScopeWithin, type MemoryScope } from '@super-agent/protocol';
 import { ApiError, type Doc, type Tx } from './store.js';
 import { text, uuid } from './auth.js';
 
@@ -22,13 +23,54 @@ export function normalizeMemoryScope(value: unknown): Doc | null {
   return { project, sites, global_preference: raw.global_preference === true, statuses: statuses.length ? statuses : ['verified'], max_version: max };
 }
 
-export function workerAccess(task: Doc | null, binding: Doc | null): MemoryAccess {
+export const CLOSED_MEMORY_SCOPE: MemoryScope = { project: null, sites: [], global_preference: false, statuses: ['verified'], max_version: null };
+
+export function asMemoryScope(value: unknown): MemoryScope {
+  const normalized = value == null ? null : normalizeMemoryScope(value);
+  if (!normalized) return { ...CLOSED_MEMORY_SCOPE, sites: [], statuses: ['verified'] };
+  return { project: normalized.project, sites: [...normalized.sites], global_preference: normalized.global_preference === true, statuses: [...normalized.statuses], max_version: normalized.max_version };
+}
+
+/** Omitted scope inherits the ceiling. A wider scope is rejected. Narrowing is kept. */
+export function effectivePlanScope(requested: unknown, ceiling: MemoryScope): MemoryScope {
+  if (requested == null) return { ...ceiling, sites: [...ceiling.sites], statuses: [...ceiling.statuses] };
+  const scope = asMemoryScope(requested);
+  if (!memoryScopeWithin(scope, ceiling)) throw new ApiError(422, 'memory_scope_exceeds_grant', '计划不能超出用户指定的记忆范围');
+  return scope;
+}
+
+export function applyPlanScopes(items: Doc[], ceiling: MemoryScope): Doc[] {
+  const pending = items.map(item => ({ ...item }));
+  const effective = new Map<string, MemoryScope>();
+  let guard = items.length * items.length + 1;
+  while (pending.length) {
+    if (--guard < 0) throw new ApiError(422, 'invalid_plan', '计划项目父级无效');
+    const item = pending.shift()!;
+    const parent = item.parent_item_key ?? null;
+    if (parent && !effective.has(parent)) {
+      if (!items.some(candidate => candidate.item_key === parent)) throw new ApiError(422, 'invalid_parent', '父计划项不存在');
+      pending.push(item);
+      continue;
+    }
+    const scope = effectivePlanScope(item.memory_scope, parent ? effective.get(parent)! : ceiling);
+    effective.set(item.item_key, scope);
+    item.memory_scope = scope;
+    items.splice(items.findIndex(candidate => candidate.item_key === item.item_key), 1, item);
+  }
+  return items;
+}
+
+export function scopeSummary(scope: MemoryScope): string {
+  return `项目 ${scope.project ?? '不限项目'}；网站 ${scope.sites.length ? scope.sites.join('、') : '无'}；全局偏好 ${scope.global_preference ? '开' : '关'}；状态 ${scope.statuses.join('、') || 'verified'}；最大版本 ${scope.max_version ?? '不限'}`;
+}
+
+export function workerAccess(task: Doc | null, binding: Doc | null, settings?: Doc | null): MemoryAccess {
   const memory = task?.scope?.memory && typeof task.scope.memory === 'object' ? task.scope.memory : {};
   const sites = Array.isArray(memory.sites) ? memory.sites.filter((site: unknown) => typeof site === 'string' && site).map((site: string) => site.toLowerCase()) : [];
   return {
     role: 'worker',
     project: typeof memory.project === 'string' && memory.project ? memory.project : (typeof binding?.project === 'string' ? binding.project : null),
-    sites, global_preference: memory.global_preference === true,
+    sites, global_preference: memory.global_preference === true && settings?.memory_global_read === true,
     statuses: (() => { const requested = Array.isArray(memory.statuses) ? memory.statuses.filter((status: string) => STATUSES.includes(status)) : []; return requested.length ? requested : ['verified']; })(),
     max_version: Number.isSafeInteger(memory.max_version) ? memory.max_version : null,
   };
@@ -36,7 +78,7 @@ export function workerAccess(task: Doc | null, binding: Doc | null): MemoryAcces
 
 export function plannerAccess(settings: Doc | null, binding: Doc | null, task: Doc | null): MemoryAccess {
   if (task) {
-    const access = workerAccess(task, binding);
+    const access = workerAccess(task, binding, settings);
     return { ...access, role: 'planner', statuses: [...new Set([...access.statuses, 'candidate'])] };
   }
   return { role: 'planner', project: typeof binding?.project === 'string' ? binding.project : null, sites: [], global_preference: settings?.memory_global_read === true, statuses: ['verified', 'candidate'], max_version: null };
@@ -59,6 +101,7 @@ function globalPreference(memory: Doc): boolean {
 /** Task scope is checked for both search hits and direct id reads. An empty site is not a wildcard. */
 export function assessMemory(memory: Doc, access: MemoryAccess, now = new Date().toISOString()): { allowed: boolean; presentation: Doc } {
   if (access.role === 'user') return { allowed: true, presentation: memory };
+  if (memory.type === 'preference' && memory.governance?.preference_enabled === false) return { allowed: false, presentation: memory };
   const governance = memory.governance ?? {};
   const expired = (typeof governance.valid_until === 'string' && governance.valid_until <= now) || governance.verification === 'expired' || memory.status === 'expired';
   const superseded = !expired && (governance.verification === 'superseded' || typeof governance.superseded_by === 'string' || memory.status === 'superseded');
@@ -87,8 +130,9 @@ export function retrospectiveCandidate(run: Doc, task: Doc, evidenceRefs: Doc[] 
     title: `复盘：${String(task.title ?? task.goal ?? '任务').slice(0, 120)}`,
     content: [`claim: inference`, `outcome: ${run.outcome ?? 'succeeded'}`, `task: ${task.id}`, `run: ${run.id}`, `goal: ${String(task.goal ?? '').slice(0, 500)}`, `summary: ${String(run.summary ?? '').slice(0, 500)}`, `evidence: ${refs.map(ref => `${ref.kind}:${ref.id}`).join(',') || 'none'}`].join('\n'),
     type: 'experience', site: sites[0] ?? null, status: 'candidate', scope_kind: null,
+    provenance: 'model_inference',
     governance: {
-      claim: 'inference', evidence_refs: refs,
+      claim: 'inference', provenance: 'model_inference', evidence_refs: refs,
       applicability: { project: typeof memory.project === 'string' ? memory.project : null, sites, global: false },
       verification: 'candidate', valid_until: null, supersedes: null, superseded_by: null, conflicts_with: [],
       operation_key: `retrospective:${run.outcome ?? 'succeeded'}:${run.id}`, source_run_id: run.id, source_task_id: task.id, observed_at: now, operations: [`retrospective:${run.outcome ?? 'succeeded'}:${run.id}`],
@@ -103,11 +147,41 @@ export async function proposeRetrospective(tx: Tx, run: Doc, task: Doc, outcome:
   if (existing) return existing;
   const refs = (await tx.all('artifacts')).filter(artifact => artifact.task_id === task.id && artifact.run_id === run.id && artifact.status === 'ready' && artifact.provenance === 'tool_broker').map(artifact => ({ kind: artifact.evidence_kind ?? 'artifact', id: artifact.id }));
   const candidate = retrospectiveCandidate({ ...run, outcome }, task, refs);
-  const locals = (await tx.all('memories')).filter(memory => memory.status === 'verified' && memory.site && memory.site === candidate.site && memory.title === candidate.title && memory.content && memory.content !== candidate.content);
-  if (locals.length) { candidate.governance.verification = 'conflict'; candidate.governance.conflicts_with = locals.map(memory => memory.id); }
   const saved = await tx.put('memories', candidate, randomUUID());
   if (saved.status !== 'candidate' || saved.governance?.verification === 'verified') throw new ApiError(500, 'memory_governance', '复盘不能自动标为已验证');
   return saved;
+}
+
+/** A user correction stays a candidate. Provenance is not verification, and title equality is not a semantic conflict. */
+export async function proposeUserCorrection(tx: Tx, task: Doc, run: Doc, summary: string): Promise<Doc> {
+  const key = `correction:${run.id}:${hashText(summary)}`;
+  const existing = (await tx.all('memories')).find(memory => memory.governance?.operation_key === key);
+  if (existing) return existing;
+  const memory = task.scope?.memory ?? {};
+  const sites = Array.isArray(memory.sites) ? memory.sites.filter((site: unknown) => typeof site === 'string').slice(0, 20) : [];
+  return tx.put('memories', {
+    title: `用户纠正：${String(task.title ?? task.goal ?? '任务').slice(0, 120)}`,
+    content: summary.slice(0, 4000), type: 'experience', site: sites[0] ?? null, status: 'candidate', provenance: 'user_statement', scope_kind: null,
+    governance: {
+      claim: 'statement', provenance: 'user_statement', verification: 'candidate', evidence_refs: [], conflicts_with: [],
+      applicability: { project: typeof memory.project === 'string' ? memory.project : null, sites, global: false },
+      operation_key: key, source_run_id: run.id, source_task_id: task.id, operations: [key], version: 0,
+    },
+    source: 'user_correction',
+  }, randomUUID());
+}
+
+export async function setPreferenceEnabled(tx: Tx, id: string, enabled: boolean): Promise<Doc> {
+  const memoryId = uuid(id);
+  const row = await tx.get('memories', memoryId, true);
+  if (!row) throw new ApiError(404, 'not_found', '记忆不存在');
+  if (row.type !== 'preference') throw new ApiError(422, 'invalid_memory_type', '只有长期偏好可以关闭或恢复');
+  const governance = { ...(row.governance ?? {}), preference_enabled: enabled, version: nextGovernanceVersion(row.governance) };
+  return tx.put('memories', { ...row, governance }, memoryId);
+}
+
+function hashText(value: string): string {
+  return Buffer.from(value).toString('base64url').slice(0, 80);
 }
 
 export function mergeConflictIds(existing: unknown, otherId: string): string[] {
@@ -138,14 +212,45 @@ async function lockMemories(tx: Tx, ids: string[]): Promise<Map<string, Doc>> {
   return rows;
 }
 
+export type RecallOverlayResolver = (tx: Tx, id: string) => Promise<Doc | null>;
+
+function overlayFromRecall(record: Doc): Doc {
+  const id = uuid(record.id);
+  return {
+    title: typeof record.title === 'string' && record.title.trim() ? record.title.trim().slice(0, 300) : '未命名记忆',
+    type: typeof record.type === 'string' ? record.type : 'experience',
+    site: typeof record.site === 'string' ? record.site : null,
+    scope_kind: typeof record.scope_kind === 'string' ? record.scope_kind : null,
+    status: record.status === 'candidate' ? 'candidate' : 'verified',
+    external_id: typeof record.external_id === 'string' ? record.external_id : id,
+    recall_chain_id: typeof record.recall_chain_id === 'string' ? record.recall_chain_id : id,
+    governance: { version: 0, operations: [], source: 'recall_overlay' },
+  };
+}
+
+async function ensureOverlays(tx: Tx, ids: string[], resolve?: RecallOverlayResolver): Promise<void> {
+  const missing: string[] = [];
+  for (const id of [...new Set(ids)].sort()) if (!await tx.get('memories', id)) missing.push(id);
+  if (!missing.length) return;
+  if (!resolve) throw new ApiError(404, 'not_found', '资源不存在');
+  const records: Doc[] = [];
+  for (const id of missing) {
+    const record = await resolve(tx, id);
+    if (!record || record.id !== id) throw new ApiError(404, 'not_found', '资源不存在');
+    records.push(record);
+  }
+  for (const record of records) await tx.insertNew('memories', overlayFromRecall(record), uuid(record.id));
+}
+
 /** Relations stay on the product overlay. Recall content is not edited, deleted, or published. */
-export async function relateMemory(tx: Tx, id: string, body: Doc): Promise<Doc> {
+export async function relateMemory(tx: Tx, id: string, body: Doc, resolve?: RecallOverlayResolver): Promise<Doc> {
   const memoryId = uuid(id);
   const relation = body.relation;
   if (relation !== 'conflicts' && relation !== 'supersedes' && relation !== 'expires') throw new ApiError(422, 'invalid_memory_relation', '记忆关系无效');
   const operation = text(body.operation_key, 'operation_key', 200);
   const otherId = relation === 'expires' ? null : uuid(body.other_id, 'other_id');
   if (otherId !== null && otherId === memoryId) throw new ApiError(422, 'invalid_memory_relation', '记忆关系不能指向自己');
+  await ensureOverlays(tx, otherId !== null ? [memoryId, otherId] : [memoryId], resolve);
   const locked = await lockMemories(tx, otherId !== null && relation === 'supersedes' ? [memoryId, otherId] : [memoryId]);
   const current = locked.get(memoryId);
   if (!current) throw new ApiError(404, 'not_found', '资源不存在');

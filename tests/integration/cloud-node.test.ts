@@ -43,10 +43,12 @@ function fetchThroughInject(app: ControlApp, log: RequestLog[], replay: { comman
     // the test timeout; inject itself cannot be cancelled once PostgreSQL is blocked.
     const cap = AbortSignal.timeout(8_000);
     const signal = init.signal ? AbortSignal.any([init.signal, cap]) : cap;
-    if (signal.aborted) throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
-    const injected = app.inject({ method: (init.method ?? 'GET') as never, url: `${url.pathname}${url.search}`, headers, ...(init.body === undefined ? {} : { payload: String(init.body) }) });
+    const method = (init.method ?? 'GET').toUpperCase();
+    const aborted = () => Object.assign(new Error(`AbortError ${method} ${url.pathname}`), { name: 'AbortError' });
+    if (signal.aborted) throw aborted();
+    const injected = app.inject({ method: method as never, url: `${url.pathname}${url.search}`, headers, ...(init.body === undefined ? {} : { payload: String(init.body) }) });
     const response = await new Promise<Awaited<ReturnType<ControlApp['inject']>>>((resolve, reject) => {
-      const onAbort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      const onAbort = () => reject(aborted());
       signal.addEventListener('abort', onAbort, { once: true });
       injected.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
     });
@@ -227,7 +229,7 @@ test('cloud PostgreSQL + selected assistant Mac: durable plan routes task to use
     first.config.assistant = true;
     assistant = new NodeAgent(first.config, { api: first.api, log: () => {} });
     const message = await client<Message>(app, owner.access_token, '/messages', 'POST', { client_message_id: randomUUID(), text: 'Inspect the controlled website on the second computer', execution_preference: { engine: 'grok', device_id: second.config.device_id, selection_mode: 'pinned' } });
-    for (let i = 0; i < 40 && !assistant.store.get(`assistant:${message.id}`); i++) { await assistant.tick(); await sleep(40); }
+    for (let i = 0; i < 40 && !assistant.store.get(`assistant:${message.id}`); i++) { await second.api.request('/node/heartbeat', {}); await assistant.tick(); await sleep(40); }
     assert.ok(assistant.store.get(`assistant:${message.id}`));
     let tasks = (await client<ListResponse<Task>>(app, owner.access_token, '/tasks')).items;
     assert.equal(tasks.length, 0, 'Ordinary chat must not execute before goal confirmation');
@@ -237,7 +239,7 @@ test('cloud PostgreSQL + selected assistant Mac: durable plan routes task to use
     await assistant.stop(); assistant.close();
     assistant = new NodeAgent(first.config,{api:first.api,log:()=>{}});
     const confirmation = await client<Message>(app, owner.access_token, '/messages', 'POST', {client_message_id:randomUUID(),text:`确认 ${plans[0]!.id.slice(0,8)}`});
-    for (let i = 0; i < 40 && !assistant.store.get(`assistant:${confirmation.id}`); i++) { await assistant.tick(); await sleep(40); }
+    for (let i = 0; i < 40 && !assistant.store.get(`assistant:${confirmation.id}`); i++) { await second.api.request('/node/heartbeat', {}); await assistant.tick(); await sleep(40); }
     tasks = (await client<ListResponse<Task>>(app, owner.access_token, '/tasks')).items;
     assert.equal(tasks.length,1); assert.equal(tasks[0]!.device_id,second.config.device_id); assert.equal(tasks[0]!.engine,'grok');
     await assistant.tick(); await sleep(50);
@@ -246,15 +248,17 @@ test('cloud PostgreSQL + selected assistant Mac: durable plan routes task to use
     const replay = await client<{tasks:Task[]}>(app,owner.access_token,`/assistant/plans/${plans[0]!.id}/confirm`,'POST',{source_message_id:confirmation.id});
     assert.equal(replay.tasks[0]!.id,tasks[0]!.id);
     const revised = await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'Prepare another inspection proposal'});
-    for(let i=0;i<40&&!assistant.store.get(`assistant:${revised.id}`);i++){await assistant.tick();await sleep(40);}
+    for(let i=0;i<40&&!assistant.store.get(`assistant:${revised.id}`);i++){await second.api.request('/node/heartbeat',{});await assistant.tick();await sleep(40);}
     assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,1);
     const cancelled = await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'取消'});
-    for(let i=0;i<40&&!assistant.store.get(`assistant:${cancelled.id}`);i++){await assistant.tick();await sleep(40);}
+    for(let i=0;i<40&&!assistant.store.get(`assistant:${cancelled.id}`);i++){await second.api.request('/node/heartbeat',{});await assistant.tick();await sleep(40);}
     assert.equal((await client<ListResponse<{id:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation')).items.length,0);
     assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,1);
     const messages = (await client<ListResponse<Message>>(app, owner.access_token, '/messages')).items;
     assert.equal(messages.filter(m => m.role === 'assistant').length, 4);
     assert.ok(log.some(r => r.path === '/v1/node/devices'));
+    await first.api.request('/node/heartbeat', {});
+    await second.api.request('/node/heartbeat', {});
     await app.control.service.dispatchTenant(owner.user.tenant_id);
     assert.equal((await first.api.request<ListResponse<WireMessage>>('/node/commands')).items.filter(m => m.kind === 'run.start').length, 0);
     assert.equal((await second.api.request<ListResponse<WireMessage>>('/node/commands')).items.filter(m => m.kind === 'run.start').length, 1);

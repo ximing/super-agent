@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Auth } from '../src/auth.js';
 import { ApiError, Store, type Doc } from '../src/store.js';
-import { Service, matchVersion, safeMoney, costRange } from '../src/service.js';
+import { Service, conflictingMessage, matchVersion, safeMoney, costRange } from '../src/service.js';
+import { PlanService } from '../src/plans.js';
+import { publicTask } from '../src/team.js';
 import { buildApp } from '../src/app.js';
 import { signObject } from '../src/objects.js';
 import { requireCloudTestDatabase } from './cloud-guard.js';
@@ -92,6 +94,37 @@ test('cloud integration guard refuses production, local, mismatched databases an
 test('cost date range validates timezone, ordering and maximum range',()=>{
   assert.deepEqual(costRange({from:'2026-11-01T00:00:00Z',to:'2026-11-18T00:00:00Z'}),{from:Date.parse('2026-11-01T00:00:00Z'),to:Date.parse('2026-11-18T00:00:00Z')});
   for(const q of [{from:'not-a-date'},{from:'2026-11-01'},{from:'2027-01-01T00:00:00Z',to:'2026-01-01T00:00:00Z'},{from:'2020-01-01T00:00:00Z',to:'2026-01-01T00:00:00Z'}])assert.throws(()=>costRange(q),ApiError);
+});
+
+test('a message scope is part of the client id conflict and a proposed scope survives confirm', async () => {
+  assert.equal(conflictingMessage({ content: '开始', memory_scope: { sites: ['a.example'], global_preference: false } }, '开始', { sites: ['b.example'], global_preference: false }), true);
+  assert.equal(conflictingMessage({ content: '开始' }, '开始', null), false);
+  const tables = new Map<string, Map<string, Doc>>();
+  const table = (name: string) => { if (!tables.has(name)) tables.set(name, new Map()); return tables.get(name)!; };
+  const put = async (name: string, doc: Doc, id: string = doc.id ?? randomUUID()) => { const value = { ...doc, id, version: (table(name).get(id)?.version ?? 0) + 1, created_at: table(name).get(id)?.created_at ?? new Date().toISOString(), updated_at: new Date().toISOString() }; table(name).set(id, value); return value; };
+  const tx = { tenant: randomUUID(), client: { query: async (sql: string) => String(sql).includes('now()') ? { rows: [{ at: new Date(Date.now() - 60000).toISOString() }] } : { rows: [] } }, get: async (name: string, id: string) => table(name).get(id) ?? null, all: async (name: string) => [...table(name).values()], need: async (name: string, id: string) => { const value = table(name).get(id); if (!value) throw new ApiError(404, 'not_found', '资源不存在'); return value; }, put, emit: async () => {} } as any;
+  const device = await put('devices', { name: 'mac' });
+  const granted = { project: 'alpha', sites: ['example.com'], global_preference: true, statuses: ['verified'], max_version: null };
+  const source = await put('messages', { role: 'user', content: '请规划站点', task_id: null, memory_scope: granted });
+  const plan = await put('plans', { source_message_id: source.id, state: 'draft', tasks: [], items: [] });
+  const plans = new PlanService(new Service({} as Store, {} as Auth));
+  const proposed = await plans.propose(tx, plan.id, { summary: '核对站点', items: [{ item_key: 'one', title: '核对', goal: '核对站点', deliverables: ['结果'], engine: 'codex', device_id: device.id, memory_scope: { sites: ['Example.COM'], global_preference: true, project: 'alpha' } }] });
+  assert.deepEqual(proposed.items[0].memory_scope, { project: 'alpha', sites: ['example.com'], global_preference: true, statuses: ['verified'], max_version: null });
+  assert.equal(proposed.items[0].memory_scope === undefined, false);
+  const confirmation = await put('messages', { role: 'user', content: '确认', task_id: null });
+  const committed = await plans.confirm(tx, plan.id, confirmation.id);
+  const task = await tx.get('tasks', committed.tasks[0].id);
+  assert.deepEqual(task?.scope.memory, proposed.items[0].memory_scope);
+  assert.deepEqual(publicTask(task!).memory_scope, proposed.items[0].memory_scope);
+  assert.equal(publicTask(task!).budget, null);
+  assert.match(proposed.summary, /实际生效的记忆范围/);
+  const widePlan = await put('plans', { source_message_id: source.id, state: 'draft', tasks: [], items: [] });
+  await assert.rejects(() => plans.propose(tx, widePlan.id, { summary: '扩大范围', items: [{ item_key: 'wide', title: '扩大', goal: '读取另一个项目', deliverables: ['结果'], engine: 'codex', device_id: device.id, memory_scope: { project: 'beta', sites: ['b.example'], global_preference: true } }] }), (error: unknown) => error instanceof ApiError && error.code === 'memory_scope_exceeds_grant');
+  const childPlan = await put('plans', { source_message_id: source.id, state: 'draft', tasks: [], items: [] });
+  await assert.rejects(() => plans.propose(tx, childPlan.id, { summary: '子任务扩大', items: [
+    { item_key: 'parent', title: '父', goal: '只看 a', deliverables: ['结果'], engine: 'codex', device_id: device.id, memory_scope: { project: 'alpha', sites: ['example.com'], global_preference: false } },
+    { item_key: 'child', title: '子', goal: '再看 b', deliverables: ['结果'], engine: 'codex', device_id: device.id, parent_item_key: 'parent', memory_scope: { project: 'alpha', sites: ['example.com', 'b.example'], global_preference: false } },
+  ] }), (error: unknown) => error instanceof ApiError && error.code === 'memory_scope_exceeds_grant');
 });
 
 test('S3 authorization is HTTPS, tenant-path scoped, short-lived and deterministic',()=>{

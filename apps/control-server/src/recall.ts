@@ -3,6 +3,8 @@ import { ApiError, Tx, type Doc, hash } from './store.js';
 import { text, uuid } from './auth.js';
 import { assessMemory, publicAccess, type MemoryAccess } from './memory-governance.js';
 
+const PROVENANCE = new Set(['user_statement', 'tool_observation', 'model_inference']);
+
 export interface RecallConfig { encryptionKey:string; allowedOrigins?:string[]; fetch?:typeof fetch }
 const typeMap:Record<string,string>={preference:'preference',website:'fact',procedure:'workflow',project:'architecture',experience:'lesson'};
 const reverse:Record<string,string>={preference:'preference',workflow:'procedure',architecture:'project',lesson:'experience',fact:'experience',pattern:'experience',bug:'experience'};
@@ -46,7 +48,8 @@ export class AgentRecallAdapter {
     if(!actor||typeof actor.id!=='string')throw new ApiError(422,'recall_identity_invalid','无法确认记忆账号身份');
     const existing=await tx.get('memory_bindings',tx.tenant,true);
     if(existing&&existing.actor_id!==actor.id&&(await tx.all('memories')).length)throw new ApiError(409,'recall_account_change_requires_review','当前用户已有记忆映射，切换账号前需要先处理现有引用');
-    const saved=await tx.put('memory_bindings',{...candidate,actor_id:actor.id,actor_email:typeof actor.email==='string'?actor.email:null,project:typeof input.project==='string'?input.project.slice(0,128):null},tx.tenant);
+    const project=Object.prototype.hasOwnProperty.call(input,'project')?(input.project==null||input.project===''?null:text(input.project,'project',128)):existing?.project??null;
+    const saved=await tx.put('memory_bindings',{...candidate,actor_id:actor.id,actor_email:typeof actor.email==='string'?actor.email:null,project},tx.tenant);
     return this.public(saved);
   }
   present(raw:Doc,meta?:Doc|null):Doc{
@@ -88,7 +91,10 @@ export class AgentRecallAdapter {
     const binding=await this.binding(tx),filter:Doc={};if(binding.project)filter.project=binding.project;
     if(Array.isArray(input.types)){const mapped=input.types.map((v:string)=>typeMap[v]).filter(Boolean);if(mapped.length)filter.type=[...new Set(mapped)];}
     const result=await this.call(binding,tx.tenant,'/api/memories/recall','POST',{query:text(input.query,'query',10000),limit:Math.max(1,Math.min(50,Number(input.limit)||5)),...(Object.keys(filter).length?{filter}:{})});
-    let memories=await Promise.all((Array.isArray(result.memories)?result.memories:[]).map((m:Doc)=>this.convert(tx,m)));
+    const rawMemories=Array.isArray(result.memories)?result.memories:[];
+    const scores=new Map(rawMemories.map((m:Doc)=>[String(m.id),typeof m.score==='number'&&Number.isFinite(m.score)?m.score:null]));
+    let memories=await Promise.all(rawMemories.map((m:Doc)=>this.convert(tx,m)));
+    memories=memories.map(memory=>({...memory,semantic_score:scores.get(String(memory.id))??null}));
     if(!access||access.role==='user')return{items:input.site?memories.filter(m=>!m.site||m.site===input.site):memories,search_mode:'agent-recall'};
     if(typeof input.site==='string'&&input.site&&!access.sites.includes(input.site.toLowerCase()))throw new ApiError(404,'not_found','记忆不存在');
     const locals=(await tx.all('memories')).filter(memory=>memory.status==='candidate'&&memory.content&&!memories.some(item=>item.id===memory.id));
@@ -125,5 +131,17 @@ export class AgentRecallAdapter {
     return this.convert(tx,raw.memory);
   }
   async remove(tx:Tx,id:string,expected:number):Promise<void>{const binding=await this.binding(tx),old=await this.read(tx,id);if(old.version!==expected)throw new ApiError(412,'version_conflict','记忆已更新，请刷新后重试');if(old.status!=='candidate')await this.call(binding,tx.tenant,`/api/memories/${encodeURIComponent(id)}`,'DELETE');await tx.remove('memories',id);}
-  async propose(tx:Tx,body:Doc):Promise<Doc>{await this.binding(tx);return tx.put('memories',{...this.input(body),status:'candidate',sources:body.sources??[],source:'proposal'},randomUUID());}
+  async propose(tx:Tx,body:Doc):Promise<Doc>{
+    await this.binding(tx);
+    const provenance=PROVENANCE.has(body.provenance)?body.provenance:'model_inference';
+    const claim=provenance==='user_statement'?'statement':provenance==='tool_observation'?'observation':'inference';
+    return tx.put('memories',{...this.input(body),status:'candidate',sources:Array.isArray(body.sources)?body.sources.slice(0,20):[],source:'proposal',provenance,governance:{provenance,claim,verification:'candidate',evidence_refs:Array.isArray(body.evidence_refs)?body.evidence_refs.slice(0,20):[],conflicts_with:[],operations:[],version:0}},randomUUID());
+  }
+  async related(tx:Tx,id:string,access?:MemoryAccess):Promise<Doc>{
+    const memory=await this.read(tx,id,access);
+    const query=[memory.title,typeof memory.content==='string'?memory.content.slice(0,500):''].filter(Boolean).join('\n');
+    const found=query?await this.search(tx,{query,limit:5},access):{items:[]};
+    const items=(found.items??[]).filter((item:Doc)=>item.id!==memory.id).map((item:Doc)=>({id:item.id,title:item.title,status:item.status,provenance:item.provenance??null,semantic_score:typeof item.semantic_score==='number'?item.semantic_score:null,semantic_conflict:false}));
+    return{items,search_mode:'agent-recall',semantic_conflict:'user_decision',semantic_scores:items.some((item:Doc)=>item.semantic_score!=null)};
+  }
 }

@@ -3,6 +3,7 @@ import { text, uuid } from './auth.js';
 import { Service, engine } from './service.js';
 import { randomUUID } from 'node:crypto';
 import { graphLock,deliverables,validatePlanGraph } from './team.js';
+import { applyPlanScopes, asMemoryScope, scopeSummary } from './memory-governance.js';
 
 export class PlanService {
   constructor(private service:Service){}
@@ -24,10 +25,13 @@ export class PlanService {
       if(pinned&&pinned.selection_mode!=='auto'&&((pinned.device_id&&pinned.device_id!==device)||(pinned.engine&&pinned.engine!==selectedEngine)))throw new ApiError(422,'pinned_execution_mismatch','计划不能改变用户指定的电脑或引擎');
       if(item.depends_on_keys!==undefined&&(!Array.isArray(item.depends_on_keys)||item.depends_on_keys.length>20))throw new ApiError(422,'invalid_dependency','依赖任务格式无效');
       const depends_on_keys=[...new Set((item.depends_on_keys??[]).map((k:unknown)=>text(k,'dependency',100)))];
-      proposed.push({item_key:key,title:text(item.title??item.goal,'title',200),goal:text(item.goal,'goal'),deliverables:deliverables(item.deliverables),engine:selectedEngine,device_id:device,depends_on_keys,parent_item_key:item.parent_item_key?text(item.parent_item_key,'parent_item_key',100):null,...(item.model_id?{model_id:text(item.model_id,'model_id',200)}:{}),...(item.memory_scope?{memory_scope:item.memory_scope}:{})});
+      proposed.push({item_key:key,title:text(item.title??item.goal,'title',200),goal:text(item.goal,'goal'),deliverables:deliverables(item.deliverables),engine:selectedEngine,device_id:device,depends_on_keys,parent_item_key:item.parent_item_key?text(item.parent_item_key,'parent_item_key',100):null,...(item.model_id?{model_id:text(item.model_id,'model_id',200)}:{}),...(item.memory_scope!=null?{memory_scope:item.memory_scope}:{})});
     }
     validatePlanGraph(proposed);
-    const summary=text(body.summary??proposed.map(i=>i.title).join('\n'),'summary',10000);
+    const ceiling=asMemoryScope(source.memory_scope);
+    applyPlanScopes(proposed,ceiling);
+    const modelSummary=String(body.summary??proposed.map(i=>i.title).join('\n')).split('\n\n实际生效的记忆范围')[0]!;
+    const summary=text(`${modelSummary}\n\n实际生效的记忆范围\n${proposed.map(item=>`- ${item.item_key}：${scopeSummary(item.memory_scope)}`).join('\n')}`,'summary',10000);
     if(plan.state==='awaiting_confirmation'&&hash({items:plan.items,summary:plan.summary})===hash({items:proposed,summary}))return plan;
     const time=await tx.client.query('SELECT now() AS at');
     const saved=await tx.put('plans',{...plan,state:'awaiting_confirmation',items:proposed,summary,proposed_at:new Date(time.rows[0].at).toISOString()});
@@ -51,6 +55,9 @@ export class PlanService {
     if(plan.state==='committed')return plan;
     if(plan.state!=='awaiting_confirmation')throw new ApiError(409,'plan_not_confirmable','计划尚未等待确认或已经拒绝');
     const message=await this.decision(tx,plan,messageId,'confirm'),tasks:Doc[]=[],ids=new Map<string,string>(plan.items.map((item:Doc)=>[item.item_key,randomUUID()]));
+    const rootId=plan.source_message_id??plan.root_source_message_id;
+    const root=rootId?await tx.get('messages',rootId):null;
+    applyPlanScopes(plan.items,asMemoryScope(root?.memory_scope));
     validatePlanGraph(plan.items);
     for(const item of plan.items)tasks.push(await this.service.createTask(tx,{...item,plan_id:plan.id,source_message_id:plan.source_message_id??plan.root_source_message_id,confirmation_message_id:message.id},ids.get(item.item_key)));
     for(let index=0;index<tasks.length;index++){const item=plan.items[index];tasks[index]=await tx.put('tasks',{...tasks[index],parent_task_id:item.parent_item_key?ids.get(item.parent_item_key):null});}
