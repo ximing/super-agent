@@ -12,7 +12,8 @@ import {ToolTimeline} from './ToolTimeline';
 import {Reconciliation} from './Reconciliation';
 import {APIError} from './api';
 import {SchedulesPanel, TaskArtifacts} from './Workflows';
-import type {AgentTask, AuthConfig, Budget, CostBreakdown, CostPoint, CostSummary, Device, Engine, EventBatch, ExecutionSettings, Frame, List, Memory, MemorySettings, Message, Question, Run, Session} from './types';
+import type {AgentTask, AuthConfig, Budget, CostBreakdown, CostPoint, CostSummary, Device, Engine, ExecutionSettings, Frame, List, Memory, MemorySettings, Message, Question, Run, Session} from './types';
+import {consumeEventStream, eventCursorKey, EventStreamError, readEventStream, sleep, streamFollowUp, type StreamEvent} from './event-stream';
 import {BUDGET_CATEGORIES, BUDGET_LIMITS, budgetDimension, categoryLimitsMerge, executionSettingsBody, memoryBindingBody, memoryGovernanceLine, memoryScopePayload, memorySettingsConflictMessage, moneyBudgetMerge, presentCostReservation, recoveryText, relationConflictMessage, storedBudgetValue, taskBudgetMerge, memoryRelationBody} from './payloads';
 
 const colors = {ink: '#182B45', blue: '#315F9C', pale: '#EAF0F8', canvas: '#F4F6F9', surface: '#FFFFFF', muted: '#647488', line: '#DCE3EC', green: '#28735D', amber: '#91601A'};
@@ -46,7 +47,7 @@ function Workspace() {
   const [email,setEmail]=useState(''); const [name,setName]=useState(''); const [busy,setBusy]=useState(false); const [error,setError]=useState(''); const [tab,setTab]=useState<Tab>('助理');
   const [devices,setDevices]=useState<Device[]>([]); const [tasks,setTasks]=useState<AgentTask[]>([]); const [messages,setMessages]=useState<Message[]>([]); const [questions,setQuestions]=useState<Question[]>([]); const [memories,setMemories]=useState<Memory[]>([]); const [settings,setSettings]=useState<ExecutionSettings|null>(null);
   const [engine,setEngine]=useState<Engine>('codex'); const [device,setDevice]=useState(''); const [modelId,setModelId]=useState(''); const [project,setProject]=useState(''); const [sites,setSites]=useState(''); const [globalPreference,setGlobalPreference]=useState(false); const [scopeStatuses,setScopeStatuses]=useState('verified'); const [maxVersion,setMaxVersion]=useState(''); const [draft,setDraft]=useState(''); const [selectedTask,setSelectedTask]=useState<string|null>(null); const [account,setAccount]=useState(false); const [lastSync,setLastSync]=useState('');
-  const cursor=useRef('0'); const inFlight=useRef(false); const appActive=useRef(true); const executionInitialized=useRef(false);
+  const cursor=useRef('0'); const appActive=useRef(true); const executionInitialized=useRef(false);
   const [memorySettings,setMemorySettings]=useState<MemorySettings|null>(null);
   const load=useCallback(async()=>{
     const [a,b,c,d,f,g]=await Promise.all([api.request<List<Device>>('/devices'),api.request<List<AgentTask>>('/tasks'),api.request<List<Message>>('/messages'),api.request<List<Question>>('/questions?status=open'),api.request<ExecutionSettings>('/settings/execution'),api.request<MemorySettings>('/settings/memory')]);
@@ -56,7 +57,98 @@ function Workspace() {
   },[]);
   const perform=useCallback(async(action:()=>Promise<void>)=>{setBusy(true);setError('');try{await action();return true;}catch(e){setError(errorText(e));Alert.alert('操作未完成',errorText(e));if(!api.session)setSession(null);return false;}finally{setBusy(false);}},[]);
   useEffect(()=>{let active=true;void(async()=>{try{const saved=await SecureStore.getItemAsync('superagent.server');if(saved){await api.configure(saved);if(active){setServer(saved);setSession(api.session);}if(api.session)await load();}}catch(e){if(active)setError(errorText(e));}finally{if(active)setBooting(false);}})();return()=>{active=false;};},[load]);
-  useEffect(()=>{if(!session)return; const subscription=AppState.addEventListener('change',s=>{appActive.current=s==='active';if(s==='active')void load().catch(e=>setError(errorText(e)));});const interval=setInterval(()=>{if(inFlight.current||!appActive.current)return;inFlight.current=true;void(async()=>{try{const batch=await api.request<EventBatch>(`/events?after=${encodeURIComponent(cursor.current)}`);cursor.current=batch.cursor;if(batch.items.length)await load();setError('');}catch(e){if(e instanceof APIError&&e.status===410){cursor.current='0';await load();}else setError(errorText(e));if(!api.session)setSession(null);}finally{inFlight.current=false;}})();},2000);return()=>{clearInterval(interval);subscription.remove();};},[session,load]);
+  const applyStream=useCallback(async(events:StreamEvent[])=>{
+    const plan=streamFollowUp(events);
+    for(const id of plan.taskIds){
+      try{
+        const task=await api.request<AgentTask>(`/tasks/${encodeURIComponent(id)}`);
+        setTasks(current=>{const index=current.findIndex(item=>item.id===task.id);if(index<0)return [task,...current];const next=current.slice();next[index]=task;return next;});
+      }catch{/* the cursor already moved; the slow refresh converges */}
+    }
+    if(plan.reloadDevices){try{const list=await api.request<List<Device>>('/devices');setDevices(list.items);}catch{/* slow refresh */}}
+    if(plan.reloadQuestions){try{const list=await api.request<List<Question>>('/questions?status=open');setQuestions(list.items);}catch{/* slow refresh */}}
+  },[]);
+  useEffect(()=>{
+    if(!session)return;
+    let stopped=false;
+    const userId=session.user.id;
+    const life=new AbortController();
+    const request={current:new AbortController()};
+    let delay=0;
+    const seen=new Set<string>();
+    let remainder='';
+    const subscription=AppState.addEventListener('change',state=>{
+      appActive.current=state==='active';
+      if(state==='active'){
+        delay=0;
+        request.current.abort();
+        request.current=new AbortController();
+        void load().catch(error=>{if(!stopped)setError(errorText(error));});
+      }
+    });
+    const slow=setInterval(()=>{
+      if(stopped||!appActive.current)return;
+      void load().then(()=>{if(!stopped)setError('');}).catch(error=>{if(!stopped)setError(errorText(error));});
+    },45_000);
+    void(async()=>{
+      try{
+        const saved=await SecureStore.getItemAsync(eventCursorKey(userId));
+        if(!stopped)cursor.current=saved&&/^\d{1,20}$/.test(saved)?saved:'0';
+      }catch{if(!stopped)cursor.current='0';}
+      while(!stopped){
+        if(life.signal.aborted)return;
+        if(!appActive.current){await sleep(1000,life.signal);continue;}
+        if(delay>0)await sleep(delay,request.current.signal);
+        if(stopped||life.signal.aborted)return;
+        const token=api.session?.access_token;
+        if(!token||!api.server){delay=1000;continue;}
+        const signal=request.current.signal;
+        try{
+          await readEventStream({
+            url:`${api.server}/v1/events/stream?after=${encodeURIComponent(cursor.current)}`,
+            token,
+            signal,
+            onText:text=>{
+              const previous=cursor.current;
+              const result=consumeEventStream(text,cursor.current,seen,remainder);
+              remainder=result.remainder;
+              for(const item of result.seen)seen.add(item);
+              cursor.current=result.cursor;
+              if(result.cursor!==previous)void SecureStore.setItemAsync(eventCursorKey(userId),result.cursor).catch(()=>undefined);
+              if(result.applied.length)void applyStream(result.applied);
+            },
+          });
+          if(remainder){
+            const previous=cursor.current;
+            const result=consumeEventStream('\n',cursor.current,seen,remainder);
+            remainder=result.remainder;
+            for(const item of result.seen)seen.add(item);
+            cursor.current=result.cursor;
+            if(result.cursor!==previous)void SecureStore.setItemAsync(eventCursorKey(userId),result.cursor).catch(()=>undefined);
+            if(result.applied.length)void applyStream(result.applied);
+          }
+          delay=0;
+        }catch(error){
+          if(stopped||life.signal.aborted)return;
+          if(signal.aborted){delay=0;continue;}
+          if(error instanceof EventStreamError&&error.status===401){
+            try{await api.request('/me');delay=0;continue;}
+            catch{if(!api.session){setSession(null);return;}}
+          }
+          if(error instanceof EventStreamError&&(error.status===422||error.status===410)){
+            if(cursor.current!=='0'){
+              cursor.current='0';seen.clear();remainder='';
+              void SecureStore.setItemAsync(eventCursorKey(userId),'0').catch(()=>undefined);
+              delay=0;continue;
+            }
+          }
+          if(error instanceof APIError&&!api.session){setSession(null);return;}
+          delay=delay===0?1000:Math.min(delay*2,30_000);
+        }
+      }
+    })();
+    return()=>{stopped=true;life.abort();request.current.abort();clearInterval(slow);subscription.remove();};
+  },[session,load,applyStream]);
   useEffect(()=>{const subscription=Notifications.addNotificationResponseReceivedListener(response=>{const id=response.notification.request.content.data?.task_id;if(typeof id==='string'){setSelectedTask(id);setTab('任务');}});return()=>subscription.remove();},[]);
   async function checkServer(){await perform(async()=>{await api.configure(server);await SecureStore.setItemAsync('superagent.server',api.server);setConfig(await api.authConfig());});}
   async function signIn(){await perform(async()=>{await api.configure(server);const auth=config??await api.authConfig();const next=auth.mode==='development'?await api.loginDevelopment(email,name):await authenticateOIDC(auth);setSession(next);cursor.current='0';await load();});}

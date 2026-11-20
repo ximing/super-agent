@@ -24,6 +24,7 @@ export class LocalStore {
       CREATE TABLE IF NOT EXISTS coordinator_outbox(event_id TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_receipts(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,tool TEXT NOT NULL,result_hash TEXT NOT NULL,completed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS tool_steps(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS observations(command_id TEXT PRIMARY KEY,payload TEXT NOT NULL,updated_at TEXT NOT NULL);
     `);
   }
   get<T>(key: string): T | undefined { const row = this.db.prepare('SELECT value FROM kv WHERE key=?').get(key) as Row | undefined; return row ? JSON.parse(String(row.value)) as T : undefined; }
@@ -110,6 +111,12 @@ export class LocalStore {
   }
   unfinishedSteps(runId: string): ToolStepUpdate[] {
     return (this.db.prepare("SELECT payload FROM tool_steps WHERE run_id=? AND status='running' ORDER BY rowid").all(runId) as Row[]).map(row => JSON.parse(String(row.payload)) as ToolStepUpdate);
+  }
+  saveObservation(commandId: string, payload: unknown): void {
+    this.db.prepare('INSERT INTO observations VALUES(?,?,?) ON CONFLICT(command_id) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at').run(commandId, JSON.stringify(payload), new Date().toISOString());
+  }
+  observations(): unknown[] {
+    return (this.db.prepare('SELECT payload FROM observations ORDER BY updated_at,rowid').all() as Row[]).map(row => JSON.parse(String(row.payload)));
   }
   close(): void { this.db.close(); }
 }

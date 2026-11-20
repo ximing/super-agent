@@ -108,6 +108,35 @@ export function observationRuleBody(input: {
   return body;
 }
 
+export function observationEnabledBody(enabled: boolean): {enabled: boolean} {
+  return {enabled};
+}
+
+export function observationDecisionBody(action: 'confirm' | 'dismiss'): {action: 'confirm' | 'dismiss'} {
+  return {action};
+}
+
+/** Partial edit. Changing sites or the page only affects later checks. */
+export function observationRuleEditBody(input: {
+  goal: string; sites: string; url: string; condition: string; enabled: boolean; source: 'task_result' | 'page';
+}): Record<string, unknown> {
+  const sites = input.sites.split(/[\s,，]+/).map(site => site.trim().toLowerCase()).filter(Boolean);
+  if (!sites.length) throw new Error('观察规则至少需要一个网站');
+  const goal = input.goal.trim();
+  if (!goal) throw new Error('观察规则需要确认后要做的事');
+  const body: Record<string, unknown> = {goal, sites, enabled: input.enabled};
+  if (input.source === 'page') {
+    let url: URL;
+    try { url = new URL(input.url); } catch { throw new Error('网页地址必须是授权网站上的 https 地址'); }
+    if (url.protocol !== 'https:' || !sites.includes(url.hostname.toLowerCase())) throw new Error('网页地址必须是授权网站上的 https 地址');
+    const condition = input.condition.trim();
+    if (!condition) throw new Error('网页观察需要业务条件');
+    body.url = url.toString();
+    body.condition = condition;
+  }
+  return body;
+}
+
 /** Always sends `project`. Empty text clears it; a visible saved name is not omitted. */
 export function memoryBindingBody(input: {url: string; token: string; project: string}): {url: string; token: string; project: string | null} {
   const project = input.project.trim();

@@ -28,6 +28,35 @@ export function observationScope(rule: Doc): Doc {
   return { project: rule.project ?? null, sites: [...(rule.sites ?? [])], global_preference: false, statuses: ['verified'], max_version: null };
 }
 
+const CONFIG_FIELDS = ['title', 'goal', 'enabled', 'device_id', 'engine', 'project', 'sites', 'source', 'match', 'value', 'url', 'condition', 'cooldown_minutes', 'task_id'] as const;
+
+export function configVersion(rule: Doc): number {
+  const version = Number(rule.config_version);
+  return Number.isInteger(version) && version >= 1 ? version : 1;
+}
+
+function configToken(value: unknown): string {
+  if (Array.isArray(value)) return `[${[...value].map(item => String(item)).sort().join(',')}]`;
+  return JSON.stringify(value ?? null) ?? 'null';
+}
+
+/** Runtime fields such as last_status do not change this token. */
+export function observationConfigChanged(before: Doc, after: Doc): boolean {
+  return CONFIG_FIELDS.some(field => configToken(before[field]) !== configToken(after[field]));
+}
+
+export async function assertObservationCommand(tx: Tx, ruleId: string, deviceId: string, body: Doc): Promise<{ rule: Doc; command: Doc }> {
+  const rule = await tx.need('schedules', uuid(ruleId), true);
+  if (rule.kind !== 'observation' || rule.device_id !== deviceId) throw new ApiError(404, 'not_found', '观察规则不存在');
+  const command = await tx.need('commands', uuid(body.command_id, 'command_id'), true);
+  const payload = command.payload ?? {};
+  if (command.kind !== 'observation.check' || command.device_id !== deviceId || payload.rule_id !== rule.id) throw new ApiError(404, 'not_found', '观察命令不存在');
+  const version = Number(body.config_version);
+  if (!Number.isInteger(version) || version < 1 || version !== configVersion(rule) || Number(payload.config_version) !== version) throw new ApiError(409, 'observation_inactive', '观察规则已经变化');
+  if (rule.enabled === false || command.state === 'cancelled' || !Number.isFinite(Date.parse(String(command.expires_at))) || Date.parse(String(command.expires_at)) <= Date.now()) throw new ApiError(409, 'observation_inactive', '观察命令已失效');
+  return { rule, command };
+}
+
 export function observationInput(body: Doc, existing?: Doc | null): Doc {
   const source = body.source ?? existing?.source;
   if (source !== 'task_result' && source !== 'page') throw new ApiError(422, 'invalid_observation', '观察来源只能是任务结果或网页');
@@ -80,7 +109,7 @@ function pushHistory(rule: Doc, entry: Doc): Doc[] {
 }
 
 function suggest(rule: Doc, reason: string, fingerprint: string, now: number): Doc {
-  const suggestion = { id: randomUUID(), status: 'pending', goal: rule.goal, reason: reason.slice(0, 500), fingerprint, task_id: null, created_at: new Date(now).toISOString() };
+  const suggestion = { id: randomUUID(), status: 'pending', goal: rule.goal, reason: reason.slice(0, 500), fingerprint, task_id: null, config_version: configVersion(rule), created_at: new Date(now).toISOString() };
   const scope = observationScope(rule);
   suggestion.reason = `${suggestion.reason}\n确认后才会创建任务。实际记忆范围：项目 ${scope.project ?? '不限项目'}；网站 ${scope.sites.join('、') || '无'}；全局偏好关。`;
   return {
@@ -90,7 +119,7 @@ function suggest(rule: Doc, reason: string, fingerprint: string, now: number): D
     consecutive_failures: 0,
     next_eligible_at: new Date(now + rule.cooldown_minutes * 60_000).toISOString(),
     suggestions: [...(rule.suggestions ?? []), suggestion].slice(-20),
-    history: pushHistory(rule, { at: suggestion.created_at, status: 'matched', fingerprint, suggestion_id: suggestion.id, reason: suggestion.reason }),
+    history: pushHistory(rule, { at: suggestion.created_at, status: 'matched', fingerprint, suggestion_id: suggestion.id, reason: suggestion.reason, command_id: null }),
   };
 }
 
@@ -141,23 +170,27 @@ export async function observeDue(tx: Tx, now = Date.now()): Promise<void> {
     }
     if (commands.some(command => command.device_id === rule.device_id && command.kind === 'observation.check' && command.state === 'pending' && command.payload?.rule_id === rule.id && Date.parse(command.expires_at) > now)) continue;
     const commandId = randomUUID();
-    await tx.put('commands', { protocol_version: '1.0', message_id: randomUUID(), kind: 'observation.check', sent_at: new Date(now).toISOString(), device_id: rule.device_id, state: 'pending', expires_at: expires(600_000), payload: { command_id: commandId, rule_id: rule.id, source: 'page', url: rule.url, sites: rule.sites, condition: rule.condition, project: rule.project } }, commandId);
+    await tx.put('commands', { protocol_version: '1.0', message_id: randomUUID(), kind: 'observation.check', sent_at: new Date(now).toISOString(), device_id: rule.device_id, state: 'pending', expires_at: expires(600_000), payload: { command_id: commandId, rule_id: rule.id, config_version: configVersion(rule), device_id: rule.device_id, engine: rule.engine, source: 'page', url: rule.url, sites: rule.sites, condition: rule.condition, project: rule.project ?? null } }, commandId);
     await tx.put('schedules', { ...rule, last_status: 'watching', next_eligible_at: new Date(now + 10 * 60_000).toISOString() }, rule.id);
   }
 }
 
 export async function reportObservation(tx: Tx, ruleId: string, deviceId: string, body: Doc, now = Date.now()): Promise<Doc> {
   await graphLock(tx);
-  const rule = await tx.need('schedules', uuid(ruleId), true);
-  if (rule.kind !== 'observation' || rule.device_id !== deviceId) throw new ApiError(404, 'not_found', '观察规则不存在');
+  const { rule, command } = await assertObservationCommand(tx, ruleId, deviceId, body);
   const status = body.status;
   if (!['matched', 'clear', 'failed', 'suppressed'].includes(status)) throw new ApiError(422, 'invalid_observation', '观察结果无效');
   const reason = text(body.reason ?? status, 'reason', 500);
   const fingerprint = typeof body.fingerprint === 'string' ? body.fingerprint.slice(0, 200) : null;
+  const commandId = String(command.payload.command_id);
+  if ((rule.history ?? []).some((entry: Doc) => entry.command_id === commandId)) return rule;
+  if (rule.last_command_at && Date.parse(String(command.sent_at)) < Date.parse(String(rule.last_command_at))) return rule;
+  const stamp = { last_command_id: commandId, last_command_at: command.sent_at, config_version: configVersion(rule) };
   if (status === 'matched') {
     if (!fingerprint) throw new ApiError(422, 'invalid_observation', '命中需要去重指纹');
-    if (fingerprint === rule.last_fingerprint) return rule;
-    const saved = suggest(rule, reason, fingerprint, now);
+    if (fingerprint === rule.last_fingerprint) return tx.put('schedules', { ...rule, ...stamp }, rule.id);
+    const drafted = suggest(rule, reason, fingerprint, now);
+    const saved: Doc = { ...drafted, ...stamp, history: pushHistory(rule, { at: new Date(now).toISOString(), status: 'matched', fingerprint, suggestion_id: drafted.suggestions.at(-1)?.id ?? null, reason, command_id: commandId }) };
     const suggestion = saved.suggestions.at(-1);
     await tx.put('schedules', saved, rule.id);
     if (suggestion) await tx.emit('observation.suggested', { rule_id: rule.id, suggestion_id: suggestion.id, status: 'pending' });
@@ -166,10 +199,10 @@ export async function reportObservation(tx: Tx, ruleId: string, deviceId: string
   if (status === 'failed') {
     const failures = Math.min(8, Number(rule.consecutive_failures ?? 0) + 1);
     const delay = Math.min(24 * 60 * 60_000, rule.cooldown_minutes * 60_000 * 2 ** (failures - 1));
-    return tx.put('schedules', { ...rule, last_status: 'failed', consecutive_failures: failures, next_eligible_at: new Date(now + delay).toISOString(), history: pushHistory(rule, { at: new Date(now).toISOString(), status, fingerprint, suggestion_id: null, reason }) }, rule.id);
+    return tx.put('schedules', { ...rule, ...stamp, last_status: 'failed', consecutive_failures: failures, next_eligible_at: new Date(now + delay).toISOString(), history: pushHistory(rule, { at: new Date(now).toISOString(), status, fingerprint, suggestion_id: null, reason, command_id: commandId }) }, rule.id);
   }
   const delay = status === 'suppressed' ? 60_000 : rule.cooldown_minutes * 60_000;
-  return tx.put('schedules', { ...rule, last_status: status, consecutive_failures: status === 'clear' ? 0 : rule.consecutive_failures ?? 0, last_fingerprint: status === 'clear' ? null : rule.last_fingerprint ?? null, next_eligible_at: new Date(now + delay).toISOString(), history: pushHistory(rule, { at: new Date(now).toISOString(), status, fingerprint, suggestion_id: null, reason }) }, rule.id);
+  return tx.put('schedules', { ...rule, ...stamp, last_status: status, consecutive_failures: status === 'clear' ? 0 : rule.consecutive_failures ?? 0, last_fingerprint: status === 'clear' ? null : rule.last_fingerprint ?? null, next_eligible_at: new Date(now + delay).toISOString(), history: pushHistory(rule, { at: new Date(now).toISOString(), status, fingerprint, suggestion_id: null, reason, command_id: commandId }) }, rule.id);
 }
 
 export async function decideSuggestion(tx: Tx, ruleId: string, suggestionId: string, action: string, createTask: (body: Doc) => Promise<Doc>): Promise<Doc> {
@@ -185,8 +218,10 @@ export async function decideSuggestion(tx: Tx, ruleId: string, suggestionId: str
     return tx.put('schedules', { ...rule, suggestions }, rule.id);
   }
   if (action !== 'confirm') throw new ApiError(422, 'invalid_observation', '建议只能确认或忽略');
+  if (rule.enabled === false) throw new ApiError(409, 'observation_inactive', '观察规则已停用');
   if (suggestion.status === 'confirmed' && suggestion.task_id) return rule;
   if (suggestion.status !== 'pending') throw new ApiError(409, 'suggestion_closed', '这条建议已经处理');
+  if (suggestion.config_version != null && Number(suggestion.config_version) !== configVersion(rule)) throw new ApiError(409, 'observation_inactive', '观察规则已经变化');
   const task = await createTask({ title: rule.title, goal: suggestion.goal, engine: rule.engine, device_id: rule.device_id, deliverables: ['核对观察建议中的变化'], memory_scope: observationScope(rule) });
   suggestions[index] = { ...suggestion, status: 'confirmed', task_id: task.id };
   await tx.put('schedules', { ...rule, suggestions }, rule.id);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GrokRuntime } from '../src/index.js';
+import { GrokCliRuntime, GrokRuntime } from '../src/index.js';
 import type { RuntimeContext, RuntimeEvent } from '@super-agent/tool-broker/runtime';
 const context = (events: RuntimeEvent[]): RuntimeContext => ({ runId: 'r1', taskId: 't1', goal: 'Read memory', modelId: 'test-model', cwd: '/tmp', tools: [{ name: 'memory_search', description: 'Search', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } }], executeTool: async () => ({ known: true }), emit: event => { events.push(event); }, signal: new AbortController().signal });
 
@@ -183,4 +183,26 @@ test('failure after a successful round records only that later attempt', async (
   assert.equal(usage[1]!.input_tokens, null);
   assert.equal(usage[1]!.output_tokens, null);
   assert.equal(usage[1]!.cost_ticks, undefined);
+});
+
+test('api mode sends image bytes and cli mode does not claim vision', async () => {
+  assert.throws(() => new GrokRuntime({ apiKey: '' }), /API key/);
+  assert.equal(new GrokCliRuntime().supportsVision(), false);
+  const bytes = Buffer.from('png-bytes').toString('base64');
+  const calls: { body: Record<string, unknown> }[] = [];
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    calls.push({ body: JSON.parse(String(init?.body)) });
+    return Response.json({ id: 'response-img', usage: { input_tokens: 1, output_tokens: 1 }, output: [{ type: 'message', content: [{ type: 'output_text', text: 'seen' }] }] });
+  }) as typeof fetch;
+  const runtime = new GrokRuntime({ apiKey: 'TEST_LOCAL_KEY', fetcher });
+  assert.equal(runtime.supportsVision(), true);
+  const ctx = context([]);
+  ctx.images = [{ artifact_id: 'shot-1', media_type: 'image/png', sha256: 'HASH_NOT_A_PIXEL', data_base64: bytes }];
+  const result = await runtime.execute(ctx);
+  assert.equal(result.text, 'seen');
+  const encoded = JSON.stringify(calls[0]!.body);
+  assert.equal(encoded.includes(`data:image/png;base64,${bytes}`), true);
+  assert.equal(encoded.includes('"type":"input_image"'), true);
+  assert.equal(encoded.includes('HASH_NOT_A_PIXEL'), false);
+  assert.equal(calls[0]!.body.store, false);
 });

@@ -99,14 +99,72 @@ test('a memory conclusion needs the body, not only the retrieval id', async () =
   const evidence = fixture();
   evidence.artifacts[0] = { id: 'mem-1', task_id: 'task-1', run_id: 'run-1', name: 'memory.json', mime: 'application/json', size: 2, status: 'ready', created_at: '', integrity: 'server_snapshot', evidence_kind: 'memory_retrieval', provenance: 'tool_broker', fresh: true };
   evidence.delivery!.artifact_ids = ['mem-1'];
+  const retrieval = JSON.stringify({ evidence_kind: 'memory_retrieval', hits: [{ id: 'memory-9', version: 4, fresh: true, stale: false }] });
   const review = { verdict: 'accept', summary: '正文已核对。', checks: [{ deliverable_index: 0, passed: true, evidence_refs: [{ kind: 'artifact', id: 'mem-1' }] }] };
-  await reviewDelivery({ evidence, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => '{"id":"mem-1"}', readMemory: async () => '正文：价格是 9',
+  await reviewDelivery({ evidence, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => retrieval, readMemory: async (id, version) => { assert.equal(id, 'memory-9'); assert.equal(version, 4); return '正文：价格是 9'; },
     adapter: adapter(async context => {
       await context.executeTool('delivery_artifact_read', { id: 'mem-1' });
       await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
-      const body = await context.executeTool('memory_body_read', { id: 'mem-1' });
+      const body = await context.executeTool('memory_body_read', { id: 'memory-9', version: 4 });
       assert.match((body as { content: string }).content, /价格是 9/);
       await context.executeTool('delivery_review', review);
+    }) });
+});
+
+test('accept cites a retrieval artifact only after every current hit body is read', async () => {
+  const retrieval = JSON.stringify({ hits: [
+    { id: 'price', version: 2, fresh: true, stale: false },
+    { id: 'hours', version: 1, fresh: true },
+    { id: 'old', version: 3, fresh: false, stale: true },
+  ] });
+  const memoryEvidence = () => {
+    const evidence = fixture();
+    evidence.artifacts[0] = { id: 'mem-1', task_id: 'task-1', run_id: 'run-1', name: 'memory.json', mime: 'application/json', size: retrieval.length, status: 'ready', created_at: '', integrity: 'server_snapshot', evidence_kind: 'memory_retrieval', provenance: 'tool_broker', fresh: true };
+    evidence.delivery!.artifact_ids = ['mem-1'];
+    return evidence;
+  };
+  const review = { verdict: 'accept', summary: '正文已核对。', checks: [{ deliverable_index: 0, passed: true, evidence_refs: [{ kind: 'artifact', id: 'mem-1' }] }] };
+  const reads: string[] = [];
+  await reviewDelivery({ evidence: memoryEvidence(), cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => retrieval,
+    readMemory: async (id, version) => { reads.push(`${id}@${version}`); return `正文 ${id}@${version}`; },
+    adapter: adapter(async context => {
+      await context.executeTool('delivery_artifact_read', { id: 'mem-1' });
+      await context.executeTool('memory_body_read', { id: 'price', version: 2 });
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
+      await assert.rejects(context.executeTool('memory_body_read', { id: 'other', version: 2 }), /memory_body_missing/);
+      await assert.rejects(context.executeTool('memory_body_read', { id: 'price', version: 1 }), /memory_body_missing/);
+      await assert.rejects(context.executeTool('memory_body_read', { id: 'old', version: 3 }), /memory_body_missing/);
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
+      await context.executeTool('memory_body_read', { id: 'hours', version: 1 });
+      await context.executeTool('delivery_review', review);
+    }) });
+  assert.deepEqual(reads, ['price@2', 'hours@1']);
+
+  const unrelated = JSON.stringify({ hits: [{ id: 'other', version: 1, fresh: true, stale: false }] });
+  const both = memoryEvidence();
+  both.artifacts.push({ id: 'mem-2', task_id: 'task-1', run_id: 'run-1', name: 'other.json', mime: 'application/json', size: unrelated.length, status: 'ready', created_at: '', integrity: 'server_snapshot', evidence_kind: 'memory_retrieval', provenance: 'tool_broker', fresh: true });
+  both.delivery!.artifact_ids = ['mem-1', 'mem-2'];
+  await reviewDelivery({ evidence: both, cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async artifact => artifact.id === 'mem-2' ? unrelated : retrieval, readMemory: async () => '无关正文',
+    adapter: adapter(async context => {
+      await context.executeTool('delivery_artifact_read', { id: 'mem-2' });
+      await context.executeTool('memory_body_read', { id: 'other', version: 1 });
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
+    }) });
+
+  await reviewDelivery({ evidence: memoryEvidence(), cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => retrieval, readMemory: async () => { throw new Error('revoked'); },
+    adapter: adapter(async context => {
+      await assert.rejects(context.executeTool('memory_body_read', { id: 'price', version: 2 }), /memory_body_missing/);
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
+      await context.executeTool('delivery_artifact_read', { id: 'mem-1' });
+      await assert.rejects(context.executeTool('memory_body_read', { id: 'price', version: 2 }), /memory_body_missing/);
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
+    }) });
+
+  await reviewDelivery({ evidence: memoryEvidence(), cwd: '/test', signal: new AbortController().signal, assertActive: () => {}, readArtifact: async () => retrieval, readMemory: async () => '',
+    adapter: adapter(async context => {
+      await context.executeTool('delivery_artifact_read', { id: 'mem-1' });
+      await assert.rejects(context.executeTool('memory_body_read', { id: 'price', version: 2 }), /memory_body_missing/);
+      await assert.rejects(context.executeTool('delivery_review', review), /review_requires_memory_body/);
     }) });
 });
 

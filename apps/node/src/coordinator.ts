@@ -11,7 +11,7 @@ export interface ReviewOptions {
   cwd: string;
   signal: AbortSignal;
   readArtifact: (artifact: ArtifactMetadata) => Promise<string>;
-  readMemory?: (id: string) => Promise<string>;
+  readMemory?: (id: string, version: number) => Promise<string>;
   assertActive: () => void;
   onUsage?: (sample: UsageSample) => void;
   budget?: RuntimeContext['budget'];
@@ -24,6 +24,7 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
   const runId = evidence.run.id;
   const read = new Set<string>();
   const visualRead = new Set<string>();
+  const memoryHits = new Map<string, { id: string; version: number }[]>();
   const memoryBodies = new Set<string>();
   const images: NonNullable<RuntimeContext['images']> = [];
   const usage: UsageSample[] = [];
@@ -31,7 +32,7 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
   const definitions: ToolDefinition[] = [
     { name: 'delivery_evidence', description: 'Read delivery metadata and the worker report. A worker report or tool status alone is not independent proof of success.', parameters: schema({}, []) },
     { name: 'delivery_artifact_read', description: 'Independently read an actual text artifact from this delivery. Image artifacts are passed to the model only when this engine can read images; otherwise they stay needs_input.', parameters: schema({ id: { type: 'string' } }, ['id']) },
-    ...(options.readMemory ? [{ name: 'memory_body_read', description: 'Read the memory body itself. A retrieval id is not the body.', parameters: schema({ id: { type: 'string' } }, ['id']) }] : []),
+    ...(options.readMemory ? [{ name: 'memory_body_read', description: 'Read one current memory hit by id and version. A retrieval artifact is not the body.', parameters: schema({ id: { type: 'string' }, version: { type: 'integer', minimum: 1 } }, ['id', 'version']) }] : []),
     { name: 'delivery_review', description: 'Submit one independent review. Accept only when every delivery criterion is verified from independently read artifacts; otherwise request human input. This does not rerun work.', parameters: schema({
       verdict: { enum: ['accept', 'reject', 'needs_input'] }, summary: { type: 'string', maxLength: 4000 },
       checks: { type: 'array', maxItems: 20, items: { type: 'object', properties: {
@@ -53,6 +54,7 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
       const content = await options.readArtifact(artifact);
       options.assertActive(); options.signal.throwIfAborted();
       read.add(artifact.id);
+      if (artifact.evidence_kind === 'memory_retrieval') memoryHits.set(artifact.id, currentMemoryHits(content));
       if (visual) {
         const sha256 = createHash('sha256').update(Buffer.from(content, 'base64')).digest('hex');
         visualRead.add(artifact.id);
@@ -63,11 +65,17 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
     }
     if (name === 'memory_body_read') {
       if (!options.readMemory) throw new Error('verification_tool_not_allowed');
-      const id = String(args.id ?? '');
-      const body = await options.readMemory(id);
+      const id = typeof args.id === 'string' ? args.id : '';
+      const version = args.version;
+      if (!id || !Number.isInteger(version) || Number(version) < 1) throw new Error('memory_body_missing');
+      const pair = `${id}@${Number(version)}`;
+      const known = [...memoryHits.values()].some(hits => hits.some(hit => hit.id === id && hit.version === Number(version)));
+      if (!known) throw new Error('memory_body_missing');
+      let body = '';
+      try { body = await options.readMemory(id, Number(version)); } catch { throw new Error('memory_body_missing'); }
       if (!body) throw new Error('memory_body_missing');
-      memoryBodies.add(id);
-      return { id, sha256: createHash('sha256').update(body).digest('hex'), content: body };
+      memoryBodies.add(pair);
+      return { id, version: Number(version), sha256: createHash('sha256').update(body).digest('hex'), content: body };
     }
     if (submitted) throw new Error('verification_already_submitted');
     if (!['accept', 'reject', 'needs_input'].includes(String(args.verdict)) || typeof args.summary !== 'string' || !args.summary.trim() || args.summary.length > 4000 || !Array.isArray(args.checks) || args.checks.length > 20) throw new Error('invalid_review');
@@ -87,9 +95,13 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
         if (kind === 'checkpoint' && evidence.checkpoint?.id !== id) throw new Error('invalid_review_reference');
         return { kind, id } as EvidenceReference;
       });
-      const readArtifacts = references.filter(ref => ref.kind === 'artifact' && (read.has(ref.id) || memoryBodies.has(ref.id)));
+      const readArtifacts = references.filter(ref => ref.kind === 'artifact' && read.has(ref.id));
+      const memoryReady = (artifactId: string) => {
+        const hits = memoryHits.get(artifactId);
+        return !!hits?.length && hits.every(hit => memoryBodies.has(`${hit.id}@${hit.version}`));
+      };
       if (args.verdict === 'accept' && references.some(ref => ref.kind === 'artifact' && evidence.artifacts.find(item => item.id === ref.id)?.evidence_kind === 'screenshot' && !visualRead.has(ref.id))) throw new Error('review_requires_visual_read');
-      if (args.verdict === 'accept' && references.some(ref => ref.kind === 'artifact' && evidence.artifacts.find(item => item.id === ref.id)?.evidence_kind === 'memory_retrieval' && !memoryBodies.has(ref.id))) throw new Error('review_requires_memory_body');
+      if (args.verdict === 'accept' && references.some(ref => ref.kind === 'artifact' && evidence.artifacts.find(item => item.id === ref.id)?.evidence_kind === 'memory_retrieval' && !memoryReady(ref.id))) throw new Error('review_requires_memory_body');
       if (args.verdict === 'accept' && (!value.passed || !readArtifacts.length)) throw new Error('review_requires_independently_read_artifact');
       const needsObservation = evidence.steps.some(step => step.status === 'succeeded' && /^(browser_|memory_)/.test(step.tool));
       const currentObservation = (id: string) => evidence.artifacts.some(item => item.id === id && item.provenance === 'tool_broker' && ['page_capture', 'screenshot', 'memory_retrieval'].includes(item.evidence_kind ?? '') && item.fresh !== false && item.stale !== true);
@@ -113,6 +125,28 @@ export async function reviewDelivery(options: ReviewOptions): Promise<ReviewResu
     await options.adapter.execute(context);
     return { review: submitted ?? { run_id: runId, verdict: 'needs_input', summary: '未取得可独立核对的完整验收结论，请人工检查交付标准。', checks: [] }, usage };
   } finally { await options.adapter.stop(); }
+}
+
+function memoryHitList(parsed: unknown): unknown[] {
+  if (Array.isArray(parsed)) return parsed;
+  if (!parsed || typeof parsed !== 'object') return [];
+  const record = parsed as Record<string, unknown>;
+  if (Array.isArray(record.hits)) return record.hits;
+  if (Array.isArray(record.items)) return record.items;
+  return typeof record.id === 'string' && Number.isInteger(record.version) ? [record] : [];
+}
+function currentMemoryHits(content: string): { id: string; version: number }[] {
+  let parsed: unknown;
+  try { parsed = JSON.parse(content); } catch { return []; }
+  const hits: { id: string; version: number }[] = [];
+  for (const value of memoryHitList(parsed)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const hit = value as Record<string, unknown>;
+    if (hit.fresh === false || hit.stale === true) continue;
+    if (typeof hit.id !== 'string' || !hit.id || !Number.isInteger(hit.version) || Number(hit.version) < 1) continue;
+    hits.push({ id: hit.id, version: Number(hit.version) });
+  }
+  return hits;
 }
 
 /** Signed object downloads never receive a product token or follow redirects. */

@@ -84,6 +84,27 @@ final class RequestBodiesTests: XCTestCase {
         XCTAssertEqual((worker["max_model_calls"] as? NSNumber)?.intValue, 20)
     }
 
+    func testObservationPatchAndDecisionBodiesLeaveVersionForIfMatch() throws {
+        let disabled = try JSONEncoder().encode(RequestBodies.observationEnabled(false))
+        XCTAssertEqual(String(decoding: disabled, as: UTF8.self), "{\"enabled\":false}")
+        let edited = try RequestBodies.observationRuleEdit(goal: "跟进", sites: "A.Example, b.example", url: "https://b.example/item", condition: "价格变化", enabled: true, source: "page")
+        XCTAssertEqual(edited["sites"], .array([.string("a.example"), .string("b.example")]))
+        XCTAssertEqual(edited["condition"], .string("价格变化"))
+        XCTAssertEqual(edited["url"], .string("https://b.example/item"))
+        XCTAssertEqual(edited["goal"], .string("跟进"))
+        XCTAssertEqual(edited["enabled"], .bool(true))
+        XCTAssertNil(edited["version"])
+        let created = try RequestBodies.observationRule(title: "验收后", goal: "整理差异", deviceId: "device-1", engine: "grok", sites: "A.Example", project: "alpha", cooldownMinutes: 30, source: "task_result", taskId: "task-1", match: "status", value: "awaiting_review")
+        XCTAssertEqual(created["source"], .string("task_result"))
+        XCTAssertEqual(created["sites"], .array([.string("a.example")]))
+        for action in ["confirm", "dismiss"] {
+            let body = RequestBodies.observationDecision(action)
+            XCTAssertEqual(body.count, 1)
+            XCTAssertNil(body["version"])
+            XCTAssertEqual(String(decoding: try JSONEncoder().encode(body), as: UTF8.self), "{\"action\":\"\(action)\"}")
+        }
+    }
+
     func testTurningGlobalReadOffSendsFalse() {
         let body = RequestBodies.executionSettings(engine: "codex", device: "", assistant: "mac", memoryGlobalRead: false)
         XCTAssertEqual(body["memory_global_read"], .bool(false))

@@ -118,6 +118,38 @@ public enum RequestBodies {
         return body
     }
 
+    public static func observationEnabled(_ enabled: Bool) -> [String: JSONValue] {
+        ["enabled": .bool(enabled)]
+    }
+
+    public static func observationDecision(_ action: String) -> [String: JSONValue] {
+        ["action": .string(action)]
+    }
+
+    /// Partial edit. Sites and the page only change which pages later checks may read.
+    public static func observationRuleEdit(goal: String, sites: String, url: String, condition: String, enabled: Bool, source: String) throws -> [String: JSONValue] {
+        let hosts = sites.split { $0 == "," || $0 == " " || $0 == "，" }.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+        guard !hosts.isEmpty else { throw APIError(status: 0, code: "invalid_observation", message: "观察规则至少需要一个网站") }
+        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedGoal.isEmpty else { throw APIError(status: 0, code: "invalid_observation", message: "观察规则需要确认后要做的事") }
+        var body: [String: JSONValue] = [
+            "goal": .string(trimmedGoal),
+            "sites": .array(hosts.map { .string($0) }),
+            "enabled": .bool(enabled),
+        ]
+        if source == "page" {
+            let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedCondition = condition.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let parsed = URL(string: trimmedURL), parsed.scheme == "https", let host = parsed.host?.lowercased(), hosts.contains(host) else {
+                throw APIError(status: 0, code: "invalid_observation", message: "网页地址必须是授权网站上的 https 地址")
+            }
+            guard !trimmedCondition.isEmpty else { throw APIError(status: 0, code: "invalid_observation", message: "网页观察需要业务条件") }
+            body["url"] = .string(trimmedURL)
+            body["condition"] = .string(trimmedCondition)
+        }
+        return body
+    }
+
     /// Always includes `project`. Empty text is null so a visible edit cannot omit the field.
     public static func memoryBinding(url: String, token: String, project: String) -> [String: JSONValue] {
         let trimmed = project.trimmingCharacters(in: .whitespacesAndNewlines)

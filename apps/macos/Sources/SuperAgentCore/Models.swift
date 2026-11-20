@@ -117,6 +117,24 @@ public struct MemorySettings: Decodable, Sendable {
 public struct Schedule: Codable, Identifiable, Sendable {
     public let id: String; public let title: String; public let goal: String; public let engine: Engine; public let deviceId: String; public let intervalMinutes: Int; public let enabled: Bool; public let nextDueAt: String?; public let version: Int
 }
+public struct ObservationSuggestionItem: Decodable, Identifiable, Sendable {
+    public let id: String
+    public let status: String
+    public let reason: String
+}
+public struct ObservationRuleItem: Decodable, Identifiable, Sendable {
+    public let id: String
+    public let title: String
+    public let enabled: Bool
+    public let version: Int
+    public let lastStatus: String
+    public let suggestions: [ObservationSuggestionItem]
+    public let goal: String?
+    public let sites: [String]?
+    public let source: String?
+    public let url: String?
+    public let condition: String?
+}
 public struct Artifact: Decodable, Identifiable, Sendable { public let id: String; public let name: String; public let mime: String; public let taskId: String?; public let runId: String?; public let status: String?; public let createdAt: String? }
 public struct UploadDescriptor: Decodable, Sendable { public let artifactId: String; public let uploadUrl: String; public let uploadHeaders: [String: String]; public let expiresAt: String; public let maxSize: Int }
 public struct DownloadDescriptor: Decodable, Sendable { public let url: String; public let expiresAt: String; public let name: String; public let mime: String }

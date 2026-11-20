@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {categoryLimitsMerge, executionSettingsBody, memoryBindingBody, memoryScopePayload, memorySettingsConflictMessage, observationRuleBody, presentCostReservation, relationConflictMessage, taskBudgetMerge, type BudgetKey} from '../src/payloads';
+import {categoryLimitsMerge, executionSettingsBody, memoryBindingBody, memoryScopePayload, memorySettingsConflictMessage, observationDecisionBody, observationEnabledBody, observationRuleBody, observationRuleEditBody, presentCostReservation, relationConflictMessage, taskBudgetMerge, type BudgetKey} from '../src/payloads';
 
 const keys: BudgetKey[] = ['max_total_tokens', 'max_model_calls', 'max_tool_steps', 'max_runtime_ms'];
 
@@ -38,6 +38,23 @@ test('observation rules keep the site ceiling and reject a page outside it', () 
   assert.equal(task.project, 'alpha');
   assert.equal(task.global_preference, undefined);
   assert.throws(() => observationRuleBody({title: '越权', goal: '看别的站', deviceId: 'device-1', engine: 'grok', sites: 'a.example', project: '', cooldownMinutes: 15, source: 'page', url: 'https://b.example/item', condition: '变化'}), /授权网站/);
+});
+
+test('observation patch sends enabled false or edited sites and condition, and decisions stay action only', () => {
+  assert.deepEqual(observationEnabledBody(false), {enabled: false});
+  assert.equal(JSON.stringify(observationEnabledBody(false)), '{"enabled":false}');
+  const edited = observationRuleEditBody({goal: '跟进', sites: 'A.Example, b.example', url: 'https://b.example/item', condition: '价格变化', enabled: true, source: 'page'});
+  assert.deepEqual(edited.sites, ['a.example', 'b.example']);
+  assert.equal(edited.condition, '价格变化');
+  assert.equal(edited.url, 'https://b.example/item');
+  assert.equal(edited.goal, '跟进');
+  assert.equal(edited.enabled, true);
+  assert.equal('version' in edited, false);
+  assert.deepEqual(observationDecisionBody('confirm'), {action: 'confirm'});
+  assert.deepEqual(observationDecisionBody('dismiss'), {action: 'dismiss'});
+  assert.equal(JSON.stringify(observationDecisionBody('confirm')), '{"action":"confirm"}');
+  assert.equal(JSON.stringify(observationDecisionBody('dismiss')), '{"action":"dismiss"}');
+  assert.equal(JSON.stringify(observationDecisionBody('confirm')).includes('version'), false);
 });
 
 test('409 relation conflict tells the user to reload instead of repeating the version', () => {

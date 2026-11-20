@@ -52,22 +52,6 @@ struct SchedulesView: View {
     private func remove(_ rule: Schedule) async { await model.operation { let _: JSONValue = try await model.api.request("/schedules/\(rule.id)", method: "DELETE", version: rule.version); await load() } }
 }
 
-private struct ObservationSuggestionItem: Decodable, Identifiable {
-    let id: String
-    let status: String
-    let reason: String
-}
-
-private struct ObservationRuleItem: Decodable, Identifiable {
-    let id: String
-    let title: String
-    let enabled: Bool
-    let version: Int
-    let lastStatus: String
-    let suggestions: [ObservationSuggestionItem]
-    enum CodingKeys: String, CodingKey { case id, title, enabled, version, suggestions; case lastStatus = "last_status" }
-}
-
 struct ObservationRulesSection: View {
     @EnvironmentObject private var model: WorkspaceModel
     @State private var rules: [ObservationRuleItem] = []
@@ -81,6 +65,7 @@ struct ObservationRulesSection: View {
     @State private var value = "awaiting_review"
     @State private var pageURL = ""
     @State private var condition = ""
+    @State private var editingRule: ObservationRuleItem?
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("按变化提出建议").font(.headline)
@@ -102,12 +87,21 @@ struct ObservationRulesSection: View {
                 .disabled(title.isEmpty || goal.isEmpty || model.selectedDevice.isEmpty || model.busy)
             ForEach(rules) { rule in
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(rule.title).font(.callout.weight(.medium))
+                    HStack {
+                        Text(rule.title).font(.callout.weight(.medium))
+                        Spacer()
+                        Button("编辑") { editingRule = rule }.controlSize(.small)
+                        Toggle("启用", isOn: Binding(get: { rule.enabled }, set: { enabled in Task { await setEnabled(rule, enabled) } })).toggleStyle(.switch).controlSize(.small)
+                    }
                     Text(rule.lastStatus).font(.caption).foregroundStyle(.secondary)
                     ForEach(rule.suggestions.filter { $0.status == "pending" }) { suggestion in
                         Text(suggestion.reason).font(.caption).textSelection(.enabled)
+                        if !rule.enabled {
+                            Text("已停用的规则不能开始任务。").font(.caption).foregroundStyle(.secondary)
+                        }
                         HStack {
                             Button("确认并创建任务") { Task { await decide(rule, suggestion, action: "confirm") } }
+                                .disabled(!rule.enabled || model.busy)
                             Button("忽略") { Task { await decide(rule, suggestion, action: "dismiss") } }
                         }
                     }
@@ -116,6 +110,9 @@ struct ObservationRulesSection: View {
             }
         }
         .task(id: model.lastSync) { await load() }
+        .sheet(item: $editingRule) { rule in
+            ObservationRuleEditSheet(rule: rule) { await load() }
+        }
     }
     private func load() async {
         guard !model.isDemo else { return }
@@ -128,11 +125,70 @@ struct ObservationRulesSection: View {
             title = ""; goal = ""; await load()
         }
     }
-    private func decide(_ rule: ObservationRuleItem, _ suggestion: ObservationSuggestionItem, action: String) async {
+    private func setEnabled(_ rule: ObservationRuleItem, _ enabled: Bool) async {
         await model.operation {
-            let _: JSONValue = try await model.api.request("/observation-rules/\(rule.id)/suggestions/\(suggestion.id)", method: "POST", body: ["action": .string(action)], version: rule.version)
+            let _: JSONValue = try await model.api.request("/observation-rules/\(rule.id)", method: "PATCH", body: RequestBodies.observationEnabled(enabled), version: rule.version)
             await load()
         }
+    }
+    private func decide(_ rule: ObservationRuleItem, _ suggestion: ObservationSuggestionItem, action: String) async {
+        await model.operation {
+            let _: JSONValue = try await model.api.request("/observation-rules/\(rule.id)/suggestions/\(suggestion.id)", method: "POST", body: RequestBodies.observationDecision(action), version: rule.version)
+            await load()
+        }
+    }
+}
+
+private struct ObservationRuleEditSheet: View {
+    @EnvironmentObject private var model: WorkspaceModel
+    @Environment(\.dismiss) private var dismiss
+    let rule: ObservationRuleItem
+    let onSaved: () async -> Void
+    @State private var goal: String
+    @State private var sites: String
+    @State private var pageURL: String
+    @State private var condition: String
+    @State private var enabled: Bool
+
+    init(rule: ObservationRuleItem, onSaved: @escaping () async -> Void) {
+        self.rule = rule
+        self.onSaved = onSaved
+        _goal = State(initialValue: rule.goal ?? "")
+        _sites = State(initialValue: (rule.sites ?? []).joined(separator: ", "))
+        _pageURL = State(initialValue: rule.url ?? "")
+        _condition = State(initialValue: rule.condition ?? "")
+        _enabled = State(initialValue: rule.enabled)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("编辑观察规则").font(.title3.weight(.semibold))
+            Text("修改网站或页面会改变之后检查可以读取的页面，不会改写已有记忆。").font(.callout).foregroundStyle(.secondary)
+            TextField("确认后要做的事", text: $goal).textFieldStyle(.roundedBorder)
+            TextField("网站，逗号分隔", text: $sites).textFieldStyle(.roundedBorder)
+            TextField("https 地址", text: $pageURL).textFieldStyle(.roundedBorder)
+            TextField("业务条件", text: $condition).textFieldStyle(.roundedBorder)
+            Toggle("启用", isOn: $enabled).toggleStyle(.switch)
+            if let error = model.error { Text(error).font(.callout).foregroundStyle(.orange) }
+            HStack {
+                Button("取消") { dismiss() }
+                Spacer()
+                Button("保存修改") { Task { await save() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sites.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.busy)
+            }
+        }
+        .padding(28)
+        .frame(width: 650)
+    }
+
+    private func save() async {
+        await model.operation {
+            let body = try RequestBodies.observationRuleEdit(goal: goal, sites: sites, url: pageURL, condition: condition, enabled: enabled, source: rule.source ?? "task_result")
+            let _: JSONValue = try await model.api.request("/observation-rules/\(rule.id)", method: "PATCH", body: body, version: rule.version)
+            await onSaved()
+        }
+        if model.error == nil { dismiss() }
     }
 }
 

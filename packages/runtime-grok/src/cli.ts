@@ -17,6 +17,7 @@ export class GrokCliRuntime implements RuntimeAdapter {
   private controller?: AbortController;
   private queued: string[] = [];
   constructor(private readonly options: GrokCliOptions = {}) {}
+  supportsVision(): boolean { return false; }
   async execute(context: RuntimeContext): Promise<RuntimeResult> {
     checkAbort(context.signal);
     this.controller = new AbortController();

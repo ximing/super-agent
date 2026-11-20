@@ -4,6 +4,7 @@ import SuperAgentCore
 @main struct SuperAgentApplication: App {
     @NSApplicationDelegateAdaptor(NativeNotifications.self) private var notifications
     @StateObject private var model = WorkspaceModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -11,6 +12,9 @@ import SuperAgentCore
                 .environmentObject(model)
                 .tint(Palette.accent)
                 .onOpenURL { model.handleLoginCallback($0) }
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active { model.reconnectEventStream() }
+                }
                 .frame(minWidth: 1040, minHeight: 680)
                 .task {
                     notifications.model = model

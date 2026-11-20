@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canTransitionRun, canStartReplacement, moneyToTicks, ticksToMoney, summarizeCosts } from '../dist/index.js';
+import { activityRootId, canTransitionRun, canStartReplacement, moneyToTicks, observationActivityId, ticksToMoney, summarizeCosts } from '../dist/index.js';
 
 test('late progress cannot revive a completed or paused attempt', () => {
   assert.equal(canTransitionRun('succeeded', 'running'), false);
@@ -22,6 +22,14 @@ test('supplier ticks and decimal sums do not suffer floating-point rounding', ()
   assert.equal(ticksToMoney(38_000_000n), '0.0038');
   assert.equal(ticksToMoney(0n), '0');
   for (const value of ['-1', '1e3', 'NaN', '0.00000000001', '01.2']) assert.throws(() => moneyToTicks(value));
+});
+
+test('attempt ids keep a stable root and observation commands do not use the page fingerprint', () => {
+  assert.equal(activityRootId('assistant:msg'), 'assistant:msg');
+  assert.equal(activityRootId('assistant:msg#2'), 'assistant:msg');
+  assert.equal(activityRootId('proactive:observation:cmd#10'), 'proactive:observation:cmd');
+  assert.equal(activityRootId('event:abc#nope'), 'event:abc#nope');
+  assert.equal(observationActivityId('cmd-1'), 'proactive:observation:cmd-1');
 });
 
 test('unknown subscription cost stays unknown, known zero stays known', () => {

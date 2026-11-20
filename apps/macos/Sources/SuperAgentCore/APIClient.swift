@@ -156,4 +156,44 @@ public actor APIClient {
         }
         return try decoder.decode(T.self, from: data)
     }
+
+    public func events(after cursor: String) async throws -> AsyncThrowingStream<String, Error> {
+        guard let token = session?.accessToken else { throw APIError(status: 401, code: "signed_out", message: "请先登录") }
+        guard cursor.range(of: #"^\d{1,20}$"#, options: .regularExpression) != nil,
+              let url = URL(string: baseURL.absoluteString + "/v1/events/stream?after=" + cursor) else {
+            throw APIError(status: 422, code: "invalid_cursor", message: "事件游标无效")
+        }
+        let transport = self.transport
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                var request = URLRequest(url: url)
+                request.httpMethod = "GET"
+                request.timeoutInterval = 60
+                request.cachePolicy = .reloadIgnoringLocalCacheData
+                request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                do {
+                    let (bytes, response) = try await transport.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw APIError(status: 0, code: "network", message: "服务器未返回 HTTP 响应") }
+                    guard (200..<300).contains(http.statusCode) else {
+                        var data = Data()
+                        for try await byte in bytes {
+                            data.append(byte)
+                            if data.count >= 8192 { break }
+                        }
+                        let detail = try? JSONDecoder().decode(ErrorEnvelope.self, from: data)
+                        throw APIError(status: http.statusCode, code: detail?.error.code ?? "http_error", message: detail?.error.message ?? "事件流连接失败（\(http.statusCode)）")
+                    }
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        continuation.yield(line)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { @Sendable _ in task.cancel() }
+        }
+    }
 }

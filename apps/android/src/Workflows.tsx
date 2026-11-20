@@ -4,7 +4,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import {api} from './native';
 import type {Artifact,Device,DownloadDescriptor,Engine,List,Schedule,UploadDescriptor} from './types';
-import {observationRuleBody} from './payloads';
+import {observationDecisionBody, observationEnabledBody, observationRuleBody, observationRuleEditBody} from './payloads';
 
 type Operation=(action:()=>Promise<void>)=>Promise<boolean>;
 function Action({title,onPress,disabled=false}:{title:string;onPress:()=>void;disabled?:boolean}){return <Pressable accessibilityRole="button" disabled={disabled} style={[s.button,disabled&&{opacity:0.4}]} onPress={onPress}><Text style={s.buttonText}>{title}</Text></Pressable>;}
@@ -23,11 +23,20 @@ function ObservationRules({devices,perform}:{devices:Device[];perform:Operation}
   const [title,setTitle]=useState(''); const [goal,setGoal]=useState(''); const [sites,setSites]=useState(''); const [project,setProject]=useState('');
   const [source,setSource]=useState<'task_result'|'page'>('task_result'); const [taskId,setTaskId]=useState(''); const [match,setMatch]=useState('status'); const [value,setValue]=useState('awaiting_review');
   const [url,setUrl]=useState(''); const [condition,setCondition]=useState(''); const [device,setDevice]=useState(''); const [engine,setEngine]=useState<Engine>('grok');
+  const [editing,setEditing]=useState<string|null>(null); const [editGoal,setEditGoal]=useState(''); const [editSites,setEditSites]=useState(''); const [editUrl,setEditUrl]=useState(''); const [editCondition,setEditCondition]=useState(''); const [editEnabled,setEditEnabled]=useState(true);
   const load=useCallback(async()=>{const result=await api.request<List<ObservationRule>>('/observation-rules');setRules(result.items);},[]);
   useEffect(()=>{void perform(load);},[load,perform]);
   const save=()=>void perform(async()=>{
     await api.request('/observation-rules',{method:'POST',body:observationRuleBody({title,goal,deviceId:device,engine,sites,project,cooldownMinutes:30,source,taskId,match,value,url,condition})});
     setTitle('');setGoal('');await load();
+  });
+  const beginEdit=(rule:ObservationRule)=>{
+    if(editing===rule.id){setEditing(null);return;}
+    setEditing(rule.id);setEditGoal(rule.goal);setEditSites((rule.sites??[]).join(', '));setEditUrl(rule.url??'');setEditCondition(rule.condition??'');setEditEnabled(rule.enabled);
+  };
+  const saveEdit=(rule:ObservationRule)=>void perform(async()=>{
+    await api.request(`/observation-rules/${rule.id}`,{method:'PATCH',version:rule.version,body:observationRuleEditBody({goal:editGoal,sites:editSites,url:editUrl,condition:editCondition,enabled:editEnabled,source:rule.source})});
+    setEditing(null);await load();
   });
   return <View style={s.panel}><Text style={s.heading}>按变化提出建议</Text><Text style={s.caption}>任务状态变化，或授权网页上的条件成立时，先给你一条建议。确认后才创建任务，记忆范围不会超出这里的项目和网站。</Text>
     <TextInput style={s.input} placeholder="规则名称" value={title} onChangeText={setTitle}/>
@@ -39,7 +48,7 @@ function ObservationRules({devices,perform}:{devices:Device[];perform:Operation}
     {devices.filter(item=>!item.revoked).map(item=><Pressable key={item.id} style={[s.device,device===item.id&&s.selected]} onPress={()=>{setDevice(item.id);}}><Text style={s.body}>{item.name}</Text></Pressable>)}
     <View style={s.row}>{(['codex','grok'] as Engine[]).map(item=><Pressable key={item} onPress={()=>setEngine(item)} style={[s.chip,engine===item&&s.selected]}><Text style={s.body}>{item==='codex'?'Codex':'Grok'}{devices.find(d=>d.id===device)?.capabilities.engines.find(e=>e.engine===item)?.vision==='unsupported'?' · 不能看图':''}</Text></Pressable>)}</View>
     <Action title="保存观察规则" disabled={!title.trim()||!goal.trim()||!device} onPress={save}/>
-    {rules.map(rule=><View key={rule.id} style={s.file}><View style={{flex:1}}><Text style={s.body}>{rule.title}</Text><Text style={s.caption}>{rule.source==='page'?'网页':'任务'} · {rule.last_status} · {(rule.sites??[]).join('、')}</Text>{rule.suggestions.filter(item=>item.status==='pending').map(item=><View key={item.id}><Text selectable style={s.caption}>{item.reason}</Text><View style={s.row}><Action title="确认并创建任务" onPress={()=>void perform(async()=>{await api.request(`/observation-rules/${rule.id}/suggestions/${item.id}`,{method:'POST',version:rule.version,body:{action:'confirm'}});await load();})}/><Action title="忽略" onPress={()=>void perform(async()=>{await api.request(`/observation-rules/${rule.id}/suggestions/${item.id}`,{method:'POST',version:rule.version,body:{action:'dismiss'}});await load();})}/></View></View>)}</View><Switch value={rule.enabled} onValueChange={enabled=>void perform(async()=>{await api.request(`/observation-rules/${rule.id}`,{method:'PATCH',version:rule.version,body:{enabled,source:rule.source,sites:rule.sites,goal:rule.goal,title:rule.title,device_id:rule.device_id,engine:rule.engine,project:rule.project,cooldown_minutes:30,task_id:rule.task_id,match:rule.match,value:rule.value,url:rule.url,condition:rule.condition}});await load();})}/></View>)}
+    {rules.map(rule=><View key={rule.id} style={s.file}><View style={{flex:1}}><Text style={s.body}>{rule.title}</Text><Text style={s.caption}>{rule.source==='page'?'网页':'任务'} · {rule.last_status} · {(rule.sites??[]).join('、')}</Text>{rule.suggestions.filter(item=>item.status==='pending').map(item=><View key={item.id}><Text selectable style={s.caption}>{item.reason}</Text>{!rule.enabled?<Text style={s.caption}>已停用的规则不能开始任务。</Text>:null}<View style={s.row}><Action title="确认并创建任务" disabled={!rule.enabled} onPress={()=>void perform(async()=>{await api.request(`/observation-rules/${rule.id}/suggestions/${item.id}`,{method:'POST',version:rule.version,body:observationDecisionBody('confirm')});await load();})}/><Action title="忽略" onPress={()=>void perform(async()=>{await api.request(`/observation-rules/${rule.id}/suggestions/${item.id}`,{method:'POST',version:rule.version,body:observationDecisionBody('dismiss')});await load();})}/></View></View>)}<Action title={editing===rule.id?'收起编辑':'编辑'} onPress={()=>beginEdit(rule)}/>{editing===rule.id?<View><Text style={s.caption}>修改网站或页面会改变之后检查可以读取的页面，不会改写已有记忆。</Text><TextInput style={s.input} placeholder="确认后要做的事" value={editGoal} onChangeText={setEditGoal}/><TextInput style={s.input} placeholder="网站，逗号分隔" value={editSites} onChangeText={setEditSites} autoCapitalize="none"/><TextInput style={s.input} placeholder="https 地址" value={editUrl} onChangeText={setEditUrl} autoCapitalize="none"/><TextInput style={s.input} placeholder="业务条件" value={editCondition} onChangeText={setEditCondition}/><View style={s.row}><Text style={[s.caption,{flex:1}]}>启用</Text><Switch value={editEnabled} onValueChange={setEditEnabled}/></View><Action title="保存修改" disabled={!editGoal.trim()||!editSites.trim()} onPress={()=>saveEdit(rule)}/></View>:null}</View><Switch value={rule.enabled} onValueChange={enabled=>void perform(async()=>{await api.request(`/observation-rules/${rule.id}`,{method:'PATCH',version:rule.version,body:observationEnabledBody(enabled)});await load();})}/></View>)}
   </View>;
 }
 export function TaskArtifacts({taskId}:{taskId:string}){

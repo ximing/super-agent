@@ -13,22 +13,28 @@ export class GrokRuntime implements RuntimeAdapter {
     const url = new URL(options.baseUrl ?? 'https://api.x.ai/v1');
     if (url.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) throw new Error('Provider URL must use HTTPS');
   }
-  supportsVision(): boolean { return false; }
+  supportsVision(): boolean { return Boolean(this.options.apiKey); }
   async execute(context: RuntimeContext): Promise<RuntimeResult> {
     checkAbort(context.signal);
     this.controller = new AbortController();
     const signal = AbortSignal.any([context.signal, this.controller.signal]);
     const fetcher = this.options.fetcher ?? fetch;
+    const goalText = context.checkpoint ? `${context.goal}\nCheckpoint: ${JSON.stringify(context.checkpoint)}\nContinue unfinished steps, verify current environment before acting.` : context.goal;
+    const images = (context.images ?? []).filter(image => typeof image.data_base64 === 'string' && image.data_base64.length > 0);
+    const userContent = images.length
+      ? [{ type: 'input_text', text: goalText }, ...images.map(image => ({ type: 'input_image', image_url: `data:${image.media_type || 'image/png'};base64,${image.data_base64}` }))]
+      : goalText;
     const input: Obj[] = [{ role: 'system', content: `You are a local worker for the user's task. Use tools to perform authorized work, search memory for unfamiliar sites, and ask only for missing information or expanded scope. Do not read/export credentials. ${context.developerInstructions ?? ''}` },
-      { role: 'user', content: context.checkpoint ? `${context.goal}\nCheckpoint: ${JSON.stringify(context.checkpoint)}\nContinue unfinished steps, verify current environment before acting.` : context.goal }];
+      { role: 'user', content: userContent }];
     let previous: string | undefined;
     for (let round = 0; round < (this.options.maxRounds ?? 80); round++) {
       checkAbort(signal);
       context.budget?.beforeModelCall();
       for (const text of this.queuedInputs.splice(0)) input.push({ role: 'user', content: text });
       await context.emit({ type: 'progress', summary: `Grok 正在处理第 ${round + 1} 轮` });
-      const body: Obj = { model: context.modelId, input: previous ? input.splice(0) : input, tools: context.tools.map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters })), max_output_tokens: this.options.maxOutputTokens ?? 4096, store: true };
-      if (previous) body.previous_response_id = previous;
+      const vision = images.length > 0;
+      const body: Obj = { model: context.modelId, input: !vision && previous ? input.splice(0) : input, tools: context.tools.map(t => ({ type: 'function', name: t.name, description: t.description, parameters: t.parameters })), max_output_tokens: this.options.maxOutputTokens ?? 4096, store: !vision };
+      if (!vision && previous) body.previous_response_id = previous;
       let response: Obj;
       // One flag per logical round. Set inside request() only after the pre-send abort check.
       const roundAttempt = { sent: false };
@@ -59,7 +65,7 @@ export class GrokRuntime implements RuntimeAdapter {
         await context.emit({ type: 'message', text }); return { text, binding: { response_id: responseId } };
       }
       if (budgetStop) throw new Error(`budget_stop:${budgetStop}`);
-      previous = typeof response.id === 'string' ? response.id : undefined;
+      previous = vision ? undefined : (typeof response.id === 'string' ? response.id : undefined);
       // The first input array is retained only for fallback if a provider omits response IDs.
       if (previous) input.length = 0; else input.push(...outputs);
       for (const call of calls) {

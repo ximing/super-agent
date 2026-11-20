@@ -41,6 +41,7 @@ import SuperAgentCore
     var demoSteps: [ToolStep] = []
     weak var notifications: NativeNotifications?
     private var cursor = "0"
+    private var seenSeqs: Set<String> = []
     private var pollTask: Task<Void, Never>?
     let api: APIClient
     private let oidc = OIDCLogin()
@@ -127,23 +128,111 @@ import SuperAgentCore
     func cancelSignIn() { loginTask?.cancel(); oidc.cancel() }
     func handleLoginCallback(_ url: URL) { oidc.handleCallback(url) }
     func signOut() async {
-        pollTask?.cancel(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; assistantDraft = ""; taskDrafts = [:]; isDemo = false; demoRuns = []; demoTaskMessages = []; demoEvidence = [:]; demoArtifacts = []; demoSteps = []; lastSync = nil; error = nil; cursor = "0"
+        pollTask?.cancel(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; assistantDraft = ""; taskDrafts = [:]; isDemo = false; demoRuns = []; demoTaskMessages = []; demoEvidence = [:]; demoArtifacts = []; demoSteps = []; lastSync = nil; error = nil; cursor = "0"; seenSeqs = []
     }
-    func startPolling() {
+    func startPolling(restore: Bool = true) {
         pollTask?.cancel()
+        if restore { restoreCursor() }
         pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled, let self, self.session != nil else { return }
+            await self?.runEventStream()
+        }
+    }
+    func reconnectEventStream() {
+        guard session != nil, !isDemo else { return }
+        startPolling(restore: false)
+    }
+    private func restoreCursor() {
+        seenSeqs = []
+        guard let id = session?.user.id else { cursor = "0"; return }
+        let saved = UserDefaults.standard.string(forKey: "event-cursor.\(id)") ?? "0"
+        cursor = saved.range(of: #"^\d{1,20}$"#, options: .regularExpression) != nil ? saved : "0"
+    }
+    private func storeCursor() {
+        guard let id = session?.user.id, cursor.range(of: #"^\d{1,20}$"#, options: .regularExpression) != nil else { return }
+        UserDefaults.standard.set(cursor, forKey: "event-cursor.\(id)")
+    }
+    private func runEventStream() async {
+        var failureDelay = 0.0
+        var nextReconcile = Date().addingTimeInterval(45)
+        while !Task.isCancelled {
+            if session == nil || isDemo { return }
+            if Date() >= nextReconcile {
+                await refresh()
+                nextReconcile = Date().addingTimeInterval(45)
+                if Task.isCancelled || session == nil { return }
+            }
+            if failureDelay > 0 {
+                do { try await Task.sleep(for: .seconds(failureDelay)) } catch { return }
+            }
+            if Task.isCancelled || session == nil || isDemo { return }
+            do {
+                let stream = try await api.events(after: cursor)
+                var remainder = ""
+                for try await line in stream {
+                    if Task.isCancelled { return }
+                    let consumed = EventStreamDecoder.consume(line + "\n", cursor: cursor, seen: seenSeqs, remainder: remainder)
+                    remainder = consumed.remainder
+                    let moved = consumed.cursor != cursor
+                    cursor = consumed.cursor
+                    seenSeqs = consumed.seen
+                    if moved { storeCursor() }
+                    if !consumed.applied.isEmpty { await applyStream(consumed.applied) }
+                }
+                if !remainder.isEmpty {
+                    let consumed = EventStreamDecoder.consume("\n", cursor: cursor, seen: seenSeqs, remainder: remainder)
+                    let moved = consumed.cursor != cursor
+                    cursor = consumed.cursor
+                    seenSeqs = consumed.seen
+                    if moved { storeCursor() }
+                    if !consumed.applied.isEmpty { await applyStream(consumed.applied) }
+                }
+                failureDelay = 0
+            } catch is CancellationError {
+                return
+            } catch let error as URLError where error.code == .cancelled {
+                return
+            } catch let error as APIError where error.status == 401 {
                 do {
-                    let batch: EventBatch = try await self.api.request("/events?after=\(self.cursor)")
-                    self.cursor = batch.cursor
-                    if !batch.items.isEmpty { await self.refresh() }
-                    else { self.lastSync = Date() }
-                } catch let e as APIError where e.status == 410 { self.cursor = "0"; await self.refresh() }
-                catch { self.error = error.localizedDescription; if await self.api.currentSession() == nil { self.session = nil; return } }
+                    let _: User = try await api.request("/me")
+                    failureDelay = 0
+                } catch {
+                    if await api.currentSession() == nil { session = nil }
+                    return
+                }
+            } catch let error as APIError where error.status == 422 || error.status == 410 || error.code == "invalid_cursor" {
+                if cursor != "0" {
+                    cursor = "0"; seenSeqs = []; storeCursor(); failureDelay = 0
+                } else {
+                    failureDelay = min(max(failureDelay, 1) * 2, 30)
+                }
+            } catch {
+                if await api.currentSession() == nil { session = nil; return }
+                failureDelay = failureDelay == 0 ? 1 : min(failureDelay * 2, 30)
             }
         }
+    }
+    private func applyStream(_ events: [AppliedStreamEvent]) async {
+        var taskIds: [String] = []
+        var reloadDevices = false
+        var reloadQuestions = false
+        for event in events where event.type != "cursor" {
+            if let taskId = event.taskId, !taskIds.contains(taskId) { taskIds.append(taskId) }
+            if event.type == "device.changed" { reloadDevices = true }
+            if event.type == "notification.created" || event.type == "question.created" || event.type == "question.resolved" { reloadQuestions = true }
+        }
+        for id in taskIds {
+            if let task: AgentTask = try? await api.request("/tasks/\(id)") {
+                if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
+                else { tasks.insert(task, at: 0) }
+            }
+        }
+        if reloadDevices, let list: Items<Device> = try? await api.request("/devices") { devices = list.items }
+        if reloadQuestions, let list: Items<Question> = try? await api.request("/questions?status=open") {
+            let previous = Set(questions.map(\.id))
+            if lastSync != nil { NativeNotifications.announceNewQuestions(list.items.filter { !previous.contains($0.id) }) }
+            questions = list.items
+        }
+        if events.contains(where: { $0.type != "cursor" }) { lastSync = Date() }
     }
     func refresh() async {
         guard !isDemo else { lastSync = Date(); return }

@@ -8,7 +8,7 @@ import { observeDue } from './observations.js';
 import { normalizeMemoryScope, proposeRetrospective } from './memory-governance.js';
 import { activeHold, admitReservation, buildReservation, grantBlocked, remainingLimits, renewReservation, reservationInForce, settleReservation, type ReservationLiveness } from './budget-control.js';
 import { configuredLimits, dollarGate, holdFor, presentGrant, recovery, sanitizeLimits, spendFor, taskDollarStop, usageStop } from './budget-policy.js';
-import { BUDGET_RECOVERY, canonicalActivityId, grantExecutable, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
+import { BUDGET_RECOVERY, activityRootId, canonicalActivityId, grantExecutable, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
 
 export const ACTIVE = ['dispatched','starting','running','waiting_input','stopping'];
 const TERMINAL = ['succeeded','failed','cancelled','paused'];
@@ -36,15 +36,31 @@ export function workerUsageActivity(run:Doc,payload:Doc):Doc{
   if(payload.category!==undefined&&payload.category!=='worker'&&payload.category!=='subagent')throw new ApiError(422,'invalid_usage_category','执行用量类别无效');
   return{activity_id:activityId,category:payload.category==='subagent'?'subagent':'worker',run_id:run.id,task_id:run.task_id??null,device_id:run.device_id??null,engine:run.engine,model_id:run.model_id};
 }
-export function assistantUsageActivity(message:Doc,deviceId:string,engineName:string,modelId:string,body:Doc):Doc{
-  const activityId=canonicalActivityId(message.schedule_id?'proactive':'assistant',message.id);
-  if(body.activity_id!==undefined&&body.activity_id!==activityId)throw new ApiError(422,'activity_mismatch','用量活动标识不一致');
+/** The reported id must be the live attempt, or the only root when no attempt exists. */
+export function resolveReportedActivity(root:string,body:Doc,reservations:Doc[],deviceId:string):string{
+  const family=reservations.filter(row=>activityRootId(String(row.activity_id??''))===root);
+  const live=family.filter(row=>row.status==='reserved'&&Number.isFinite(Date.parse(String(row.expires_at)))&&Date.parse(String(row.expires_at))>Date.now()&&(!row.device_id||row.device_id===deviceId)).sort((a,b)=>(Number(b.attempt)||1)-(Number(a.attempt)||1))[0];
+  if(body.activity_id===undefined||body.activity_id===null){
+    if(live)return String(live.activity_id);
+    if(family.some(row=>String(row.activity_id)!==root))throw new ApiError(422,'activity_mismatch','用量活动标识不一致');
+    return root;
+  }
+  const reported=text(body.activity_id,'activity_id',200);
+  if(activityRootId(reported)!==root)throw new ApiError(422,'activity_mismatch','用量活动标识不一致');
+  const row=family.find(item=>item.activity_id===reported&&(!item.device_id||item.device_id===deviceId));
+  if(!row)throw new ApiError(422,'activity_mismatch','用量活动标识不一致');
+  if(live&&live.activity_id!==reported)throw new ApiError(422,'activity_mismatch','用量活动标识不一致');
+  return reported;
+}
+export function assistantUsageActivity(message:Doc,deviceId:string,engineName:string,modelId:string,body:Doc,reservations:Doc[]=[]):Doc{
+  const root=canonicalActivityId(message.schedule_id?'proactive':'assistant',message.id);
+  const activityId=resolveReportedActivity(root,body,reservations,deviceId);
   return{activity_id:activityId,category:message.schedule_id?'proactive':'assistant',run_id:null,task_id:message.task_id??null,device_id:deviceId,engine:engineName,model_id:modelId};
 }
-export function eventUsageActivity(event:Doc,deviceId:string,engineName:string,modelId:string,body:Doc):Doc{
+export function eventUsageActivity(event:Doc,deviceId:string,engineName:string,modelId:string,body:Doc,reservations:Doc[]=[]):Doc{
   const deliveryReview=!!(event.delivery_id&&(body.category==='review'||event.type==='delivery.submitted'));
-  const activityId=deliveryReview?canonicalActivityId('review',event.delivery_id):canonicalActivityId('event',event.id);
-  if(body.activity_id!==undefined&&body.activity_id!==activityId)throw new ApiError(422,'activity_mismatch','用量活动标识不一致');
+  const root=deliveryReview?canonicalActivityId('review',event.delivery_id):canonicalActivityId('event',event.id);
+  const activityId=resolveReportedActivity(root,body,reservations,deviceId);
   return{activity_id:activityId,category:deliveryReview?'review':'assistant',run_id:null,task_id:event.task_id??null,device_id:deviceId,engine:engineName,model_id:modelId,...(event.id?{event_id:event.id}:{})};
 }
 export function replyActivityId(source:Doc):string{return canonicalActivityId(source.schedule_id?'proactive':'assistant',source.id);}
@@ -59,10 +75,7 @@ function viewGrant(reservation:Doc,deviceId?:string|null):Doc{
 /** Attempt keys are `${root}#N`. The root stays stable across terminal retries. */
 function activityRoot(row:Doc,fallback:unknown):string{
   if(typeof row.prior_activity_id==='string'&&row.prior_activity_id)return row.prior_activity_id;
-  const id=String(row.activity_id??fallback??'');
-  const mark=id.lastIndexOf('#');
-  if(mark>0&&/^\d+$/.test(id.slice(mark+1)))return id.slice(0,mark);
-  return id;
+  return activityRootId(String(row.activity_id??fallback??''));
 }
 function workerRunReservation(reservation:Doc,runId:string):boolean{
   if(reservation.activity_kind==='assistant'||reservation.activity_kind==='review'||reservation.activity_kind==='proactive')return false;
@@ -240,6 +253,14 @@ export class Service {
     const linked=(await tx.all('usage_records')).filter(row=>row.activity_id===activityId);
     await this.settleActivity(tx,reservation=>reservation.activity_id===activityId,linked);
   }
+  /** Close every still-reserved attempt in one family. Each row settles only its own usage. */
+  async releaseActivityRoot(tx:Tx,root:string):Promise<void>{
+    const rows=(await tx.all('budget_reservations')).filter(row=>row.status==='reserved'&&activityRootId(String(row.activity_id??''))===root);
+    for(const row of rows){
+      const linked=(await tx.all('usage_records')).filter(record=>record.activity_id===row.activity_id);
+      await this.settleActivity(tx,reservation=>reservation.id===row.id,linked);
+    }
+  }
   async reserveActivity(tx:Tx,body:Doc,deviceId?:string):Promise<Doc>{
     await graphLock(tx);
     const category:BudgetCategory=['assistant','review','proactive','worker'].includes(body.category)?body.category:'assistant';
@@ -296,8 +317,8 @@ export class Service {
     const activityId=canonicalActivityId('run',runId);
     for(const reserve of (await tx.all('budget_reservations')).filter(row=>row.status==='reserved'&&row.activity_kind==='run'&&(row.activity_id===activityId||row.run_id===runId)))await tx.put('budget_reservations',renewReservation(reserve,now(),120000),reserve.id);
   }
-  async heartbeatActivity(tx:Tx,activityId:string):Promise<Doc>{
-    const rows=(await tx.all('budget_reservations',true)).filter(row=>row.status==='reserved'&&row.activity_id===activityId);
+  async heartbeatActivity(tx:Tx,activityId:string,deviceId?:string):Promise<Doc>{
+    const rows=(await tx.all('budget_reservations',true)).filter(row=>row.status==='reserved'&&row.activity_id===activityId&&(!deviceId||!row.device_id||row.device_id===deviceId));
     const row=rows[0];
     if(rows.length!==1||!row)throw new ApiError(404,'not_found','预算预留不存在');
     return presentGrant(await tx.put('budget_reservations',renewReservation(row,now(),120000),row.id));

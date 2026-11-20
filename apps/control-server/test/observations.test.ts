@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { ApiError, type Doc, type Tx } from '../src/store.js';
 import { Auth } from '../src/auth.js';
 import { Service } from '../src/service.js';
-import { decideSuggestion, observationInput, observeDue, reportObservation } from '../src/observations.js';
+import { configVersion, decideSuggestion, observationInput, observeDue, reportObservation } from '../src/observations.js';
 import { readEvents, sseFrame } from '../src/events-stream.js';
 import { assertSwitchTarget, takeoverPreflight } from '../src/takeover.js';
 import { assessMemory, proposeRetrospective, proposeUserCorrection, setPreferenceEnabled, workerAccess } from '../src/memory-governance.js';
@@ -56,20 +56,47 @@ test('a busy device and a page rule do not invent a reminder', async () => {
   assert.equal((rejected as ApiError).code, 'invalid_observation');
 });
 
+async function observationCommand(tx: Tx, rule: Doc, deviceId: string, sentAt: string): Promise<Doc> {
+  const id = randomUUID();
+  return tx.put('commands', { protocol_version: '1.0', message_id: randomUUID(), kind: 'observation.check', sent_at: sentAt, device_id: deviceId, state: 'pending', expires_at: '2099-01-01T00:00:00.000Z', payload: { command_id: id, rule_id: rule.id, config_version: configVersion(rule) } }, id);
+}
+
 test('page reports dedupe, back off, and do not treat suppression as failure', async () => {
   const tx = memoryTx();
   const deviceId = randomUUID();
-  const rule = await tx.put('schedules', { kind: 'observation', device_id: deviceId, source: 'page', cooldown_minutes: 5, last_fingerprint: null, consecutive_failures: 0, suggestions: [], history: [], goal: '跟进', title: '页面', sites: ['a.example'], project: null, engine: 'grok' });
+  const rule = await tx.put('schedules', { kind: 'observation', enabled: true, config_version: 1, device_id: deviceId, source: 'page', cooldown_minutes: 5, last_fingerprint: null, consecutive_failures: 0, suggestions: [], history: [], goal: '跟进', title: '页面', sites: ['a.example'], project: null, engine: 'grok' });
   const now = Date.parse('2026-11-19T01:00:00.000Z');
-  const matched = await reportObservation(tx, rule.id, deviceId, { status: 'matched', reason: '价格变为 9', fingerprint: 'price-9' }, now);
-  const replay = await reportObservation(tx, rule.id, deviceId, { status: 'matched', reason: '价格变为 9', fingerprint: 'price-9' }, now + 1000);
+  const first = await observationCommand(tx, rule, deviceId, '2026-11-19T01:00:00.000Z');
+  const matched = await reportObservation(tx, rule.id, deviceId, { command_id: first.payload.command_id, config_version: 1, status: 'matched', reason: '价格变为 9', fingerprint: 'price-9' }, now);
+  const replay = await reportObservation(tx, rule.id, deviceId, { command_id: first.payload.command_id, config_version: 1, status: 'matched', reason: '价格变为 9', fingerprint: 'price-9' }, now + 1000);
   assert.equal(matched.suggestions.length, 1);
   assert.equal(replay.suggestions.length, 1);
-  const suppressed = await reportObservation(tx, rule.id, deviceId, { status: 'suppressed', reason: 'browser_busy' }, now + 2000);
+  const second = await observationCommand(tx, await tx.need('schedules', rule.id), deviceId, '2026-11-19T01:00:02.000Z');
+  const suppressed = await reportObservation(tx, rule.id, deviceId, { command_id: second.payload.command_id, config_version: 1, status: 'suppressed', reason: 'browser_busy' }, now + 2000);
   assert.equal(suppressed.consecutive_failures, 0);
-  const failed = await reportObservation(tx, rule.id, deviceId, { status: 'failed', reason: 'page_unread' }, now + 3000);
+  const third = await observationCommand(tx, await tx.need('schedules', rule.id), deviceId, '2026-11-19T01:00:03.000Z');
+  const failed = await reportObservation(tx, rule.id, deviceId, { command_id: third.payload.command_id, config_version: 1, status: 'failed', reason: 'page_unread' }, now + 3000);
   assert.equal(failed.consecutive_failures, 1);
   assert.ok(Date.parse(failed.next_eligible_at) >= now + 5 * 60_000);
+});
+
+test('a disabled or edited rule ignores a late matched report and will not confirm it', async () => {
+  const tx = memoryTx();
+  const deviceId = randomUUID();
+  const rule = await tx.put('schedules', { kind: 'observation', enabled: true, config_version: 1, device_id: deviceId, source: 'page', cooldown_minutes: 5, suggestions: [], history: [], goal: '跟进', title: '页面', sites: ['a.example'], project: null, engine: 'grok' });
+  const command = await observationCommand(tx, rule, deviceId, '2026-11-19T01:00:00.000Z');
+  const now = Date.parse('2026-11-19T01:00:00.000Z');
+  const matched = await reportObservation(tx, rule.id, deviceId, { command_id: command.payload.command_id, config_version: 1, status: 'matched', reason: '价格变为 9', fingerprint: 'price-9' }, now);
+  assert.equal(matched.suggestions.length, 1);
+  await tx.put('schedules', { ...matched, enabled: false }, rule.id);
+  const late = await observationCommand(tx, { ...rule, config_version: 1 }, deviceId, '2026-11-19T01:00:05.000Z');
+  await assert.rejects(() => reportObservation(tx, rule.id, deviceId, { command_id: late.payload.command_id, config_version: 1, status: 'matched', reason: '迟到命中', fingerprint: 'price-8' }, now + 5000), (error: unknown) => error instanceof ApiError && error.code === 'observation_inactive');
+  assert.equal((await tx.need('schedules', rule.id)).suggestions.length, 1);
+  await assert.rejects(() => decideSuggestion(tx, rule.id, matched.suggestions[0].id, 'confirm', body => new Service({} as never, {} as Auth).createTask(tx, body)), (error: unknown) => error instanceof ApiError && error.code === 'observation_inactive');
+  const edited = await tx.put('schedules', { ...(await tx.need('schedules', rule.id)), enabled: true, config_version: 2 }, rule.id);
+  await assert.rejects(() => reportObservation(tx, rule.id, deviceId, { command_id: command.payload.command_id, config_version: 1, status: 'matched', reason: '旧命令', fingerprint: 'price-7' }, now + 6000), (error: unknown) => error instanceof ApiError && error.code === 'observation_inactive');
+  assert.equal(edited.config_version, 2);
+  assert.equal((await tx.need('schedules', rule.id)).suggestions.length, 1);
 });
 
 test('event frames keep the cursor and do not echo tool arguments', async () => {

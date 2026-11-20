@@ -326,3 +326,78 @@ test('dead budget grants throw before runtime execute and a live grant replays t
     assert.equal(runtime.turns, 1);
   } finally { await agent.stop(); agent.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('new_attempt false does not execute a terminal grant and new_attempt true keeps the server activity id', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'super-agent-attempt-'));
+  const occurredAt = '2026-11-19T08:09:10.000Z';
+  const requestKey = 'attempt-2';
+  const limits = { max_total_tokens: 11, max_model_calls: 2, max_tool_steps: 2, max_runtime_ms: 600_000 };
+  const future = new Date(Date.now() + 600_000).toISOString();
+  const inbox = [
+    { id: 'msg-dead', role: 'user' as const, content: 'dead grant', task_id: null, created_at: occurredAt },
+    { id: 'msg-retry', role: 'user' as const, content: 'retry grant', task_id: null, created_at: occurredAt, new_attempt: true },
+  ];
+  const reserves: Record<string, unknown>[] = [], usages: Record<string, unknown>[] = [], releases: Record<string, unknown>[] = [], replies: { id: string; content: string }[] = [];
+  const api = { request: async (path: string, body?: unknown) => {
+    const record = (body ?? {}) as Record<string, unknown>;
+    if (path === '/node/heartbeat' || path === '/assistant/budget/heartbeat' || path === '/assistant/messages') {
+      if (path === '/assistant/messages') replies.push({ id: String(record.source_message_id), content: String(record.content) });
+      return {};
+    }
+    if (path.startsWith('/node/events')) return { items: [], cursor: '1' };
+    if (path === '/node/commands' || path === '/assistant/events') return { items: [] };
+    if (path === '/assistant/lease/claim' || path === '/assistant/lease/renew') return { epoch: 'epoch-1', lease_valid_for_ms: 60_000 };
+    if (path === '/assistant/inbox') return { items: inbox.length ? [inbox.shift()] : [] };
+    if (path === '/assistant/context') return { messages: [], tasks: [], pending_plans: [] };
+    if (path === '/assistant/plans') return { id: 'plan-attempt', state: 'draft', tasks: [] };
+    if (path === '/node/devices') return { items: [{ id: 'device1', name: 'Test Mac' }] };
+    if (path === '/assistant/budget/reserve') {
+      reserves.push(record);
+      const root = String(record.operation_key);
+      if (record.new_attempt !== true) return { status: 'settled', executable: false, limits: null, activity_id: root, device_id: 'device1', expires_at: future };
+      return { status: 'reserved', executable: true, limits, activity_id: `${root}#2`, device_id: 'device1', expires_at: future, category: 'assistant' };
+    }
+    if (path === '/assistant/budget/release') { releases.push(record); return {}; }
+    if (path === '/assistant/usage') { usages.push(record); return {}; }
+    return {};
+  } } as unknown as NodeApi;
+  class AttemptRuntime extends FakeRuntime {
+    turns = 0;
+    override async execute(context: RuntimeContext): Promise<RuntimeResult> {
+      this.turns += 1;
+      if (context.goal.includes('dead grant')) throw new Error('model must not run');
+      const sample = { request_key: requestKey, occurred_at: occurredAt, input_tokens: 4, cached_input_tokens: 0, output_tokens: 2, reasoning_tokens: 0 };
+      await context.emit({ type: 'usage', usage: sample });
+      await context.emit({ type: 'usage', usage: { ...sample, input_tokens: 8 } });
+      return { text: '第二次已执行。' };
+    }
+  }
+  const runtime = new AttemptRuntime();
+  const cfg = config(dir); cfg.assistant = true; cfg.fake_runtime = false;
+  const agent = new NodeAgent(cfg, { api, runtimeFactory: async () => runtime, log: () => {} });
+  const until = async (ready: () => boolean) => { for (let i = 0; i < 40 && !ready(); i++) { await agent.tick(); await sleep(20); } };
+  try {
+    await until(() => Boolean(agent.store.get('assistant:msg-dead')) && Boolean(agent.store.get('assistant:msg-retry')) && usages.length === 1 && releases.length === 1);
+    assert.equal(runtime.turns, 1);
+    assert.equal(reserves.length, 2);
+    assert.equal(reserves[0]?.operation_key, 'assistant:msg-dead');
+    assert.equal(reserves[0]?.new_attempt, undefined);
+    assert.equal(reserves[1]?.operation_key, 'assistant:msg-retry');
+    assert.equal(reserves[1]?.new_attempt, true);
+    assert.equal(reserves[1]?.activity_id, 'assistant:msg-retry');
+    assert.match(replies.filter(item => item.id === 'msg-dead').map(item => item.content).join('\n'), /grant_not_executable/);
+    assert.match(replies.filter(item => item.id === 'msg-retry').map(item => item.content).join('\n'), /第二次已执行/);
+    assert.equal(usages.length, 1);
+    assert.equal(usages[0]?.request_key, requestKey);
+    assert.equal(usages[0]?.activity_id, 'assistant:msg-retry#2');
+    assert.notEqual(usages[0]?.activity_id, 'assistant:msg-retry');
+    assert.equal(usages[0]?.occurred_at, occurredAt);
+    assert.equal(releases.length, 1);
+    assert.equal(releases[0]?.activity_id, 'assistant:msg-retry#2');
+    assert.notEqual(releases[0]?.activity_id, 'assistant:msg-retry');
+    await agent.tick(); await sleep(30); await agent.tick();
+    assert.equal(usages.length, 1);
+    assert.equal(releases.length, 1);
+    assert.equal(runtime.turns, 1);
+  } finally { await agent.stop(); agent.close(); rmSync(dir, { recursive: true, force: true }); }
+});

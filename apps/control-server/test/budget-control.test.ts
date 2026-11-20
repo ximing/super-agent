@@ -204,9 +204,9 @@ test('usage links only by activity id and terminal closes settle the worker hold
   await service.usage(tx, workerUsageActivity(run, workerPayload), workerPayload);
   const reviewPayload = { request_key: 'review-1', usage_revision: 1, engine: 'codex', model_id: 'fixture', category: 'review', activity_id: reviewActivity, input_tokens: 4, output_tokens: 1, cost: knownCost('0.01') };
   const event = { id: randomUUID(), type: 'delivery.submitted', delivery_id: deliveryId, task_id: taskId, run_id: runId };
-  await service.usage(tx, eventUsageActivity(event, run.device_id, 'codex', 'fixture', reviewPayload), reviewPayload);
+  await service.usage(tx, eventUsageActivity(event, run.device_id, 'codex', 'fixture', reviewPayload, await tx.all('budget_reservations')), reviewPayload);
   const proactivePayload = { request_key: 'proactive-1', usage_revision: 1, engine: 'grok', model_id: 'grok-2', input_tokens: 3, output_tokens: 1, cost: knownCost('0.03'), occurred_at: '2026-11-19T00:00:00.000Z' };
-  const proactiveContext = assistantUsageActivity(message, randomUUID(), 'grok', 'grok-2', proactivePayload);
+  const proactiveContext = assistantUsageActivity(message, randomUUID(), 'grok', 'grok-2', proactivePayload, await tx.all('budget_reservations'));
   await service.usage(tx, proactiveContext, proactivePayload);
   await service.usage(tx, proactiveContext, proactivePayload);
   const rows = await tx.all('usage_records');
@@ -217,13 +217,14 @@ test('usage links only by activity id and terminal closes settle the worker hold
   assert.equal(proactive?.category, 'proactive');
   assert.equal(proactive?.run_id, null);
   const revised = { ...proactivePayload, usage_revision: 2, input_tokens: 9 };
-  await service.usage(tx, assistantUsageActivity(message, proactiveContext.device_id, 'grok', 'grok-2', revised), revised);
+  await service.usage(tx, assistantUsageActivity(message, proactiveContext.device_id, 'grok', 'grok-2', revised, await tx.all('budget_reservations')), revised);
   const afterRevision = (await tx.all('usage_records')).filter(row => row.activity_id === proactiveActivity);
   assert.equal(afterRevision.length, 1);
   assert.equal(afterRevision[0].usage_revision, 2);
   assert.equal(afterRevision[0].category, 'proactive');
   assert.equal(afterRevision[0].occurred_at, '2026-11-19T00:00:00.000Z');
-  await assert.rejects(() => service.usage(tx, assistantUsageActivity(message, proactiveContext.device_id, 'grok', 'grok-2', revised), { ...revised, input_tokens: 1 }), (error: unknown) => error instanceof ApiError && error.status === 409);
+  const revisedReservations = await tx.all('budget_reservations');
+  await assert.rejects(() => service.usage(tx, assistantUsageActivity(message, proactiveContext.device_id, 'grok', 'grok-2', revised, revisedReservations), { ...revised, input_tokens: 1 }), (error: unknown) => error instanceof ApiError && error.status === 409);
   assert.equal((await tx.all('usage_records')).filter(row => row.activity_id === proactiveActivity).length, 1);
   const reviewBefore = review.expires_at;
   await service.heartbeatRun(tx, runId);
@@ -242,7 +243,7 @@ test('usage links only by activity id and terminal closes settle the worker hold
   assert.equal(stillReview?.amount, '2');
   const latePayload = { ...reviewPayload, request_key: 'review-late', input_tokens: 8 };
   await service.releaseActivity(tx, reviewActivity);
-  await service.usage(tx, eventUsageActivity(event, run.device_id, 'codex', 'fixture', latePayload), latePayload);
+  await service.usage(tx, eventUsageActivity(event, run.device_id, 'codex', 'fixture', latePayload, await tx.all('budget_reservations')), latePayload);
   const lateReview = (await tx.all('budget_reservations')).find(row => row.id === review.id);
   const untouchedWorker = (await tx.all('budget_reservations')).find(row => row.id === worker.id);
   assert.equal(lateReview?.late_usage, true);
@@ -325,6 +326,49 @@ test('terminal grants stay readable but are not execution authority', async () =
   const replay = await service.reserveActivity(tx, { operation_key: activity, activity_id: activity, activity_kind: 'assistant', category: 'assistant', new_attempt: true }, 'device-a');
   assert.equal(replay.grant_id, created.grant_id);
   assert.equal((await tx.all('budget_reservations')).filter(row => row.prior_activity_id === activity || row.activity_id === activity).length, 2);
+});
+
+test('attempt 2 is billed and settled separately from the root activity', async () => {
+  const tx = memoryTx();
+  const service = new Service({} as never, {} as Auth);
+  const deviceId = randomUUID(), messageId = randomUUID();
+  const message = { id: messageId, task_id: null };
+  const root = canonicalActivityId('assistant', messageId);
+  const first = await service.reserveActivity(tx, { operation_key: root, activity_id: root, category: 'assistant', activity_kind: 'assistant' }, deviceId);
+  assert.equal(first.activity_id, root);
+  assert.equal(first.executable, true);
+  await service.releaseActivity(tx, root);
+  const second = await service.reserveActivity(tx, { operation_key: root, activity_id: root, category: 'assistant', activity_kind: 'assistant', new_attempt: true }, deviceId);
+  assert.equal(second.activity_id, `${root}#2`);
+  assert.equal(second.prior_activity_id, root);
+  assert.equal(second.executable, true);
+  const replay = await service.reserveActivity(tx, { operation_key: root, activity_id: root, category: 'assistant', activity_kind: 'assistant', new_attempt: true }, deviceId);
+  assert.equal(replay.activity_id, `${root}#2`);
+  const reservations = () => tx.all('budget_reservations');
+  const payload = { request_key: 'attempt-2', usage_revision: 1, engine: 'grok', model_id: 'grok-2', activity_id: second.activity_id, input_tokens: 2, output_tokens: 1, cost: { source: 'unavailable', amount: null, currency: null } };
+  const context = assistantUsageActivity(message, deviceId, 'grok', 'grok-2', payload, await reservations());
+  assert.equal(context.activity_id, `${root}#2`);
+  await service.usage(tx, context, payload);
+  await service.usage(tx, context, payload);
+  const liveReservations = await reservations();
+  await assert.rejects(() => Promise.resolve().then(() => assistantUsageActivity(message, deviceId, 'grok', 'grok-2', { ...payload, activity_id: root, request_key: 'root' }, liveReservations)), (error: unknown) => error instanceof ApiError && error.code === 'activity_mismatch');
+  assert.equal((await tx.all('usage_records')).filter(row => row.activity_id === `${root}#2`).length, 1);
+  assert.equal((await tx.all('usage_records')).some(row => row.activity_id === root), false);
+  await service.releaseActivity(tx, `${root}#2`);
+  const attempt = (await tx.all('budget_reservations')).find(row => row.activity_id === `${root}#2`);
+  const original = (await tx.all('budget_reservations')).find(row => row.activity_id === root);
+  assert.equal(attempt?.status, 'released');
+  assert.equal(attempt?.settlement_state, 'unknown');
+  assert.equal(original?.status, 'released');
+  assert.notEqual(original?.settlement_state, 'settled');
+  const eventId = randomUUID(), eventRoot = canonicalActivityId('event', eventId);
+  const event = { id: eventId, type: 'plan.settle', task_id: null };
+  await service.reserveActivity(tx, { operation_key: eventRoot, activity_id: eventRoot, category: 'assistant', activity_kind: 'assistant' }, deviceId);
+  await service.releaseActivity(tx, eventRoot);
+  const eventAttempt = await service.reserveActivity(tx, { operation_key: eventRoot, activity_id: eventRoot, category: 'assistant', activity_kind: 'assistant', new_attempt: true }, deviceId);
+  assert.equal(eventAttempt.activity_id, `${eventRoot}#2`);
+  const eventPayload = { ...payload, request_key: 'event-2', activity_id: eventAttempt.activity_id };
+  assert.equal(eventUsageActivity(event, deviceId, 'grok', 'grok-2', eventPayload, await reservations()).activity_id, `${eventRoot}#2`);
 });
 
 test('duplicate usage observation does not add a second model call by itself', () => {

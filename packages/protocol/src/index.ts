@@ -104,6 +104,16 @@ export type ActivityIdPrefix = typeof ACTIVITY_ID_PREFIXES[number];
 export function canonicalActivityId(prefix: ActivityIdPrefix, rawId: string): string {
   return `${prefix}:${rawId}`;
 }
+/** Attempt ids are `${root}#N`. The root stays stable; N is the execution attempt. */
+export function activityRootId(activityId: string): string {
+  const mark = activityId.lastIndexOf('#');
+  if (mark > 0 && /^\d+$/.test(activityId.slice(mark + 1))) return activityId.slice(0, mark);
+  return activityId;
+}
+/** One page-observation command has one budget activity. The fingerprint is not the activity id. */
+export function observationActivityId(commandId: string): string {
+  return canonicalActivityId('proactive', `observation:${commandId}`);
+}
 /** A heartbeat older than this does not keep an already-expired hold in force. */
 export const BUDGET_HEARTBEAT_MS = 45_000;
 export type BudgetWriteMode = 'merge' | 'replace';
