@@ -9,6 +9,7 @@ import { normalizeMemoryScope, proposeRetrospective } from './memory-governance.
 import { activeHold, admitReservation, buildReservation, grantBlocked, remainingLimits, renewReservation, reservationInForce, settleReservation, type ReservationLiveness } from './budget-control.js';
 import { configuredLimits, dollarGate, holdFor, presentGrant, recovery, sanitizeLimits, spendFor, taskDollarStop, usageStop } from './budget-policy.js';
 import { BUDGET_RECOVERY, activityRootId, canonicalActivityId, grantExecutable, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
+import { acceptControl, advanceActionReceipts, emitTaskProgress, noteActionProgress, runProgressPhase } from './interaction.js';
 
 export const ACTIVE = ['dispatched','starting','running','waiting_input','stopping'];
 const TERMINAL = ['succeeded','failed','cancelled','paused'];
@@ -162,7 +163,7 @@ export class Service {
         const command={protocol_version:'1.0',message_id:randomUUID(),kind:'run.start',sent_at:now(),payload:{command_id:commandId,tenant_id:tenant,task_id:task.id,run_id:runId,device_id:device.id,lease_epoch:epoch,scope_version_id:task.scope_version_id,capability_generation:caps.generation??1,runtime:{engine:task.engine,model_id:model,local_profile_id:cap.local_profile_id??'default'},expires_at:expires(60000),lease_valid_for_ms:45000,checkpoint_id:task.checkpoint_id??null,budget_grant_id:grantId}};
         await tx.put('commands',{...command,device_id:device.id,run_id:runId,state:'pending',expires_at:command.payload.expires_at},commandId);
         const updated=await tx.put('tasks',{...task,status:'queued',reason_code:'awaiting_device_accept',model_id:model,current_run_id:runId,delivery_status:'not_submitted'});
-        await tx.emit('run.started',redactView(run),task.id,runId);await tx.emit('task.changed',updated,task.id,runId);
+        await tx.emit('run.started',redactView(run),task.id,runId);await tx.emit('task.changed',updated,task.id,runId);await this.noteRun(tx,updated,run);
         // Each tenant gets a bounded dispatch wave; the next tick visits other tenants first.
         if(running.length+1>=Math.max(1,caps.slots?.worker??1))break;
       }
@@ -178,16 +179,16 @@ export class Service {
           if(run.state==='dispatched'){
             const command=await tx.get('commands',run.command_id);
             if(command&&Date.parse(command.expires_at)<Date.now()){
-              await tx.put('runs',{...run,state:'cancelled',summary:'启动命令过期，未被接受'});
+              const expired=await tx.put('runs',{...run,state:'cancelled',summary:'启动命令过期，未被接受'});
               await tx.put('commands',{...command,state:'expired'});
-              const task=await tx.need('tasks',run.task_id);if(task.current_run_id===run.id)await tx.put('tasks',{...task,current_run_id:null,status:'queued',reason_code:'command_expired'});
-              await this.releaseBudget(tx,run.id);continue;
+              const task=await tx.need('tasks',run.task_id);const next=task.current_run_id===run.id?await tx.put('tasks',{...task,current_run_id:null,status:'queued',reason_code:'command_expired'}):task;
+              await this.releaseBudget(tx,run.id);await this.noteRun(tx,next,expired);continue;
             }
           }
           if(['starting','running','waiting_input','stopping'].includes(run.state)&&Date.parse(run.lease_expires_at)<Date.now()){
-            await tx.put('runs',{...run,state:'lost',summary:'设备租约失效，等待核对'});
+            const lost=await tx.put('runs',{...run,state:'lost',summary:'设备租约失效，等待核对'});
             await this.releaseBudget(tx,run.id);
-            const task=await tx.need('tasks',run.task_id);if(task.current_run_id===run.id){const updated=await tx.put('tasks',{...task,status:'waiting_device',reason_code:'run_result_requires_reconciliation'});await tx.emit('task.changed',updated,task.id,run.id);await this.team.event(tx,'task.result_unknown',updated,run);}
+            const task=await tx.need('tasks',run.task_id);if(task.current_run_id===run.id){const updated=await tx.put('tasks',{...task,status:'waiting_device',reason_code:'run_result_requires_reconciliation'});await tx.emit('task.changed',updated,task.id,run.id);await this.team.event(tx,'task.result_unknown',updated,run);await this.noteRun(tx,updated,lost);}else await this.noteRun(tx,task,lost);
           }
         }
         for(const view of await tx.all('views',true)){
@@ -223,7 +224,7 @@ export class Service {
     const task=await tx.need('tasks',run.task_id,true);if(task.current_run_id!==run.id)throw new ApiError(409,'run_superseded','该次执行已被替代');
     const accepted=await tx.put('runs',{...run,state:run.state==='dispatched'?'starting':run.state,lease_expires_at:expires(45000)});
     await tx.put('commands',{...command,state:'accepted'});
-    const updated=await tx.put('tasks',{...task,status:'running',reason_code:null});await tx.emit('task.changed',updated,task.id,run.id);
+    const updated=await tx.put('tasks',{...task,status:'running',reason_code:null});await tx.emit('task.changed',updated,task.id,run.id);await this.noteRun(tx,updated,accepted);
     const checkpoint=run.checkpoint_id?await tx.get('checkpoints',run.checkpoint_id):null;
     const grant=run.budget_grant_id?await tx.get('budget_reservations',run.budget_grant_id):null;
     return{run:redactView(accepted),task:updated,scope:run.scope??{},checkpoint:checkpoint?.checkpoint??null,run_ticket:await this.auth.runTicket(p,accepted),lease_valid_for_ms:45000,budget:grant?viewGrant(grant,p.device):null};
@@ -323,18 +324,30 @@ export class Service {
     if(rows.length!==1||!row)throw new ApiError(404,'not_found','预算预留不存在');
     return presentGrant(await tx.put('budget_reservations',renewReservation(row,now(),120000),row.id));
   }
+  async noteQuestion(tx:Tx,task:Doc,run:Doc):Promise<void>{await emitTaskProgress(tx,task,run,'question','waiting_input','等待你的回答','needs_user');}
+  private async noteRun(tx:Tx,task:Doc,run:Doc):Promise<void>{
+    await advanceActionReceipts(tx,task,run);
+    const waiting=run.state==='lost'||run.state==='result_unknown'?'reconcile_required':typeof task.reason_code==='string'?task.reason_code:null;
+    await emitTaskProgress(tx,task,run,'run',runProgressPhase(String(run.state)),typeof run.summary==='string'?run.summary:'',waiting);
+  }
   async action(tx:Tx,id:string,body:Doc,header:unknown,cascade=true):Promise<Doc>{
     await graphLock(tx);
     const task=await tx.need('tasks',id,true);matchVersion(header,task,body.version);
     const action=text(body.action,'action',30),run=task.current_run_id?await tx.get('runs',task.current_run_id,true):null;
+    const receipt=async():Promise<Doc>=>{
+      if(cascade===false)return{action_id:randomUUID(),status:'accepted'};
+      const fresh=await tx.need('tasks',id);const freshRun=fresh.current_run_id?await tx.get('runs',fresh.current_run_id):null;
+      return acceptControl(tx,{task:fresh,action,body,run:freshRun});
+    };
     if(!['pause','resume','cancel','switch','retry'].includes(action))throw new ApiError(422,'invalid_action','任务操作无效');
     if(action==='cancel'&&cascade){
       const tasks=await tx.all('tasks',true),affected=new Set([task.id]);let changed=true;
       while(changed){changed=false;for(const child of tasks)if(!affected.has(child.id)&&(affected.has(child.parent_task_id)||(child.depends_on_task_ids??[]).some((dep:string)=>affected.has(dep)))){affected.add(child.id);changed=true;}}
-      for(const child of tasks.filter(t=>affected.has(t.id))){const current=await tx.need('tasks',child.id);await this.action(tx,current.id,{action:'cancel'},String(current.version),false);}
-      return{action_id:randomUUID(),status:'accepted'};
+      for(const child of tasks.filter(t=>affected.has(t.id)&&t.id!==task.id)){const current=await tx.need('tasks',child.id);await this.action(tx,current.id,{action:'cancel'},String(current.version),false);}
+      const current=await tx.need('tasks',task.id);await this.action(tx,current.id,{action:'cancel'},String(current.version),false);
+      return receipt();
     }
-    if(action==='cancel'&&['succeeded','failed','cancelled'].includes(task.status))return{action_id:randomUUID(),status:'accepted'};
+    if(action==='cancel'&&['succeeded','failed','cancelled'].includes(task.status))return receipt();
     if(run&&['lost','result_unknown'].includes(run.state)&&['resume','retry','switch'].includes(action))throw new ApiError(409,'result_unknown','先核对旧执行结果，再重试或切换');
     if(action==='switch'){
       if(!body.target)throw new ApiError(422,'target_required','需要目标引擎和电脑');engine(body.target.engine);await tx.need('devices',uuid(body.target.device_id));
@@ -359,7 +372,7 @@ export class Service {
     const updated=await tx.put('tasks',next);await tx.emit('task.changed',updated,id,run?.id??null);
     if(action==='cancel')for(const question of (await tx.all('questions')).filter(q=>q.task_id===task.id&&q.status==='open'))await tx.put('questions',{...question,status:'cancelled'});
     if(updated.status==='cancelled')await this.team.event(tx,'task.cancelled',updated,run);
-    await this.team.refreshBlocked(tx);await this.team.settled(tx,task.plan_id??null);return{action_id:randomUUID(),status:'accepted'};
+    await this.team.refreshBlocked(tx);await this.team.settled(tx,task.plan_id??null);return receipt();
   }
   async report(tx:Tx,p:Principal,message:Doc):Promise<void>{
     await graphLock(tx);
@@ -374,6 +387,9 @@ export class Service {
       const cmd=await tx.need('commands',uuid(payload.command_id),true);if(cmd.device_id!==p.device)throw new ApiError(404,'not_found','命令不存在');
       if(!['stored','duplicate','rejected'].includes(payload.status))throw new ApiError(422,'invalid_ack','命令回报无效');
       if(cmd.state!=='accepted')await tx.put('commands',{...cmd,receipt_status:payload.status,state:cmd.kind==='run.start'?cmd.state:'accepted'});
+    }else if(message.kind==='action.progress'){
+      if(!producer||!/^\d+$/.test(String(seq)))throw new ApiError(422,'producer_required','缺少有效回报序列');
+      await noteActionProgress(tx,p.device!,payload);
     }else{
       const initial=await tx.need('runs',uuid(payload.run_id));await tx.need('tasks',initial.task_id,true);const run=await tx.need('runs',initial.id,true);if(run.device_id!==p.device||String(payload.lease_epoch)!==String(run.lease_epoch))throw new ApiError(404,'not_found','执行不存在');
       if(!producer||!/^\d+$/.test(String(seq)))throw new ApiError(422,'producer_required','缺少有效回报序列');
@@ -395,7 +411,7 @@ export class Service {
     // the Run display, but never replay Task completion/approval side effects.
     if((TERMINAL.includes(run.state)&&state===run.state)||task.status==='cancelled'){
       if(TERMINAL.includes(state))await this.releaseBudget(tx,run.id);
-      await tx.emit('run.changed',redactView(updatedRun),run.task_id,run.id);return;
+      await tx.emit('run.changed',redactView(updatedRun),run.task_id,run.id);await this.noteRun(tx,task,updatedRun);return;
     }
     if(task.current_run_id===run.id){
       let next:Doc={...task};
@@ -422,6 +438,7 @@ export class Service {
       await this.team.refreshBlocked(tx);await this.team.settled(tx,task.plan_id??null);
     }
     await tx.emit('run.changed',redactView(updatedRun),run.task_id,run.id);
+    await this.noteRun(tx,task.current_run_id===run.id?await tx.need('tasks',task.id):task,updatedRun);
   }
   async usage(tx:Tx,activity:Doc,p:Doc):Promise<void>{
     const activityId=text(activity.activity_id,'activity_id',200);

@@ -1,3 +1,5 @@
+import type { MessageProcessingPhase, MessageProcessingStatus } from './interaction.js';
+
 export const PROTOCOL_VERSION = '1.0' as const;
 export const ENGINES = ['codex', 'grok'] as const;
 export type Engine = typeof ENGINES[number];
@@ -62,7 +64,7 @@ export interface ToolStepUpdate {
 export interface ToolStep extends Omit<ToolStepUpdate, 'step_id'> {
   id: string; run_id: string; title: string; created_at: string; version: number;
 }
-export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; task_id: string | null; created_at: string; memory_scope?: MemoryScope | null; schedule_id?: string | null }
+export interface Message { id: string; role: 'user' | 'assistant' | 'system'; content: string; task_id: string | null; created_at: string; memory_scope?: MemoryScope | null; schedule_id?: string | null; client_message_id?: string | null; source_message_id?: string | null; processing_status?: MessageProcessingStatus | null; processing_phase?: MessageProcessingPhase | null; reason_code?: string | null; action_id?: string | null }
 export type ObservationSource = 'task_result' | 'page';
 export interface ObservationSuggestion { id: string; status: 'pending' | 'confirmed' | 'dismissed'; goal: string; reason: string; fingerprint: string; task_id?: string | null; created_at: string }
 export interface ObservationRule {
@@ -186,3 +188,5 @@ export interface RunContext { run: Run; task: Task; scope: Record<string, unknow
 export interface PairingStart { pairing_id: string; code: string; polling_secret: string; expires_at: string }
 export interface PairingResult { status: 'pending' | 'claimed'; device_id?: string; tenant_id?: string }
 export const TERMINAL_RUN_STATES = new Set<RunState>(['succeeded', 'failed', 'cancelled', 'paused']);
+
+export * from './interaction.js';

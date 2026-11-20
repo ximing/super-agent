@@ -13,6 +13,21 @@ import { requireCloudTestDatabase } from './cloud-guard.js';
 const secret='unit-test-secret-that-is-at-least-thirty-two-bytes';
 const config={databaseUrl:'postgresql://unused:unused@cloud-test.invalid/unused',jwtSecret:secret,runScheduler:false};
 
+test('interaction capabilities are public and flags turn off without a database',async()=>{
+  const keys=['INTERACTION_MESSAGE_PROCESSING','INTERACTION_ACTION_RECEIPTS','INTERACTION_SNAPSHOT','INTERACTION_FAST_PATH','INTERACTION_TASK_PROGRESS'];
+  const saved=Object.fromEntries(keys.map(key=>[key,process.env[key]]));
+  for(const key of keys)delete process.env[key];
+  const app=await buildApp(config);
+  try{
+    const open=await app.inject({method:'GET',url:'/v1/capabilities'});
+    assert.equal(open.statusCode,200);
+    assert.deepEqual(open.json(),{protocol:'2026-11-20',message_processing:true,action_receipts:true,workspace_snapshot:true,chat_fast_path:true,task_progress:true});
+    process.env.INTERACTION_FAST_PATH='0';process.env.INTERACTION_SNAPSHOT='false';
+    const disabled=await app.inject({method:'GET',url:'/v1/capabilities'});
+    assert.equal(disabled.json().chat_fast_path,false);assert.equal(disabled.json().workspace_snapshot,false);assert.equal(disabled.json().message_processing,true);
+  }finally{await app.close();for(const key of keys){if(saved[key]===undefined)delete process.env[key];else process.env[key]=saved[key];}}
+});
+
 test('default server rejects unauthenticated data and does not enable developer login',async()=>{
   const app=await buildApp(config);
   try{

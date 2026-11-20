@@ -1,6 +1,6 @@
 # 实现集成契约（开发共享）
 
-本文件固定当前跨组件接口形状（2026-11-19）。新增受管团队、交付验收及通知的代码与云 TEST 已实现；生产部署状态单独见[实施状态](implementation-status.md)。实现可修正文档，但跨模块变更先通知协调者；类型见 `packages/protocol/src/index.ts`，路径均有 `/v1` 前缀，JSON 字段统一 snake_case，列表响应 `{items:[]}`。时间 UTC，金额字符串。
+本文件固定当前跨组件接口形状。2026-11-19 及此前段落仍是当时已实现、且旧客户端继续使用的兼容接口。2026-11-20 交互回执见文末同名一节：代码已落地，迁移 004 尚未应用到云端数据库，生产部署与真机验收见[实施状态](implementation-status.md)。实现可修正文档，但跨模块变更先通知协调者；类型见 `packages/protocol/src/index.ts` 与 `packages/protocol/src/interaction.ts`，路径均有 `/v1` 前缀，JSON 字段统一 snake_case，列表响应 `{items:[]}`。时间 UTC，金额字符串。
 
 ## 公共约定
 
@@ -87,6 +87,25 @@
 - GET `/clients/push-registrations` 返回 `{items:[{id,provider,platform,enabled,environment,project_id,version,status:'registered'|'unconfigured'|'disabled'}]}`；永不返回 token/hash/密文。DELETE `/clients/push-registrations/:id` 仅撤销当前 session 的注册。
 - GET `/settings/notifications` → `{enabled,quiet_hours:null|{timezone,start,end},version}`；PUT 同字段，If-Match 必须为当前版本（不匹配412）。`timezone` 为 IANA 时区，start/end 为不同的 HH:mm，支持跨午夜和 DST。
 - GET `/notifications` 返回持久通知列表。通知只带通用文案及对象 ID；问题已回答、交付已验收、取消或被新 Run 替换时抑制过时投递。退出或撤销 session 原子禁用其推送注册；同一设备 token 换账号时不能继续投给旧账号。
+
+## 交互回执与恢复（2026-11-20）
+
+旧客户端可以忽略新增字段。`GET /v1/capabilities` 无需登录，也不读数据库，返回 `{protocol:'2026-11-20', message_processing, action_receipts, workspace_snapshot, chat_fast_path, task_progress}`。任一标志为 false，或旧服务返回 404 时，客户端只保留本地即时消息与局部忙碌，不显示“电脑已接收”。
+
+环境变量 `INTERACTION_MESSAGE_PROCESSING`、`INTERACTION_ACTION_RECEIPTS`、`INTERACTION_SNAPSHOT`、`INTERACTION_FAST_PATH`、`INTERACTION_TASK_PROGRESS` 缺省开启；`0` 或 `false` 关闭对应新行为。关闭不删除已有回执，也不重放模型或业务动作。标志缺省开启，因此新服务处理真实流量前必须先应用迁移 `004_interaction_receipts.sql`；未应用时可把五个变量设为 `0` 或 `false`。001/002/003 不修改。本迁移只建 `sa_message_processing` 与 `sa_task_actions`（FORCE RLS、租户策略、`super_agent_app` 授权）。不回填历史消息。
+
+- POST `/messages` 仍返回 Message。标志开启时，同一事务写入消息、初始处理回执和 `message.created`。消息上可出现 `client_message_id`、`processing_status`、`processing_phase`、`reason_code`、`action_id`。同 `client_message_id` 而正文或记忆范围不同，返回 409 `message_conflict`。
+- GET `/messages/:id/processing` 返回处理回执。没有存储行时，已有回复或收件回执则 `historical:'handled'`，否则 `historical:'unknown'`。两种都不编造时间，也不把历史消息重新送进模型。
+- GET `/messages/by-client-id/:client_message_id` 返回 `{message, processing}`。不存在为 404。客户端不得因此更换幂等身份。
+- POST `/assistant/messages/:id/claim` 在有效主助理租约下认领。同一设备、仍有效的 epoch 复用 `attempt_id`。终态原样返回。另一台电脑持有未过期租约时返回 409 `assistant_lease_held`。过期持有者不能推进终态。节点收到 404 或没有 `attempt_id` 时沿用原规划；`attempt_id` 为 null，或状态已是 handled/failed/interrupted 时不再调用模型。
+- POST `/assistant/messages/:id/progress` 只接受当前尝试、报告 ID 和预期版本。原因码来自 `PROCESSING_REASON_CODES`。版本不符 409 `processing_conflict`，尝试不符 409 `attempt_mismatch`。阶段或状态没有变化时不刷新 `last_progress_at`。心跳不写任务进度。
+- POST `/assistant/messages` 仍是回复事务。可选 `processing_outcome:'handled'|'interrupted'`。省略时按 handled。已有助理回复则返回该回复并完成处理回执，不开始新的模型尝试。
+- POST `/tasks/:id/actions` 仍返回 `{action_id, status:'accepted'}`。标志开启时多一个 `receipt`。`receipt.status` 为 `accepted`、`delivered`、`applying`、`completed`、`failed`、`result_unknown` 或 `superseded`。HTTP 的 accepted 只表示请求已保存。暂停完成要等绑定运行进入 paused；取消要等任务或运行取消；继续或重试要等新运行 dispatched，而不是等任务做完。切换在旧运行已暂停或取消、且更新的运行已 dispatched/starting/running 时完成。丢失或 `result_unknown` 的运行把停止类回执标为 `result_unknown`，原因 `reconcile_required`。租约丢失本身不是 completed。级联取消只给用户点击的父任务保存一份回执。
+- GET `/actions/:id` 返回持久回执。新节点用 `action.progress` 报告 `delivered` 或 `applying`，并在请求停止之前入队，不等待画面或模型。旧节点省略 `action_id` 时，服务端只在运行终态能够证明时补结果，不伪造 delivered。旧取消不能停止新运行。续租返回的 `control` 可以带可选 `action_id`。
+- GET `/workspace/snapshot` 在一个租户事务里返回游标、未终态或待验收或交付待核对的任务、最近消息、未完成处理回执、未完成及 24 小时内更新的操作回执、待回答问题和设备。
+- 事件 `message.processing.changed`、`task.progress.changed`、`action.changed` 与旧事件并存。`run.started` 的 payload 含 `state`；`dispatched` 表示等待电脑接受。游标按数值比较，非法游标 422 `invalid_cursor`。现有服务不返回 410；客户端不能假定游标过期已经实现。
+- 整句进度、暂停、继续、取消、重试在标志开启时由服务端确定性处理，不调用模型。多个任务先返回选择，不猜测最新任务。唯一匹配的“选择 <编号前缀>”只返回该任务状态，不执行控制；多个前缀匹配仍先选择。已有待确认方案时，“确认 / 开始执行 / 确认执行 / 取消 / 拒绝 / 不要执行 / 取消执行”仍交给原规划，不在快通道里取消任务。快通道回复写明请求已保存，执行电脑尚未完成该操作。
+- 节点在 `chat_fast_path` 为真且句子不是上述方案决定时直接返回，不调用模型，也不再本地执行同一句。能力查询失败不缓存，下一句会再问。标志关闭或查询失败时，节点可以用本机任务列表回答整句状态或控制，仍然不调用模型。
 
 ## 文件归属与开发规则
 

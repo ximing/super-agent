@@ -13,7 +13,7 @@ import SuperAgentCore
                 .tint(Palette.accent)
                 .onOpenURL { model.handleLoginCallback($0) }
                 .onChange(of: scenePhase) { _, phase in
-                    if phase == .active { model.reconnectEventStream() }
+                    if phase == .active { model.enterForeground() }
                 }
                 .frame(minWidth: 1040, minHeight: 680)
                 .task {

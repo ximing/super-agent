@@ -39,6 +39,20 @@ final class APIClientTests: XCTestCase {
         let _: JSONValue = try await client.request("/tasks/id/actions", method: "POST", body: ["action": .string("pause")], version: 7)
         XCTAssertEqual(calls, 3)
     }
+    func testExplicitIdempotencyKeyIsNotReplaced() async throws {
+        let client = makeClient(); try await client.setSession(session())
+        let expected = "11111111-1111-1111-1111-111111111111"
+        var called = false
+        StubProtocol.handler = { request in
+            called = true
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.path, "/v1/messages")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Idempotency-Key"), expected)
+            return (200, Data("{\"ok\":true}".utf8))
+        }
+        let _: JSONValue = try await client.request("/messages", method: "POST", body: ["client_message_id": .string(expected), "text": .string("fixture")], idempotencyKey: expected)
+        XCTAssertTrue(called)
+    }
     func testConfigurationDoesNotCarryTokenToAnotherOrigin() async throws {
         let client = makeClient(); try await client.setSession(session()); await client.configure(URL(string: "https://other.example")!)
         let stored = await client.currentSession(); XCTAssertNil(stored)

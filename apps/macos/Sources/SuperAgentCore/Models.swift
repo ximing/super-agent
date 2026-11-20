@@ -64,7 +64,34 @@ public struct Run: Codable, Identifiable, Sendable {
     public let id: String; public let taskId: String; public let state: String; public let engine: Engine
     public let deviceId: String; public let modelId: String; public let leaseEpoch: String; public let summary: String; public let resultText: String?; public let createdAt: String
 }
-public struct Message: Codable, Identifiable, Sendable { public let id: String; public let role: String; public let content: String; public let taskId: String?; public let createdAt: String }
+public struct Message: Codable, Identifiable, Sendable {
+    public let id: String
+    public let role: String
+    public let content: String
+    public let taskId: String?
+    public let createdAt: String
+    public let clientMessageId: String?
+    public let sourceMessageId: String?
+    public let processingStatus: String?
+    public let processingPhase: String?
+    public let reasonCode: String?
+    public let actionId: String?
+    public let version: Int?
+    public init(id: String, role: String, content: String, taskId: String?, createdAt: String, clientMessageId: String? = nil, sourceMessageId: String? = nil, processingStatus: String? = nil, processingPhase: String? = nil, reasonCode: String? = nil, actionId: String? = nil, version: Int? = nil) {
+        self.id = id
+        self.role = role
+        self.content = content
+        self.taskId = taskId
+        self.createdAt = createdAt
+        self.clientMessageId = clientMessageId
+        self.sourceMessageId = sourceMessageId
+        self.processingStatus = processingStatus
+        self.processingPhase = processingPhase
+        self.reasonCode = reasonCode
+        self.actionId = actionId
+        self.version = version
+    }
+}
 public struct Question: Codable, Identifiable, Sendable { public let id: String; public let taskId: String; public let runId: String; public let text: String; public let options: [String]; public let status: String; public let version: Int; public let createdAt: String }
 public struct MemoryEvidence: Codable, Sendable, Equatable { public let kind: String?; public let id: String? }
 public struct MemoryGovernance: Codable, Sendable {

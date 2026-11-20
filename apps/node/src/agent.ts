@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import type { Capabilities, Frame, ListResponse, Message, RunContext, RunStartPayload, WireMessage, Task, CoordinatorEvent, TaskEvidence, TaskReviewInput, RuntimeBudgetLimits, BudgetStopReason, BudgetGrant, MemoryScope } from '@super-agent/protocol';
-import { BUDGET_RECOVERY, activityRootId, canonicalActivityId, grantExecutable, memoryScopeWithin, observationActivityId } from '@super-agent/protocol';
+import { BUDGET_RECOVERY, activityRootId, bindFastIntent, canonicalActivityId, grantExecutable, memoryScopeWithin, observationActivityId, parseFastIntent } from '@super-agent/protocol';
 import { BrowserActor, ToolBroker, startToolBridge, type RuntimeAdapter, type RuntimeContext, type RuntimeEvent, type UsageSample } from '@super-agent/tool-broker';
 import { CodexRuntime } from '@super-agent/runtime-codex';
 import { GrokRuntime, GrokCliRuntime, probeGrokCli } from '@super-agent/runtime-grok';
@@ -114,6 +114,8 @@ export interface AgentOptions {
   runtimeFactory?: (engine: string, config: NodeConfig) => Promise<RuntimeAdapter>;
   log?: (message: string) => void;
   artifactFetcher?: typeof fetch;
+  /** Tests supply this so start() does not read or change the machine proxy. */
+  network?: NetworkSetup;
 }
 export function ticksToUsd(ticks: string): string {
   if (!/^\d+$/.test(ticks)) throw new Error('invalid_cost_ticks');
@@ -140,6 +142,8 @@ export class NodeAgent {
   private generation: number;
   private lastHeartbeat = 0;
   private missedHeartbeats = 0;
+  private readonly loopTimers = new Set<ReturnType<typeof setTimeout>>();
+  private capabilitiesCache: { at: number; chatFastPath: boolean } | null = null;
   private readonly memoryCache = new MemoryCache();
   private readonly log: (message: string) => void;
   constructor(readonly config: NodeConfig, private readonly options: AgentOptions = {}) {
@@ -171,24 +175,42 @@ export class NodeAgent {
   }
   async start(): Promise<void> {
     if (!this.config.device_id) throw new Error('Not paired');
-    this.network = await configureNetwork(this.config);
+    this.network = this.options.network ?? await configureNetwork(this.config);
     await this.api.authenticate();
     await this.api.request(`/devices/${this.config.device_id}/capabilities`, await this.capabilities(), { method: 'PUT' });
     await this.recover();
     this.log(`Node online (${this.config.fake_runtime ? 'EXPLICIT FAKE TEST MODE' : 'local real runtimes'}), device=${this.config.device_id}`);
-    while (!this.controller.signal.aborted) {
-      try { await this.tick(); }
-      catch (error) {
+    this.scheduleLoop('lease', () => this.leasePass());
+    this.scheduleLoop('reports', () => this.reportsPass());
+    this.scheduleLoop('memory', () => this.memoryPass());
+    this.scheduleLoop('control', () => this.controlPass());
+    this.scheduleLoop('renew', () => this.renewPass());
+    this.scheduleLoop('frames', () => this.framePass());
+    if (this.config.assistant) this.scheduleLoop('assistant', () => this.assistantPass());
+    await new Promise<void>(resolve => {
+      if (this.controller.signal.aborted) { resolve(); return; }
+      this.controller.signal.addEventListener('abort', () => resolve(), { once: true });
+    });
+  }
+  private scheduleLoop(name: string, work: () => Promise<void>): void {
+    const run = () => {
+      if (this.controller.signal.aborted) return;
+      const started = performance.now();
+      void work().then(() => {
+        this.logTiming(name, performance.now() - started, 'ok');
+      }, error => {
+        this.logTiming(name, performance.now() - started, 'error');
         this.log(`Node connection/action error: ${this.safeError(error)}`);
-        // KeepAlive only restarts a dead process. A wedged proxy socket otherwise leaves this process up and the computer offline.
-        if (controlLinkShouldRestart(this.missedHeartbeats, this.active.size)) {
-          this.log('Control link missed 3 heartbeats; exiting so launchd can start a fresh process');
-          process.exitCode = 1;
-          return;
-        }
-      }
-      await sleep(this.config.poll_interval_ms, this.controller.signal).catch(() => undefined);
-    }
+      }).finally(() => {
+        if (this.controller.signal.aborted) return;
+        const timer = setTimeout(run, this.config.poll_interval_ms);
+        this.loopTimers.add(timer);
+      });
+    };
+    run();
+  }
+  private logTiming(name: string, ms: number, code: 'ok' | 'error'): void {
+    this.log(`interaction_timing name=${name} ms=${Math.round(ms)} code=${code}`);
   }
   async recover(): Promise<void> {
     const unfinished = this.store.unfinished();
@@ -206,20 +228,37 @@ export class NodeAgent {
     for (const command of this.store.pendingCommands()) await this.handleCommand(command, true);
   }
   async tick(): Promise<void> {
-    if (performance.now() - this.lastHeartbeat > 10_000) {
-      try {
-        await this.api.request('/node/heartbeat', {});
-        this.lastHeartbeat = performance.now();
-        this.missedHeartbeats = 0;
-      } catch (error) {
-        this.missedHeartbeats += 1;
-        throw error;
+    await this.leasePass().catch(error => { this.log(`Node connection/action error: ${this.safeError(error)}`); });
+    await this.reportsPass();
+    await this.memoryPass();
+    await this.controlPass();
+    await this.renewPass();
+    await this.framePass();
+    this.kickAssistant();
+  }
+  private async leasePass(): Promise<void> {
+    if (performance.now() - this.lastHeartbeat <= 10_000) return;
+    try {
+      await this.api.request('/node/heartbeat', {});
+      this.lastHeartbeat = performance.now();
+      this.missedHeartbeats = 0;
+    } catch (error) {
+      this.missedHeartbeats += 1;
+      if (controlLinkShouldRestart(this.missedHeartbeats, this.active.size)) {
+        this.log('Control link missed 3 heartbeats; exiting so launchd can start a fresh process');
+        process.exitCode = 1;
+        this.controller.abort();
       }
+      throw error;
     }
-    await this.flush();
-    await this.syncMemoryInvalidations();
+  }
+  private reportsPass(): Promise<void> { return this.flush(); }
+  private memoryPass(): Promise<void> { return this.syncMemoryInvalidations(); }
+  private async controlPass(): Promise<void> {
     const commands = await this.api.request<ListResponse<WireMessage>>('/node/commands');
-    for (const command of commands.items) await this.handleCommand(command);
+    for (const command of commands.items ?? []) await this.handleCommand(command);
+  }
+  private async renewPass(): Promise<void> {
     for (const execution of this.active.values()) {
       if (performance.now() - execution.lastRenew > (this.config.renew_interval_ms ?? 2000)) {
         execution.lastRenew = performance.now();
@@ -236,14 +275,28 @@ export class NodeAgent {
       }
       if (execution.capture) this.views.add(execution.context.run.id);
     }
-    for (const runId of this.views) {
-      try { const frame = await this.browser.frame(runId); await this.api.request(`/node/runs/${runId}/frames`, frame); }
-      catch { /* Browser may not exist yet, or another task has the browser. */ }
-    }
-    if (this.config.assistant && !this.assistantBusy && !this.controller.signal.aborted) this.assistantWork = this.assistant().catch(error => {
+  }
+  private async framePass(): Promise<void> {
+    await Promise.all([...this.views].map(async runId => {
+      try {
+        const frame = await Promise.race([
+          this.browser.frame(runId),
+          sleep(3000, this.controller.signal).then(() => { throw new Error('frame_timeout'); }),
+        ]);
+        await this.api.request(`/node/runs/${runId}/frames`, frame);
+      } catch { /* A slow or missing frame must not block control, renew, or reports. */ }
+    }));
+  }
+  private kickAssistant(): void {
+    if (!this.config.assistant || this.assistantBusy || this.controller.signal.aborted || this.assistantWork) return;
+    this.assistantWork = this.assistant().catch(error => {
       if (error instanceof ApiFailure && [403, 409].includes(error.status)) { this.assistantEpoch = undefined; for (const controller of this.coordinatorControllers.values()) controller.abort(); return; }
       this.log(`Assistant waiting: ${this.safeError(error)}`);
     }).finally(() => { this.assistantWork = undefined; });
+  }
+  private async assistantPass(): Promise<void> {
+    this.kickAssistant();
+    if (this.assistantWork) await this.assistantWork;
   }
   private async handleCommand(message: WireMessage, fromRecovery = false): Promise<void> {
     if (message.kind === 'observation.check') { await this.handleObservation(message); return; }
@@ -347,11 +400,17 @@ export class NodeAgent {
       : { source: 'supplier_reported', quality: 'final', amount: ticksToUsd(usage.cost_ticks), currency: 'USD', price_version_id: null, supplier_cost_ticks: usage.cost_ticks };
     this.store.recordUsage(context.run.id, usage.request_key, { device_id: this.config.device_id, run_id: context.run.id, lease_epoch: context.run.lease_epoch, request_key: usage.request_key, occurred_at: usage.occurred_at ?? new Date().toISOString(), engine: context.run.engine, model_id: context.run.model_id, category: 'worker', activity_id: canonicalActivityId('run', context.run.id), input_tokens: usage.input_tokens, cached_input_tokens: usage.cached_input_tokens, output_tokens: usage.output_tokens, reasoning_tokens: usage.reasoning_tokens, cost });
   }
+  private noteAction(execution: Execution, actionId: string, status: 'delivered' | 'applying'): void {
+    this.store.enqueue('action.progress', { action_id: actionId, device_id: this.config.device_id, run_id: execution.context.run.id, lease_epoch: String(execution.context.run.lease_epoch), status }, execution.context.run.id);
+  }
   private async control(execution: Execution, control: Obj): Promise<void> {
     const action = String(control.action ?? '');
+    const actionId = typeof control.action_id === 'string' ? control.action_id : '';
+    if (actionId) this.noteAction(execution, actionId, 'delivered');
     if (['pause', 'switch', 'cancel'].includes(action)) {
       if (typeof control.recovery === 'string') execution.stopDetail = control.recovery;
       else if (typeof control.reason === 'string' && control.reason in BUDGET_RECOVERY) execution.stopDetail = BUDGET_RECOVERY[control.reason as BudgetStopReason];
+      if (actionId) this.noteAction(execution, actionId, 'applying');
       await this.requestStop(execution, action === 'cancel' ? 'cancelled' : 'paused');
     }
     if (action === 'input') await execution.adapter.steer(String(control.text ?? ''));
@@ -531,7 +590,7 @@ export class NodeAgent {
     const result = await this.api.request<{ accepted: string[]; rejected?: { message_id: string; code: string }[] }>('/node/reports', { messages });
     this.store.acknowledge(result.accepted);
     for (const rejected of result.rejected ?? []) {
-      if (['invalid_message', 'run_not_found', 'stale_epoch', 'invalid_state_transition'].includes(rejected.code)) { this.log(`Report rejected (${rejected.code}), preserving local history`); this.store.acknowledge([rejected.message_id]); }
+      if (['invalid_message', 'run_not_found', 'stale_epoch', 'invalid_state_transition', 'unsupported_report', 'stale_action'].includes(rejected.code)) { this.log(`Report rejected (${rejected.code}), preserving local history`); this.store.acknowledge([rejected.message_id]); }
     }
   }
   private async assistant(): Promise<void> {
@@ -783,8 +842,63 @@ export class NodeAgent {
       this.store.coordinatorDone(item.eventId);
     }
   }
+  private async answerFastIntent(message: Message, headers: () => { assistantEpoch?: string; idempotencyKey: string }): Promise<boolean> {
+    if (/^(确认|开始执行|确认执行|取消|拒绝|不要执行|取消执行)(?:\s+[a-f0-9-]{8,36})?[。！!，,]?$/i.test(message.content.trim())) return false;
+    const intent = parseFastIntent(message.content);
+    if (intent.kind === 'none') return false;
+    const listed = await this.api.request<ListResponse<Task>>('/node/tasks', undefined, headers());
+    const tasks = Array.isArray(listed?.items) ? listed.items : [];
+    const binding = bindFastIntent(intent, tasks.map(task => ({ id: task.id, title: task.title, status: task.status })));
+    let text = '没有找到可执行该操作的任务。';
+    if (binding.type === 'status') {
+      const lines = binding.tasks.length ? binding.tasks.map(item => `「${item.title}」${item.status}。最近进展：尚无新的执行进展。更新时间：${tasks.find(task => task.id === item.id)?.updated_at ?? ''}。`) : ['当前没有进行中的任务。'];
+      text = `${lines.join('\n')}数据时间：${new Date().toISOString()}。`;
+    } else if (binding.type === 'choose') {
+      text = `${binding.action === 'select' ? '已看到多个匹配。' : '有多个任务符合，还没有执行操作。'}\n请回复“选择 ”加任务编号前 8 位：\n${binding.choices.map(item => `- ${item.title}（${item.id.slice(0, 8)}）`).join('\n')}`;
+    } else if (binding.type === 'act') {
+      const task = tasks.find(item => item.id === binding.task.id);
+      if (task) {
+        try {
+          await this.api.request(`/tasks/${task.id}/actions`, { action: binding.action, source_message_id: message.id }, { ...headers(), version: task.version, idempotencyKey: `fast:${message.id}` });
+          const verb = binding.action === 'pause' ? '暂停' : binding.action === 'cancel' ? '取消' : binding.action === 'resume' ? '继续' : '重试';
+          text = `已收到${verb}「${binding.task.title}」的请求。这只表示请求已保存，还不表示执行电脑已经完成该操作。`;
+        } catch (error) { text = error instanceof ApiFailure ? `没能保存这次操作：${error.message}` : '没能保存这次操作。'; }
+      }
+    }
+    this.store.saveAssistant(message.id, { phase: 'reply', text, usage: [] });
+    await this.drainAssistant();
+    return true;
+  }
+  private async interactionCapabilities(): Promise<{ chatFastPath: boolean }> {
+    if (this.capabilitiesCache && performance.now() - this.capabilitiesCache.at < 60_000) return { chatFastPath: this.capabilitiesCache.chatFastPath };
+    try {
+      const value = await this.api.request<{ protocol?: string; chat_fast_path?: boolean }>('/capabilities');
+      const chatFastPath = value?.protocol === '2026-11-20' && value.chat_fast_path === true;
+      this.capabilitiesCache = { at: performance.now(), chatFastPath };
+      return { chatFastPath };
+    } catch { return { chatFastPath: false }; }
+  }
   private async planMessage(message: Message): Promise<void> {
     const headers = () => ({ assistantEpoch: this.assistantEpoch, idempotencyKey: `assistant:${message.id}` });
+    const intent = parseFastIntent(message.content);
+    const planDecision = /^(确认|开始执行|确认执行|取消|拒绝|不要执行|取消执行)(?:\s+[a-f0-9-]{8,36})?[。！!，,]?$/i.test(message.content.trim());
+    if (intent.kind !== 'none' && !planDecision) {
+      const capabilities = await this.interactionCapabilities();
+      if (capabilities.chatFastPath) return;
+      if (await this.answerFastIntent(message, headers)) return;
+    }
+    try {
+      const claim = await this.api.request<{ attempt_id?: string | null; processing?: { version?: number; status?: string } }>(`/assistant/messages/${message.id}/claim`, {}, headers());
+      if (claim?.attempt_id === null || claim?.processing?.status === 'handled' || claim?.processing?.status === 'interrupted' || claim?.processing?.status === 'failed') return;
+      if (typeof claim?.attempt_id === 'string' && Number.isInteger(claim.processing?.version)) {
+        await this.api.request(`/assistant/messages/${message.id}/progress`, { report_id: randomUUID(), attempt_id: claim.attempt_id, expected_version: claim.processing?.version, status: 'processing', phase: 'planning', reason_code: 'model_in_progress' }, headers()).catch(error => {
+          if (!(error instanceof ApiFailure)) throw error;
+        });
+      }
+    } catch (error) {
+      if (error instanceof ApiFailure && error.status === 409) return;
+      if (!(error instanceof ApiFailure) || error.status !== 404) { /* Old servers and empty mocks keep today's planner. */ }
+    }
     const context = await this.api.request<AssistantContext>('/assistant/context', undefined, headers());
     const pending = context.pending_plans ?? [];
     const decision = !(message as Message & { schedule_id?: string }).schedule_id && /^(确认|开始执行|确认执行|取消|拒绝|不要执行|取消执行)(?:\s+([a-f0-9-]{8,36}))?[。！!，,]?$/i.exec(message.content.trim());
@@ -906,7 +1020,7 @@ export class NodeAgent {
       const payload = item.payload;
       const options = { assistantEpoch: this.assistantEpoch, idempotencyKey: `assistant:${item.messageId}` };
       if (payload.phase === 'running') {
-        payload.phase = 'reply'; payload.text = '上次目标理解已中断，没有自动重试模型或派发任务。请重新发送目标；已保留可取得的用量。';
+        payload.phase = 'reply'; payload.processing_outcome = 'interrupted'; payload.text = '上次目标理解已中断，没有自动重试模型或派发任务。请重新发送目标；已保留可取得的用量。';
         this.store.saveAssistant(item.messageId, payload);
       }
       if (payload.phase === 'propose' || payload.phase === 'start') {
@@ -935,7 +1049,7 @@ export class NodeAgent {
         payload.phase = 'reply'; payload.text = '历史交办尚未确认目标，请重新说明目标后确认执行。';
         this.store.saveAssistant(item.messageId, payload);
       }
-      await this.api.request('/assistant/messages', { source_message_id: item.messageId, content: payload.text }, options);
+      await this.api.request('/assistant/messages', { source_message_id: item.messageId, content: payload.text, ...(payload.processing_outcome === 'interrupted' ? { processing_outcome: 'interrupted' } : {}) }, options);
       const latest = new Map<string, UsageSample>();
       for (const sample of payload.usage as UsageSample[]) latest.set(sample.request_key, sample);
       const storedActivity = typeof payload.activity_id === 'string' && payload.activity_id ? payload.activity_id : undefined;
@@ -959,7 +1073,7 @@ export class NodeAgent {
     return message.replace(/(sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,})/g, '[redacted]').slice(0, 500);
   }
   async stop(): Promise<void> {
-    this.controller.abort(); for (const controller of this.coordinatorControllers.values()) controller.abort();
+    this.controller.abort(); for (const timer of this.loopTimers) clearTimeout(timer); this.loopTimers.clear(); for (const controller of this.coordinatorControllers.values()) controller.abort();
     for (const execution of this.active.values()) await this.requestStop(execution, 'paused');
     await Promise.allSettled(this.executions.values()); await this.assistantWork;
     await Promise.allSettled(this.coordinatorWork.values()); await this.coordinatorDrain?.catch(() => undefined);

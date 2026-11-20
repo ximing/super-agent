@@ -24,7 +24,7 @@ function stable(value: unknown): string {
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${JSON.stringify(k)}:${stable(v)}`).join(',')}}`;
   return JSON.stringify(value) ?? 'null';
 }
-const TABLES = new Set(['devices','tasks','runs','messages','questions','memories','memory_bindings','settings','commands','assistant_leases','plans','checkpoints','frames','views','usage_records','budgets','budget_reservations','schedules','notifications','artifacts','steps','inbox_receipts','task_deliveries','task_reviews','coordinator_events']);
+const TABLES = new Set(['devices','tasks','runs','messages','questions','memories','memory_bindings','settings','commands','assistant_leases','plans','checkpoints','frames','views','usage_records','budgets','budget_reservations','schedules','notifications','artifacts','steps','inbox_receipts','task_deliveries','task_reviews','coordinator_events','message_processing','task_actions']);
 const table = (name: string) => { if (!TABLES.has(name)) throw new Error('Invalid store table'); return `sa_${name}`; };
 export type Doc = Record<string, any>;
 export class Tx {

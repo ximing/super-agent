@@ -383,10 +383,8 @@ struct TaskDetailView: View {
                 } else if task.status == "paused" {
                     Button("继续") { act("resume") }
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.busy)
                 } else if ["running", "waiting_input"].contains(task.status) {
                     Button("暂停") { act("pause") }
-                        .disabled(model.busy)
                 } else if task.reasonCode == "result_unknown" || task.status == "result_unknown" {
                     Button("核对业务结果") { reconciling = true }
                         .buttonStyle(.borderedProminent)
@@ -488,6 +486,20 @@ struct TaskDetailView: View {
                 Image(systemName: statusExplanationIcon)
                     .foregroundStyle(Palette.blue)
                 VStack(alignment: .leading, spacing: 6) {
+                    if let notice = model.controlNotices[task.id] {
+                        Text(notice)
+                            .font(.callout.weight(.medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    let stage = model.stagePresentation(for: task)
+                    Text(stage.emphasize ? stage.detail : stage.title)
+                        .font(.caption)
+                        .foregroundStyle(stage.emphasize ? .primary : .secondary)
+                    if let count = stage.countText { Text(count).font(.caption2).foregroundStyle(.secondary) }
+                    if stage.showCheck {
+                        Button("检查进展") { Task { await model.checkTask(task.id) } }
+                            .controlSize(.small)
+                    }
                     Text(statusExplanation)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
@@ -651,7 +663,7 @@ struct TaskDetailView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(model.busy || draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .accessibilityLabel("发送补充要求")
             }
         }
@@ -695,7 +707,7 @@ struct TaskDetailView: View {
                         Task { await model.action("switch", task: task, targetEngine: targetEngine, targetDevice: targetDevice) }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(targetDevice.isEmpty || model.busy)
+                    .disabled(targetDevice.isEmpty)
                 }
             }
         }
@@ -731,21 +743,25 @@ struct TaskDetailView: View {
                         .keyboardShortcut(.cancelAction)
                     Spacer()
                     Button("提交核对") {
+                        let note = reconciliationNote
+                        let picked = outcome
                         Task {
-                            await model.operation {
-                                let _: JSONValue = try await model.api.request(
-                                    "/tasks/\(task.id)/reconciliation",
-                                    method: "POST",
-                                    body: ["outcome": .string(outcome), "note": .string(reconciliationNote)],
-                                    version: task.version
-                                )
-                                reconciling = false
-                                await model.refresh()
+                            await model.runLane("task:\(task.id):reconcile", action: "reconcile") {
+                                do {
+                                    let _: JSONValue = try await model.api.request(
+                                        "/tasks/\(task.id)/reconciliation",
+                                        method: "POST",
+                                        body: ["outcome": .string(picked), "note": .string(note)],
+                                        version: task.version
+                                    )
+                                    reconciling = false
+                                    Task { await model.refresh() }
+                                } catch { model.error = error.localizedDescription }
                             }
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(reconciliationNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.busy)
+                    .disabled(reconciliationNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isBusy("task:\(task.id):reconcile"))
                 }
             }
         }
@@ -774,13 +790,16 @@ struct TaskDetailView: View {
                         if model.error == nil { allowance = "" }
                     }
                 }
-                .disabled(model.busy || allowance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(allowance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isBusy("task:\(task.id):control"))
             }
             .padding(.top, 4)
         }
     }
 
     private var statusExplanation: String {
+        if currentRun?.state == "dispatched" || model.stagePresentation(for: task).title == "等待电脑接受" {
+            return "等待电脑接受，尚未开始执行。"
+        }
         if task.reasonCode == "result_unknown" || task.status == "result_unknown" {
             return "执行结果尚未确认。请先核对业务结果，再决定是否重试，避免重复操作。"
         }
@@ -827,12 +846,14 @@ struct TaskDetailView: View {
 
     private func sendInput() {
         let value = draft.wrappedValue
-        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !model.busy else { return }
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         Task {
-            await model.operation {
-                let _: JSONValue = try await model.api.request("/tasks/\(task.id)/inputs", method: "POST", body: ["text": .string(value)])
-                model.taskDraftBinding(for: task.id).wrappedValue = ""
-                await load()
+            await model.runLane("task:\(task.id):input", action: "input") {
+                do {
+                    let _: JSONValue = try await model.api.request("/tasks/\(task.id)/inputs", method: "POST", body: ["text": .string(value)])
+                    model.taskDraftBinding(for: task.id).wrappedValue = ""
+                    await load()
+                } catch { model.error = error.localizedDescription }
             }
         }
     }
@@ -912,7 +933,7 @@ struct NewTaskSheet: View {
                 Button("创建任务") { create() }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.selectedDevice.isEmpty || model.busy)
+                    .disabled(goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.selectedDevice.isEmpty || model.isBusy("task:create"))
             }
             .padding(.horizontal, 28)
             .padding(.vertical, 16)
@@ -1044,7 +1065,7 @@ struct QuestionRow: View {
                 HStack {
                     ForEach(question.options, id: \.self) { option in
                         Button(option) { Task { await model.answer(question, text: option) } }
-                            .disabled(model.busy)
+                            .disabled(model.isBusy("question:\(question.id)"))
                     }
                 }
             }
@@ -1059,7 +1080,7 @@ struct QuestionRow: View {
                         if model.error == nil { answer = "" }
                     }
                 }
-                .disabled(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.busy)
+                .disabled(answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isBusy("question:\(question.id)"))
             }
         }
         .padding(.vertical, 8)

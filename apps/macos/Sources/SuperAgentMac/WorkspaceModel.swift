@@ -40,9 +40,33 @@ import SuperAgentCore
     var demoArtifacts: [Artifact] = []
     var demoSteps: [ToolStep] = []
     weak var notifications: NativeNotifications?
-    private var cursor = "0"
-    private var seenSeqs: Set<String> = []
+    var cursor = "0"
+    var seenSeqs: Set<String> = []
     private var pollTask: Task<Void, Never>?
+    @Published var outbound: [OutboundMessage] = []
+    @Published var processingRecords: [String: MessageProcessing] = [:]
+    @Published var controlNotices: [String: String] = [:]
+    @Published var stageRecords: [String: TaskStageRecord] = [:]
+    @Published var capabilities = InteractionCapabilities.legacy
+    @Published var syncing = false
+    @Published var syncNote: String?
+    @Published var connectionBanner: String?
+    @Published var serverConnected = false
+    @Published var authRequired = false
+    @Published var fastChoice: FastChoice?
+    @Published private(set) var busyKeys: Set<String> = []
+    func markBusy(_ key: String, _ active: Bool) {
+        if active { busyKeys.insert(key) } else { busyKeys.remove(key) }
+    }
+    func clearBusyKeys() { busyKeys = [] }
+    var laneTail: [String: Task<Void, Never>] = [:]
+    var laneAction: [String: String] = [:]
+    var projection = ProjectionJournal()
+    var loadedScope: InteractionScope?
+    var scopeGeneration = 0
+    var disconnectStarted: Date?
+    var receiptById: [String: ActionReceipt] = [:]
+    let interactionStore = InteractionFileStore.applicationSupport()
     let api: APIClient
     private let oidc = OIDCLogin()
     init() { api = APIClient(baseURL: URL(string: UserDefaults.standard.string(forKey: "server") ?? "https://super-agent.aimo.plus") ?? URL(string: "https://super-agent.aimo.plus")!) }
@@ -74,7 +98,7 @@ import SuperAgentCore
             guard restoreAttempt == attempt, !loginInProgress else { return }
             session = saved
             sessionRestoreMessage = saved == nil ? "没有可自动恢复的登录，可以直接登录。" : nil
-            if saved != nil { await refresh(); startPolling() }
+            if saved != nil { authRequired = false; await refresh(); startPolling() }
         } catch {
             guard restoreAttempt == attempt, !loginInProgress else { return }
             sessionRestoreMessage = (error as? APIError)?.message ?? "暂时无法恢复已保存登录，可以直接重新登录；旧凭据会保留。"
@@ -90,7 +114,7 @@ import SuperAgentCore
     func configure() async throws {
         let url = try APIClient.validatedURL(server)
         UserDefaults.standard.set(url.absoluteString, forKey: "server")
-        await api.configure(url); session = await api.currentSession(); cursor = "0"
+        await api.configure(url); session = await api.currentSession(); resetInteractionMemory()
         await loadAuthConfig()
     }
     func loadAuthConfig() async {
@@ -117,6 +141,7 @@ import SuperAgentCore
                     try await api.setSession(result); session = result
                 }
                 loginPhase = .loadingWorkspace
+                authRequired = false
                 await refresh(); startPolling(); loginPhase = nil
             } catch is CancellationError { error = "已取消登录"; loginPhase = nil }
             catch let failure as URLError where failure.code == .cancelled { error = "已取消登录"; loginPhase = nil }
@@ -128,172 +153,25 @@ import SuperAgentCore
     func cancelSignIn() { loginTask?.cancel(); oidc.cancel() }
     func handleLoginCallback(_ url: URL) { oidc.handleCallback(url) }
     func signOut() async {
-        pollTask?.cancel(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; assistantDraft = ""; taskDrafts = [:]; isDemo = false; demoRuns = []; demoTaskMessages = []; demoEvidence = [:]; demoArtifacts = []; demoSteps = []; lastSync = nil; error = nil; cursor = "0"; seenSeqs = []
+        pollTask?.cancel(); resetInteractionMemory(); await api.logout(); session = nil; tasks = []; devices = []; messages = []; questions = []; memories = []; costs = nil; series = []; breakdown = []; budget = nil; memorySettings = nil; settings = nil; selectedDevice = ""; selectedModelId = ""; selectedEngine = .codex; assistantDraft = ""; taskDrafts = [:]; isDemo = false; demoRuns = []; demoTaskMessages = []; demoEvidence = [:]; demoArtifacts = []; demoSteps = []; lastSync = nil; error = nil; syncNote = nil
     }
     func startPolling(restore: Bool = true) {
         pollTask?.cancel()
-        if restore { restoreCursor() }
+        let generation = scopeGeneration
         pollTask = Task { [weak self] in
-            await self?.runEventStream()
+            guard let self else { return }
+            if restore {
+                await self.restoreCursor()
+                await self.recoverOutbound(generation: generation)
+            }
+            await self.runEventStream()
         }
     }
     func reconnectEventStream() {
         guard session != nil, !isDemo else { return }
         startPolling(restore: false)
     }
-    private func restoreCursor() {
-        seenSeqs = []
-        guard let id = session?.user.id else { cursor = "0"; return }
-        let saved = UserDefaults.standard.string(forKey: "event-cursor.\(id)") ?? "0"
-        cursor = saved.range(of: #"^\d{1,20}$"#, options: .regularExpression) != nil ? saved : "0"
-    }
-    private func storeCursor() {
-        guard let id = session?.user.id, cursor.range(of: #"^\d{1,20}$"#, options: .regularExpression) != nil else { return }
-        UserDefaults.standard.set(cursor, forKey: "event-cursor.\(id)")
-    }
-    private func runEventStream() async {
-        var failureDelay = 0.0
-        var nextReconcile = Date().addingTimeInterval(45)
-        while !Task.isCancelled {
-            if session == nil || isDemo { return }
-            if Date() >= nextReconcile {
-                await refresh()
-                nextReconcile = Date().addingTimeInterval(45)
-                if Task.isCancelled || session == nil { return }
-            }
-            if failureDelay > 0 {
-                do { try await Task.sleep(for: .seconds(failureDelay)) } catch { return }
-            }
-            if Task.isCancelled || session == nil || isDemo { return }
-            do {
-                let stream = try await api.events(after: cursor)
-                var remainder = ""
-                for try await line in stream {
-                    if Task.isCancelled { return }
-                    let consumed = EventStreamDecoder.consume(line + "\n", cursor: cursor, seen: seenSeqs, remainder: remainder)
-                    remainder = consumed.remainder
-                    let moved = consumed.cursor != cursor
-                    cursor = consumed.cursor
-                    seenSeqs = consumed.seen
-                    if moved { storeCursor() }
-                    if !consumed.applied.isEmpty { await applyStream(consumed.applied) }
-                }
-                if !remainder.isEmpty {
-                    let consumed = EventStreamDecoder.consume("\n", cursor: cursor, seen: seenSeqs, remainder: remainder)
-                    let moved = consumed.cursor != cursor
-                    cursor = consumed.cursor
-                    seenSeqs = consumed.seen
-                    if moved { storeCursor() }
-                    if !consumed.applied.isEmpty { await applyStream(consumed.applied) }
-                }
-                failureDelay = 0
-            } catch is CancellationError {
-                return
-            } catch let error as URLError where error.code == .cancelled {
-                return
-            } catch let error as APIError where error.status == 401 {
-                do {
-                    let _: User = try await api.request("/me")
-                    failureDelay = 0
-                } catch {
-                    if await api.currentSession() == nil { session = nil }
-                    return
-                }
-            } catch let error as APIError where error.status == 422 || error.status == 410 || error.code == "invalid_cursor" {
-                if cursor != "0" {
-                    cursor = "0"; seenSeqs = []; storeCursor(); failureDelay = 0
-                } else {
-                    failureDelay = min(max(failureDelay, 1) * 2, 30)
-                }
-            } catch {
-                if await api.currentSession() == nil { session = nil; return }
-                failureDelay = failureDelay == 0 ? 1 : min(failureDelay * 2, 30)
-            }
-        }
-    }
-    private func applyStream(_ events: [AppliedStreamEvent]) async {
-        var taskIds: [String] = []
-        var reloadDevices = false
-        var reloadQuestions = false
-        var reloadMessages = false
-        for event in events where event.type != "cursor" {
-            if let taskId = event.taskId, !taskIds.contains(taskId) { taskIds.append(taskId) }
-            if event.type == "device.changed" { reloadDevices = true }
-            if event.type == "notification.created" || event.type == "question.created" || event.type == "question.resolved" { reloadQuestions = true }
-            if event.type == "message.created" || event.type == "assistant.replied" || event.type.hasPrefix("plan.") { reloadMessages = true }
-        }
-        for id in taskIds {
-            if let task: AgentTask = try? await api.request("/tasks/\(id)") {
-                if let index = tasks.firstIndex(where: { $0.id == task.id }) { tasks[index] = task }
-                else { tasks.insert(task, at: 0) }
-            }
-        }
-        if reloadMessages, let list: Items<Message> = try? await api.request("/messages") { messages = list.items }
-        if reloadDevices, let list: Items<Device> = try? await api.request("/devices") { devices = list.items }
-        if reloadQuestions, let list: Items<Question> = try? await api.request("/questions?status=open") {
-            let previous = Set(questions.map(\.id))
-            if lastSync != nil { NativeNotifications.announceNewQuestions(list.items.filter { !previous.contains($0.id) }) }
-            questions = list.items
-        }
-        if events.contains(where: { $0.type != "cursor" }) { lastSync = Date() }
-    }
-    func refresh() async {
-        guard !isDemo else { lastSync = Date(); return }
-        do {
-            let taskList: Items<AgentTask> = try await api.request("/tasks"); tasks = taskList.items
-            let deviceList: Items<Device> = try await api.request("/devices"); devices = deviceList.items
-            let messageList: Items<Message> = try await api.request("/messages"); messages = messageList.items
-            let questionList: Items<Question> = try await api.request("/questions?status=open")
-            let previous = Set(questions.map(\.id))
-            if lastSync != nil { NativeNotifications.announceNewQuestions(questionList.items.filter { !previous.contains($0.id) }) }
-            questions = questionList.items
-            memorySettings = try await api.request("/settings/memory")
-            if memorySettings?.configured == true { let memoryList: Items<Memory> = try await api.request("/memories"); memories = memoryList.items }
-            else { memories = [] }
-            settings = try await api.request("/settings/execution")
-            if selectedDevice.isEmpty { selectedDevice = settings?.defaultDeviceId ?? devices.first(where: { $0.revoked != true })?.id ?? ""; selectedEngine = settings?.defaultEngine ?? .codex }
-            lastSync = Date(); error = nil
-        } catch { self.error = error.localizedDescription }
-    }
-    func sendMessage(_ text: String, taskId: String? = nil, scope: MemoryScopeDraft = MemoryScopeDraft()) async {
-        await operation {
-            var body: [String: JSONValue] = ["client_message_id": .string(UUID().uuidString), "text": .string(text), "memory_scope": try RequestBodies.memoryScope(scope)]
-            if let taskId { body["task_id"] = .string(taskId) }
-            if !self.selectedDevice.isEmpty { body["execution_preference"] = .object(["engine": .string(self.selectedEngine.rawValue), "device_id": .string(self.selectedDevice), "selection_mode": .string("pinned")]) }
-            let _: Message = try await self.api.request("/messages", method: "POST", body: body)
-            await self.refresh()
-        }
-    }
-    func createTask(_ goal: String, scope: MemoryScopeDraft = MemoryScopeDraft()) async {
-        await operation {
-            guard !self.selectedDevice.isEmpty else { throw APIError(status: 0, code: "device_required", message: "先选择执行电脑；可以在电脑页认领已安装的节点") }
-            guard self.devices.first(where: { $0.id == self.selectedDevice })?.revoked != true else { throw APIError(status: 0, code: "device_revoked", message: "此电脑已撤销，请手动选择其他电脑") }
-            var body: [String: JSONValue] = ["goal": .string(goal), "engine": .string(self.selectedEngine.rawValue), "device_id": .string(self.selectedDevice), "memory_scope": try RequestBodies.memoryScope(scope)]
-            if !self.selectedModelId.isEmpty { body["model_id"] = .string(self.selectedModelId) }
-            let _: AgentTask = try await self.api.request("/tasks", method: "POST", body: body)
-            await self.refresh()
-        }
-    }
-    func raiseLimitAndRetry(task: AgentTask, reason: String, raw: String) async {
-        await operation {
-            guard let value = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else { throw APIError(status: 0, code: "invalid_budget", message: "请输入整数上限") }
-            let updated: AgentTask = try await self.api.request("/tasks/\(task.id)/budget", method: "PUT", body: try RequestBodies.taskBudgetMerge(reason: reason, value: value), version: task.version)
-            let _: JSONValue = try await self.api.request("/tasks/\(updated.id)/actions", method: "POST", body: ["action": .string("retry")], version: updated.version)
-            await self.refresh()
-        }
-    }
-    func action(_ action: String, task: AgentTask, targetEngine: Engine? = nil, targetDevice: String? = nil) async {
-        await operation {
-            var body: [String: JSONValue] = ["action": .string(action)]
-            if action == "switch", let device = targetDevice, self.devices.first(where: { $0.id == device })?.revoked == true { throw APIError(status: 0, code: "device_revoked", message: "此电脑已撤销，请手动选择其他电脑") }
-            if action == "switch", let engine = targetEngine, let device = targetDevice { body["target"] = .object(["engine": .string(engine.rawValue), "device_id": .string(device)]) }
-            let _: JSONValue = try await self.api.request("/tasks/\(task.id)/actions", method: "POST", body: body, version: task.version)
-            await self.refresh()
-        }
-    }
-    func answer(_ question: Question, text: String) async {
-        await operation { let _: JSONValue = try await self.api.request("/questions/\(question.id)/answers", method: "POST", body: ["answer": .string(text), "version": .number(Double(question.version))], version: question.version); await self.refresh() }
-    }
+
     func claim(_ code: String) async {
         await operation { let _: JSONValue = try await self.api.request("/device-pairings/claim", method: "POST", body: ["code": .string(code.trimmingCharacters(in: .whitespacesAndNewlines))]); await self.refresh() }
     }

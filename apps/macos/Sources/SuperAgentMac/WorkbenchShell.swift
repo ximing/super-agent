@@ -77,6 +77,31 @@ struct WorkspaceView: View {
 
     @ViewBuilder private var detail: some View {
         VStack(spacing: 0) {
+            if let banner = model.connectionBanner {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "wifi.exclamationmark")
+                    Text(banner).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.secondary.opacity(0.08))
+                Divider()
+            }
+            if let note = model.syncNote {
+                HStack(alignment: .top, spacing: 10) {
+                    if model.syncing { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.triangle.2.circlepath") }
+                    Text(note).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                Divider()
+            }
             if let error = model.error {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.circle")
@@ -147,11 +172,11 @@ struct WorkspaceView: View {
                 .accessibilityLabel(currentSection == .memories ? "添加记忆" : "新建任务")
                 .disabled(currentSection == .memories && model.memorySettings?.configured != true)
             Button { Task { await model.refresh() } } label: {
-                if model.busy { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
+                if model.syncing { ProgressView().controlSize(.small) } else { Image(systemName: "arrow.clockwise") }
             }
             .help("刷新工作台（⌘R）")
             .accessibilityLabel("刷新工作台")
-            .disabled(model.busy)
+            .disabled(model.syncing)
             if supportsSearch {
                 TextField("搜索", text: $searchText)
                     .textFieldStyle(.roundedBorder)
@@ -159,7 +184,12 @@ struct WorkspaceView: View {
                     .focused($searchFocused)
                     .accessibilityLabel("搜索当前工作区")
             }
-            if supportsInspector {
+        }
+        if supportsInspector {
+            if #available(macOS 26.0, *) {
+                ToolbarSpacer(.flexible)
+            }
+            ToolbarItem(placement: .confirmationAction) {
                 Button { showInspector.toggle() } label: { Image(systemName: "sidebar.trailing") }
                     .help("显示或隐藏检查器（⌘⌥0）")
                     .accessibilityLabel("显示或隐藏检查器")

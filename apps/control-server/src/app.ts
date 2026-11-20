@@ -21,6 +21,7 @@ import { storeCheckpoint } from './checkpoints.js';
 import { finalizeArtifact } from './artifact-finalizer.js';
 import { evidenceRecord } from './acceptance-evidence.js';
 import { NotificationService } from './notifications.js';
+import { applyFastPath, beginMessageProcessing, claimMessage, completeProcessing, interactionFlags, lookupClientMessage, progressMessage, readActionReceipt, readMessageProcessing, workspaceSnapshot } from './interaction.js';
 
 export type ControlApp=FastifyInstance&{control:{store:Store;service:Service;notifications:NotificationService;tick:()=>Promise<void>}};
 const body=(r:FastifyRequest):Doc=>{if(r.body===undefined)return{};if(!r.body||typeof r.body!=='object'||Array.isArray(r.body))throw new ApiError(422,'invalid_body','请求需要 JSON 对象');return r.body as Doc;};
@@ -80,6 +81,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   };
 
   app.get('/health',async()=>({status:'ok',service:'super-agent-control'}));
+  app.get('/v1/capabilities',async()=>interactionFlags());
   app.get('/ready',async()=>{await store.pool.query('SELECT 1');return{status:'ready'};});
   app.get('/v1/auth/config',async()=>{
     if(config.allowDevAuth)return{mode:'development'};
@@ -166,8 +168,16 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     if(b.task_id)await tx.need('tasks',uuid(b.task_id));if(b.execution_preference?.device_id)await tx.need('devices',uuid(b.execution_preference.device_id));
     const message=await tx.put('messages',{role:'user',content,task_id:b.task_id??null,client_message_id:clientId,execution_preference:b.execution_preference??null,...(memoryScope?{memory_scope:memoryScope}:{})});
     if(b.task_id){const task=await tx.need('tasks',b.task_id,true);if(task.current_run_id){const run=await tx.need('runs',task.current_run_id,true);if(ACTIVE.includes(run.state))await tx.put('runs',{...run,pending_inputs:[...(run.pending_inputs??[]),message.content]});}}
-    await tx.emit('message.created',message,message.task_id);return message;
+    await tx.emit('message.created',message,message.task_id);
+    const lease=await tx.get('assistant_leases',tx.tenant),assistantDevice=lease?await tx.get('devices',lease.device_id):null;
+    const assistantOffline=!lease||Date.parse(String(lease.expires_at))<=Date.now()||!assistantDevice?.last_seen_at||Date.parse(String(assistantDevice.last_seen_at))<Date.now()-30000;
+    const stamped=await beginMessageProcessing(tx,message,assistantOffline);
+    return await applyFastPath(tx,stamped,async(task,control)=>service.action(tx,task.id,{action:control,source_message_id:stamped.id},String(task.version)))??stamped;
   }));
+  route('GET','/messages/by-client-id/:client_message_id','client',async(r,_p,tx)=>lookupClientMessage(tx,params(r).client_message_id));
+  route('GET','/messages/:id/processing','client',async(r,_p,tx)=>readMessageProcessing(tx,params(r).id));
+  route('GET','/actions/:id','client',async(r,_p,tx)=>readActionReceipt(tx,params(r).id));
+  route('GET','/workspace/snapshot','client',async(_r,_p,tx)=>workspaceSnapshot(tx,device=>service.deviceView(tx,device)));
 
   route('GET','/questions','client',async(r,_p,tx)=>items((await tx.all('questions')).filter(q=>!query(r).status||q.status===query(r).status)));
   route('POST','/questions/:id/answers','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{
@@ -235,7 +245,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   });
   route('POST','/node/runs/:id/questions','device',async(r,p,tx)=>{
     await graphLock(tx);const run=await runAuth(r,p,tx,uuid(params(r).id)),task=await tx.need('tasks',run.task_id,true);const b=body(r);const q=await tx.put('questions',{run_id:run.id,task_id:run.task_id,text:text(b.text,'text',5000),options:Array.isArray(b.options)?b.options.slice(0,20):[],status:'open'});
-    await tx.put('runs',{...run,state:'waiting_input'});await tx.put('tasks',{...task,status:'waiting_input'});await tx.emit('question.created',q,run.task_id,run.id);return q;
+    const waitingRun=await tx.put('runs',{...run,state:'waiting_input',summary:'等待你的回答'});const waitingTask=await tx.put('tasks',{...task,status:'waiting_input'});await tx.emit('question.created',q,run.task_id,run.id);await service.noteQuestion(tx,waitingTask,waitingRun);return q;
   });
   const memoryAccess=async(r:FastifyRequest,p:Principal,tx:Tx)=>{
     if(r.headers['x-run-ticket']){const run=await runAuth(r,p,tx);return workerAccess(await tx.need('tasks',run.task_id),await tx.get('memory_bindings',tx.tenant),await service.settings(tx));}
@@ -313,11 +323,14 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');
     await service.usage(tx,eventUsageActivity(event,p.device!,selectedEngine,b.model_id,b,await tx.all('budget_reservations')),b);return{status:'recorded'};
   });
+  route('POST','/assistant/messages/:id/claim','device',async(r,p,tx)=>{const lease=await assistant(r,p,tx);return claimMessage(tx,params(r).id,{device_id:p.device,epoch:lease.epoch});});
+  route('POST','/assistant/messages/:id/progress','device',async(r,p,tx)=>{const lease=await assistant(r,p,tx);return progressMessage(tx,params(r).id,body(r),{device_id:p.device,epoch:lease.epoch});});
   route('POST','/assistant/messages','device',async(r,p,tx)=>{
     await assistant(r,p,tx);await graphLock(tx);const b=body(r),source=await tx.need('messages',uuid(b.source_message_id));
-    const prior=(await tx.all('messages')).find(m=>m.source_message_id===source.id&&m.role==='assistant');if(prior)return prior;
+    const outcome=b.processing_outcome??'handled';if(outcome!=='handled'&&outcome!=='interrupted')throw new ApiError(422,'invalid_outcome','处理结果无效');
+    const prior=(await tx.all('messages')).find(m=>m.source_message_id===source.id&&m.role==='assistant');if(prior){await completeProcessing(tx,source,prior,outcome);return prior;}
     if(b.task_id)await tx.need('tasks',uuid(b.task_id));const message=await tx.put('messages',{role:'assistant',content:text(b.content,'content',100000),task_id:b.task_id??null,source_message_id:source.id});
-    await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await service.releaseActivityRoot(tx,replyActivityId(source));await tx.emit('assistant.replied',message,b.task_id??null);return message;
+    await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await service.releaseActivityRoot(tx,replyActivityId(source));await tx.emit('assistant.replied',message,b.task_id??null);await completeProcessing(tx,source,message,outcome);return message;
   });
   route('POST','/assistant/usage','device',async(r,p,tx)=>{await assistant(r,p,tx);await graphLock(tx);const b=body(r),message=await tx.need('messages',uuid(b.message_id));const device=await tx.need('devices',p.device!);const selectedEngine=engine(b.engine);if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');await service.usage(tx,assistantUsageActivity(message,p.device!,selectedEngine,b.model_id,b,await tx.all('budget_reservations')),b);return{status:'recorded'};});
   route('GET','/node/devices','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d))));});

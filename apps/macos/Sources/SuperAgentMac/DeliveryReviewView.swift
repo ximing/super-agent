@@ -261,9 +261,13 @@ struct DeliveryReviewView: View {
         }
         do {
             let body = try evidence.reviewBody(verdict: verdict, summary: summary, passed: passed, selected: selected)
-            let _: JSONValue = try await model.api.request("/tasks/\(taskId)/reviews", method: "POST", body: body, version: evidence.task.version)
-            await model.refresh()
-            dismiss()
+            let accepted = await model.runReview(taskId) {
+                let _: JSONValue = try await model.api.request("/tasks/\(taskId)/reviews", method: "POST", body: body, version: evidence.task.version)
+            }
+            if accepted {
+                Task { await model.refresh() }
+                dismiss()
+            }
         } catch let failure as APIError {
             error = failure.status == 409 || failure.status == 412 ? "交付已被更新，请刷新证据后重新核对" : failure.localizedDescription
         } catch {

@@ -3,6 +3,16 @@ export interface StreamEvent {
   eventId: string | null;
   type: string;
   taskId: string | null;
+  runState?: string | null;
+  actionId?: string | null;
+  version?: number | null;
+  phase?: string | null;
+  actionName?: string | null;
+  payloadStatus?: string | null;
+  completedCount?: number | null;
+  totalCount?: number | null;
+  sourceMessageId?: string | null;
+  reasonCode?: string | null;
 }
 
 export interface StreamConsume {
@@ -12,8 +22,13 @@ export interface StreamConsume {
   remainder: string;
 }
 
-export function eventCursorKey(userId: string): string {
-  return `superagent.cursor.${userId}`;
+export function storageScope(server: string, userId: string): string {
+  const safe = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '_').slice(0, 96);
+  return `${safe(server)}.${safe(userId)}`;
+}
+
+export function eventCursorKey(server: string, userId: string): string {
+  return `sa.cursor.${storageScope(server, userId)}`;
 }
 
 export function compareSeq(lhs: string, rhs: string): number {
@@ -61,7 +76,18 @@ export function consumeEventStream(chunk: string, cursor: string, seen: Iterable
     nextCursor = seq;
     const type = typeof record.type === 'string' ? record.type : currentEvent ?? '';
     const taskId = typeof record.task_id === 'string' && record.task_id ? record.task_id : null;
-    applied.push({streamSeq: seq, eventId, type, taskId});
+    const payload = record.payload && typeof record.payload === 'object' && !Array.isArray(record.payload) ? record.payload as Record<string, unknown> : null;
+    const runState = typeof record.state === 'string' ? record.state : typeof payload?.state === 'string' ? payload.state : null;
+    const actionId = typeof record.action_id === 'string' ? record.action_id : typeof payload?.action_id === 'string' ? payload.action_id : null;
+    const versionValue = typeof record.entity_version === 'number' ? record.entity_version : typeof payload?.version === 'number' ? payload.version : null;
+    const phase = typeof payload?.phase === 'string' ? payload.phase : null;
+    const actionName = typeof payload?.action === 'string' ? payload.action : null;
+    const payloadStatus = typeof payload?.status === 'string' ? payload.status : null;
+    const completedCount = typeof payload?.completed_count === 'number' ? payload.completed_count : null;
+    const totalCount = typeof payload?.total_count === 'number' ? payload.total_count : null;
+    const sourceMessageId = typeof payload?.source_message_id === 'string' ? payload.source_message_id : null;
+    const reasonCode = typeof payload?.reason_code === 'string' ? payload.reason_code : null;
+    applied.push({streamSeq: seq, eventId, type, taskId, runState, actionId, version: versionValue, phase, actionName, payloadStatus, completedCount, totalCount, sourceMessageId, reasonCode});
   };
   for (const line of lines) {
     if (line === '') { dispatch(); continue; }
@@ -136,6 +162,7 @@ export async function readEventStream(input: {
   signal: AbortSignal;
   timeoutMs?: number;
   transport?: typeof fetch;
+  onOpen?: () => void;
   onText: (text: string) => void;
 }): Promise<void> {
   const timeout = new AbortController();
@@ -147,6 +174,7 @@ export async function readEventStream(input: {
       signal: linkAbort([input.signal, timeout.signal]),
     });
     if (!response.ok) throw new EventStreamError(response.status, `事件流连接失败（${response.status}）`);
+    input.onOpen?.();
     const reader = readerOf(response.body);
     if (reader) {
       const decode = new TextDecoder();

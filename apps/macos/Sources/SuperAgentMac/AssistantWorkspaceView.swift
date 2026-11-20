@@ -5,7 +5,6 @@ struct AssistantWorkspaceView: View {
     @EnvironmentObject private var model: WorkspaceModel
     let searchText: String
     @Binding var selectedTaskID: String?
-    @State private var sending = false
     @State private var dispatching = false
     @State private var memoryScope = MemoryScopeDraft()
     @State private var pendingPlans: [ChatPlan] = []
@@ -15,23 +14,19 @@ struct AssistantWorkspaceView: View {
         self._selectedTaskID = selectedTaskID
     }
 
-    private var filteredMessages: [Message] {
+    private var visibleItems: [TranscriptItem] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return model.messages }
-        return model.messages.filter { $0.content.localizedCaseInsensitiveContains(query) }
+        let items = model.transcript
+        guard !query.isEmpty else { return items }
+        return items.filter { $0.content.localizedCaseInsensitiveContains(query) }
     }
 
     private var selectedTask: AgentTask? {
         model.tasks.first { $0.id == selectedTaskID }
     }
 
-    private var awaitingAssistant: Bool {
-        if sending { return true }
-        return filteredMessages.last?.role == "user"
-    }
-
     private enum ThreadItem: Identifiable {
-        case message(Message)
+        case message(TranscriptItem)
         case plan(AgentTask)
         var id: String {
             switch self {
@@ -42,17 +37,23 @@ struct AssistantWorkspaceView: View {
     }
 
     private var thread: [ThreadItem] {
-        let messages = filteredMessages.map { (id: $0.id, createdAt: $0.createdAt) }
+        let messages = visibleItems.map { (id: $0.id, createdAt: $0.createdAt) }
         let plan = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? selectedTask.map { (id: $0.id, createdAt: $0.createdAt) }
             : nil
-        let byMessage = Dictionary(uniqueKeysWithValues: filteredMessages.map { ($0.id, $0) })
+        let byMessage = Dictionary(visibleItems.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         return assistantThreadSlots(messages: messages, plan: plan).compactMap { slot in
             switch slot.kind {
             case .message: return byMessage[slot.id].map(ThreadItem.message)
             case .plan: return selectedTask.map(ThreadItem.plan)
             }
         }
+    }
+
+    private var stageTasks: [AgentTask] {
+        var ids = Set(visibleItems.compactMap(\.taskId))
+        if let selectedTaskID { ids.insert(selectedTaskID) }
+        return Array(model.tasks.filter { ids.contains($0.id) && !["succeeded", "cancelled"].contains($0.status) }.prefix(3))
     }
 
     private func loadPlans() async {
@@ -63,10 +64,12 @@ struct AssistantWorkspaceView: View {
     }
 
     private func decide(_ plan: ChatPlan, _ action: String) async {
-        await model.operation {
-            let _: JSONValue = try await model.api.request("/plans/\(plan.id)/actions", method: "POST", body: ["action": .string(action)], version: plan.version, idempotencyKey: UUID().uuidString)
-            await loadPlans()
-            await model.refresh()
+        await model.runLane("plan:\(plan.id)", action: action) {
+            do {
+                let _: JSONValue = try await model.api.request("/plans/\(plan.id)/actions", method: "POST", body: ["action": .string(action)], version: plan.version, idempotencyKey: UUID().uuidString)
+                await loadPlans()
+                Task { await model.refresh() }
+            } catch { model.error = error.localizedDescription }
         }
     }
 
@@ -79,8 +82,6 @@ struct AssistantWorkspaceView: View {
     private var draftIsEmpty: Bool {
         model.assistantDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-
-    private var submitting: Bool { sending || dispatching }
 
     private var selectedDevice: Device? {
         model.devices.first { $0.id == model.selectedDevice }
@@ -98,7 +99,7 @@ struct AssistantWorkspaceView: View {
     }
 
     private var canDispatchDirectly: Bool {
-        guard !draftIsEmpty, !submitting, !model.busy, let device = selectedDevice else { return false }
+        guard !draftIsEmpty, !dispatching, !model.isBusy("task:create"), let device = selectedDevice else { return false }
         return device.revoked != true && device.supports(model.selectedEngine)
     }
 
@@ -119,14 +120,58 @@ struct AssistantWorkspaceView: View {
             composer
         }
         .background(.background)
+        .confirmationDialog("有多个任务符合，请先选择", isPresented: Binding(get: { model.fastChoice != nil }, set: { if !$0 { model.fastChoice = nil } }), titleVisibility: .visible) {
+            if let choice = model.fastChoice {
+                ForEach(choice.choices) { task in
+                    Button("\(task.title)（\(String(task.id.prefix(8)))）") {
+                        let command = FastPath.explicitCommand(action: choice.action, taskId: task.id)
+                        let original = choice.original
+                        Task {
+                            let queued = await model.sendMessage(command, scope: memoryScope)
+                            if queued, model.assistantDraft == original { model.assistantDraft = "" }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var conversation: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    if filteredMessages.isEmpty {
-                        if model.messages.isEmpty {
+                    let link = model.assistantLinkFacts()
+                    HStack(spacing: 8) {
+                        Text(link.server)
+                        Text("·")
+                        Text(link.computer)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    TimelineView(.periodic(from: .now, by: 5)) { context in
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(stageTasks) { task in
+                                let stage = model.stagePresentation(for: task, now: context.date)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 8) {
+                                        Text(task.title).font(.caption.weight(.medium)).lineLimit(1)
+                                        Text(stage.title).font(.caption)
+                                        if let count = stage.countText { Text(count).font(.caption2) }
+                                    }
+                                    .foregroundStyle(stage.emphasize ? .primary : .secondary)
+                                    if !stage.detail.isEmpty {
+                                        Text(stage.detail).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    if stage.showCheck {
+                                        Button("检查进展") { Task { await model.checkTask(task.id) } }
+                                            .controlSize(.small)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if visibleItems.isEmpty {
+                        if model.transcript.isEmpty {
                             EmptyState(
                                 icon: "bubble.left.and.bubble.right",
                                 title: "从一件具体的工作开始",
@@ -152,17 +197,6 @@ struct AssistantWorkspaceView: View {
                                 .padding(.leading, 37)
                                 .id("plan-\(task.id)")
                         }
-                    }
-
-                    if awaitingAssistant {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text("已收到，正在开始")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.leading, 37)
-                        .id("assistant-waiting")
                     }
 
                     ForEach(pendingPlans) { plan in
@@ -191,13 +225,13 @@ struct AssistantWorkspaceView: View {
                 .padding(.bottom, 20)
                 .frame(maxWidth: .infinity)
             }
-            .onAppear { Task { await loadPlans() }; proxy.scrollTo("assistant-thread-bottom", anchor: .bottom) }
-            .onChange(of: model.messages.count) { _, _ in
+            .onAppear {
+                Task { await loadPlans(); await model.recoverOutbound(generation: model.scopeGeneration) }
+                proxy.scrollTo("assistant-thread-bottom", anchor: .bottom)
+            }
+            .onChange(of: model.transcript.count) { _, _ in
                 Task { await loadPlans() }
                 withAnimation { proxy.scrollTo("assistant-thread-bottom", anchor: .bottom) }
-            }
-            .onChange(of: awaitingAssistant) { _, waiting in
-                if waiting { withAnimation { proxy.scrollTo("assistant-waiting", anchor: .bottom) } }
             }
             .onChange(of: searchText) { _, _ in
                 proxy.scrollTo("assistant-thread-bottom", anchor: .bottom)
@@ -265,12 +299,11 @@ struct AssistantWorkspaceView: View {
                     .fixedSize(horizontal: true, vertical: false)
                     .tint(.secondary)
                     .foregroundStyle(.secondary)
-                    .disabled(submitting || model.busy)
+                    .disabled(dispatching || model.isBusy("task:create"))
                     .help("跳过方案确认，直接创建任务")
 
                     Spacer()
 
-                    if sending { ProgressView().controlSize(.small) }
                     Button {
                         sendToAssistant()
                     } label: {
@@ -280,7 +313,7 @@ struct AssistantWorkspaceView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(draftIsEmpty || submitting || model.busy)
+                    .disabled(draftIsEmpty)
                     .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityLabel("发送给助理")
                     .help("发送给助理 (⌘Return)")
@@ -412,13 +445,12 @@ struct AssistantWorkspaceView: View {
     }
 
     private func sendToAssistant() {
-        guard !draftIsEmpty, !submitting, !model.busy else { return }
+        guard !draftIsEmpty else { return }
         let value = model.assistantDraft
-        sending = true
+        let scope = memoryScope
         Task {
-            defer { sending = false }
-            await model.sendMessage(value, scope: memoryScope)
-            if model.error == nil, model.assistantDraft == value { model.assistantDraft = "" }
+            let queued = await model.sendMessage(value, scope: scope)
+            if queued, model.assistantDraft == value { model.assistantDraft = "" }
         }
     }
 
@@ -442,7 +474,8 @@ private struct ChatPlan: Decodable, Identifiable {
 }
 
 private struct AssistantMessageRow: View {
-    let message: Message
+    @EnvironmentObject private var model: WorkspaceModel
+    let message: TranscriptItem
 
     private var messageTime: String {
         guard let date = ISO8601DateFormatter().date(from: message.createdAt) else { return formatTime(message.createdAt) }
@@ -457,6 +490,9 @@ private struct AssistantMessageRow: View {
                     HStack(spacing: 8) {
                         Text("你").font(.caption.weight(.medium))
                         Text(messageTime).font(.caption2).help(formatTime(message.createdAt))
+                        if let status = message.statusText {
+                            Text(status).font(.caption2)
+                        }
                     }
                     .foregroundStyle(.secondary)
                     Text(message.content)
@@ -466,6 +502,22 @@ private struct AssistantMessageRow: View {
                         .padding(.horizontal, 15)
                         .padding(.vertical, 11)
                         .background(Color.secondary.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
+                    if message.canReconcile || message.canEditAsNew || message.canDeleteLocally, let clientId = message.clientMessageId {
+                        HStack(spacing: 8) {
+                            if message.canReconcile {
+                                Button("继续确认原提交") { Task { await model.confirmOutbound(clientId) } }
+                                    .controlSize(.small)
+                            }
+                            if message.canEditAsNew {
+                                Button("编辑为新消息") { model.editOutboundAsNew(clientId) }
+                                    .controlSize(.small)
+                            }
+                            if message.canDeleteLocally {
+                                Button("删除") { model.deleteUnsent(clientId) }
+                                    .controlSize(.small)
+                            }
+                        }
+                    }
                 }
                 .frame(maxWidth: 620, alignment: .trailing)
             }
@@ -486,6 +538,9 @@ private struct AssistantMessageRow: View {
                         .lineSpacing(5)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let status = message.statusText {
+                        Text(status).font(.caption2).foregroundStyle(.secondary)
+                    }
                 }
             }
         }

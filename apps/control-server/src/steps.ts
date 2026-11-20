@@ -1,6 +1,7 @@
 import type { ToolStep,ToolStepError,ToolStepStatus } from '@super-agent/protocol';
 import { ApiError,hash,type Doc,type Tx } from './store.js';
 import { uuid } from './auth.js';
+import { emitTaskProgress } from './interaction.js';
 
 const titles:Record<string,string>={browser_navigate:'打开网页',browser_snapshot:'读取网页',browser_click:'点击页面',browser_fill:'填写页面',browser_keys:'页面键盘操作',browser_screenshot:'采集画面',memory_search:'检索记忆',memory_read:'读取记忆',memory_propose:'提交记忆提案',files_list:'列出任务文件',files_read:'读取任务文件',files_write:'写入任务文件',shell_run:'运行任务命令',question_ask:'询问用户',artifacts_list:'列出任务附件',artifacts_download:'下载任务附件',artifacts_upload:'上传交付文件',devices_list:'查看执行电脑',tasks_list:'查看任务',task_start:'规划任务',task_status:'查看任务状态',other:'执行工具'};
 const statuses=new Set<ToolStepStatus>(['running','succeeded','failed','cancelled','result_unknown']);
@@ -37,6 +38,12 @@ export async function storeStep(tx:Tx,run:Doc,payload:Doc):Promise<ToolStep>{
     if(old.status!=='running')throw new ApiError(409,'step_finalized','已结束的步骤不能恢复执行或覆盖结果');
   }
   const saved=publicStep(await tx.put('steps',normalized,id));
-  await tx.emit('step.updated',saved,run.task_id,run.id);return saved;
+  await tx.emit('step.updated',saved,run.task_id,run.id);
+  const task=await tx.get('tasks',run.task_id);
+  if(task){
+    const outcome=saved.status==='succeeded'?'已完成':saved.status==='failed'||saved.status==='cancelled'?'未完成':saved.status==='result_unknown'?'结果未知':'进行中';
+    await emitTaskProgress(tx,task,run,'step','executing',`${saved.title}${outcome}`,null);
+  }
+  return saved;
 }
 export function publicEvent(event:Doc):Doc{return['step.updated','tool.receipt'].includes(event.type)?{...event,payload:publicStep(event.payload??{})}:event;}

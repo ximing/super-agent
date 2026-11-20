@@ -4,6 +4,7 @@ import { text,uuid,type Principal } from './auth.js';
 import { publicStep } from './steps.js';
 import { deviceEvidenceSatisfied, isIndependentObservation, observationTools } from './acceptance-evidence.js';
 import { proposeUserCorrection } from './memory-governance.js';
+import { emitTaskProgress } from './interaction.js';
 
 export const DEFAULT_DELIVERABLE='目标完成且有可核对结果';
 export async function graphLock(tx:Tx):Promise<void>{await tx.client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[`team-graph:${tx.tenant}`]);}
@@ -84,7 +85,8 @@ export class TeamService {
     const checkpoint=(await tx.all('checkpoints')).find(c=>c.run_id===run.id&&c.task_id===task.id&&c.checkpoint?.completed===true);
     const artifacts=(await tx.all('artifacts')).filter(a=>a.task_id===task.id&&a.run_id===run.id&&a.status==='ready');
     const saved=await tx.put('task_deliveries',{task_id:task.id,run_id:run.id,status:'pending',deliverables:deliverables(task.deliverables),checkpoint_id:checkpoint?.id??null,artifact_ids:artifacts.map(a=>a.id)});
-    await this.event(tx,'delivery.submitted',task,run,saved.id);return saved;
+    await this.event(tx,'delivery.submitted',task,run,saved.id);
+    await emitTaskProgress(tx,task,run,'delivery','reviewing','交付待核对',null);return saved;
   }
   async settled(tx:Tx,planId:string|null):Promise<void>{
     if(!planId)return;const tasks=(await tx.all('tasks')).filter(t=>t.plan_id===planId);if(!tasks.length)return;
@@ -138,6 +140,7 @@ export class TeamService {
     await tx.put('task_deliveries',{...delivery,status:verdict==='accept'?'accepted':verdict==='reject'?'rejected':'needs_input',review_id:review.id});
     const updated=await tx.put('tasks',{...task,status:verdict==='accept'?'succeeded':'awaiting_review',delivery_status:verdict==='accept'?'accepted':verdict==='reject'?'rejected':'needs_input',reason_code:verdict==='accept'?null:verdict==='reject'?'delivery_rejected':'delivery_needs_input'});
     await tx.emit('task.reviewed',review,task.id,run.id);await tx.emit('task.changed',publicTask(updated),task.id,run.id);
+    await emitTaskProgress(tx,updated,run,'review',verdict==='accept'?'accepted_delivery':verdict==='reject'?'failed':'waiting_input',verdict==='accept'?'交付已验收':verdict==='reject'?'交付未通过':'交付还需要补充',verdict==='accept'?null:'delivery_needs_input');
     if(verdict==='reject'){await this.event(tx,'delivery.rejected',updated,run,delivery.id,null,review.id);if(p.type==='client')await proposeUserCorrection(tx,updated,run,review.summary);}
     await this.refreshBlocked(tx);await this.settled(tx,task.plan_id??null);return review;
   }
