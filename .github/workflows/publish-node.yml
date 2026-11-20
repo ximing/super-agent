@@ -1,0 +1,47 @@
+name: Publish node package
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - apps/node/**
+      - packages/protocol/**
+      - packages/tool-broker/**
+      - packages/runtime-codex/**
+      - packages/runtime-grok/**
+      - scripts/prepare-node-publish.mjs
+      - .github/workflows/publish-node.yml
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global pnpm@10.30.3
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @super-agent/node... build
+      - run: pnpm --filter @super-agent/node test
+      - run: node scripts/prepare-node-publish.mjs "$RUNNER_TEMP/aimo-supa-agent-node"
+      - name: Publish when this version is not on npm
+        working-directory: ${{ runner.temp }}/aimo-supa-agent-node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "${name}@${version} is already on npm"
+            exit 0
+          fi
+          umask 077
+          printf '//registry.npmjs.org/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > .npmrc
+          trap 'rm -f .npmrc' EXIT
+          npm publish --access public --ignore-scripts

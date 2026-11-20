@@ -2,6 +2,17 @@
 
 节点与云端控制服务分开运行。它不启动 Docker、数据库或服务端；连接用户提供的云端 API。SQLite 仅保存执行设备必要的 inbox/outbox、去重、运行绑定和检查点，属于本地执行状态。
 
+## 安装已发布的包
+
+npm 上的包名是 `@aimo-supa-agent/node`。需要 Node.js 24.14 或更新版本。
+
+```sh
+npm install -g @aimo-supa-agent/node
+super-agent-node --help
+```
+
+发版由 GitHub Actions「Publish node package」执行。版本号取自本目录 `package.json`。同一个版本已经在 npm 上时，流水线会跳过，不会覆盖。要发出新包，先改版本号再推到 main，或手动运行该流水线。
+
 ## 构建与首次设置
 
 在仓库根目录 `pnpm install && pnpm build`，然后：

@@ -360,7 +360,7 @@ export class NodeAgent {
         modelId: context.run.model_id === 'configured-default' ? '' : context.run.model_id, cwd, checkpoint: context.checkpoint,
         tools: broker.definitions(), executeTool: (name, args) => { guard.beforeToolCall(); return broker.execute(name, args); }, signal: execution.controller.signal,
         budget: { beforeModelCall: () => guard.beforeModelCall(), noteUsage: usage => guard.noteUsage(usage) },
-        emit: event => this.runtimeEvent(execution, event), ...(bridge ? { mcp: { ...bridge, script: fileURLToPath(new URL('../../../packages/tool-broker/dist/mcp.js', import.meta.url)) } } : {}) };
+        emit: event => this.runtimeEvent(execution, event), ...(bridge ? { mcp: { ...bridge, script: fileURLToPath(import.meta.resolve('@super-agent/tool-broker/mcp')) } } : {}) };
       const result = await adapter.execute(runtimeContext);
       if (execution.stopReason) throw new DOMException('Stopped', 'AbortError');
       let evidenceError: string | undefined;
