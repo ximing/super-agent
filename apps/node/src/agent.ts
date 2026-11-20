@@ -22,8 +22,8 @@ import { MemoryCache } from './memory-cache.js';
 import { BudgetGuard } from './budget-guard.js';
 
 export const CONTROL_LINK_MISSES = 3;
-export function controlLinkShouldRestart(missedHeartbeats: number): boolean {
-  return missedHeartbeats >= CONTROL_LINK_MISSES;
+export function controlLinkShouldRestart(missedHeartbeats: number, activeRuns = 0): boolean {
+  return missedHeartbeats >= CONTROL_LINK_MISSES && activeRuns === 0;
 }
 
 type Obj = Record<string, unknown>;
@@ -143,7 +143,7 @@ export class NodeAgent {
   private readonly memoryCache = new MemoryCache();
   private readonly log: (message: string) => void;
   constructor(readonly config: NodeConfig, private readonly options: AgentOptions = {}) {
-    this.api = options.api ?? new NodeApi(config, fetch, () => this.network?.reset()); this.browser = options.browser ?? new BrowserActor();
+    this.api = options.api ?? new NodeApi(config, fetch, () => { if (this.active.size === 0) this.network?.reset(); }); this.browser = options.browser ?? new BrowserActor();
     this.browserReady = config.fake_runtime || !!options.browser;
     this.store = new LocalStore(join(config.data_dir, 'state.sqlite'));
     this.generation = (this.store.get<number>('capability_generation') ?? 0) + 1;
@@ -181,7 +181,7 @@ export class NodeAgent {
       catch (error) {
         this.log(`Node connection/action error: ${this.safeError(error)}`);
         // KeepAlive only restarts a dead process. A wedged proxy socket otherwise leaves this process up and the computer offline.
-        if (controlLinkShouldRestart(this.missedHeartbeats)) {
+        if (controlLinkShouldRestart(this.missedHeartbeats, this.active.size)) {
           this.log('Control link missed 3 heartbeats; exiting so launchd can start a fresh process');
           process.exitCode = 1;
           return;

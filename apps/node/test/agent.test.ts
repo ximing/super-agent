@@ -407,4 +407,5 @@ test('three missed heartbeats restart the process and fewer misses stay up', () 
   assert.equal(controlLinkShouldRestart(0), false);
   assert.equal(controlLinkShouldRestart(2), false);
   assert.equal(controlLinkShouldRestart(3), true);
+  assert.equal(controlLinkShouldRestart(3, 1), false);
 });

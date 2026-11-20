@@ -215,10 +215,12 @@ import SuperAgentCore
         var taskIds: [String] = []
         var reloadDevices = false
         var reloadQuestions = false
+        var reloadMessages = false
         for event in events where event.type != "cursor" {
             if let taskId = event.taskId, !taskIds.contains(taskId) { taskIds.append(taskId) }
             if event.type == "device.changed" { reloadDevices = true }
             if event.type == "notification.created" || event.type == "question.created" || event.type == "question.resolved" { reloadQuestions = true }
+            if event.type == "message.created" || event.type == "assistant.replied" || event.type.hasPrefix("plan.") { reloadMessages = true }
         }
         for id in taskIds {
             if let task: AgentTask = try? await api.request("/tasks/\(id)") {
@@ -226,6 +228,7 @@ import SuperAgentCore
                 else { tasks.insert(task, at: 0) }
             }
         }
+        if reloadMessages, let list: Items<Message> = try? await api.request("/messages") { messages = list.items }
         if reloadDevices, let list: Items<Device> = try? await api.request("/devices") { devices = list.items }
         if reloadQuestions, let list: Items<Question> = try? await api.request("/questions?status=open") {
             let previous = Set(questions.map(\.id))

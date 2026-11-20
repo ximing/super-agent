@@ -25,6 +25,11 @@ struct AssistantWorkspaceView: View {
         model.tasks.first { $0.id == selectedTaskID }
     }
 
+    private var awaitingAssistant: Bool {
+        if sending { return true }
+        return filteredMessages.last?.role == "user"
+    }
+
     private enum ThreadItem: Identifiable {
         case message(Message)
         case plan(AgentTask)
@@ -149,6 +154,17 @@ struct AssistantWorkspaceView: View {
                         }
                     }
 
+                    if awaitingAssistant {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("已收到，正在开始")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.leading, 37)
+                        .id("assistant-waiting")
+                    }
+
                     ForEach(pendingPlans) { plan in
                         VStack(alignment: .leading, spacing: 10) {
                             Text(plan.summary?.isEmpty == false ? plan.summary! : "这个方案还没开始")
@@ -179,6 +195,9 @@ struct AssistantWorkspaceView: View {
             .onChange(of: model.messages.count) { _, _ in
                 Task { await loadPlans() }
                 withAnimation { proxy.scrollTo("assistant-thread-bottom", anchor: .bottom) }
+            }
+            .onChange(of: awaitingAssistant) { _, waiting in
+                if waiting { withAnimation { proxy.scrollTo("assistant-waiting", anchor: .bottom) } }
             }
             .onChange(of: searchText) { _, _ in
                 proxy.scrollTo("assistant-thread-bottom", anchor: .bottom)
