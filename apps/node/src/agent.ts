@@ -766,9 +766,27 @@ export class NodeAgent {
     const decision = !(message as Message & { schedule_id?: string }).schedule_id && /^(确认|开始执行|确认执行|取消|拒绝|不要执行|取消执行)(?:\s+([a-f0-9-]{8,36}))?[。！!，,]?$/i.exec(message.content.trim());
     if (decision) {
       const matches = decision[2] ? pending.filter(p => p.id.startsWith(decision[2]!)) : pending;
+      const confirming = ['确认', '开始执行', '确认执行'].includes(decision[1]!);
       if (matches.length === 1) {
-        const target = matches[0]!, action = ['确认', '开始执行', '确认执行'].includes(decision[1]!) ? 'confirm' : 'reject';
+        const target = matches[0]!, action = confirming ? 'confirm' : 'reject';
         this.store.saveAssistant(message.id, { phase: action, plan_id: target.id, text: action === 'confirm' ? `已确认目标，开始执行计划 ${target.id.slice(0, 8)}。` : `已取消计划 ${target.id.slice(0, 8)}。`, usage: [] });
+      } else if (confirming && pending.length === 0) {
+        const history = (context.messages ?? []) as Array<{ id?: string; role?: string; content?: string }>;
+        const earlier = [...history].reverse().find(item => item.role === 'user' && item.id && item.id !== message.id && item.content && !/^(确认|开始执行|确认执行|取消|拒绝)/.test(item.content.trim()));
+        if (!earlier?.id || !earlier.content) {
+          this.store.saveAssistant(message.id, { phase: 'reply', text: '上一句目标没有留下来。请把要做的事再发一次，我会直接开始。', usage: [] });
+        } else {
+          const recovered = await this.api.request<{ id: string; state: string }>('/assistant/plans', { source_message_id: earlier.id }, headers());
+          if (recovered.state === 'committed') {
+            this.store.saveAssistant(message.id, { phase: 'reply', plan_id: recovered.id, text: `「${earlier.content.slice(0, 80)}」已经开始，没有重复创建。`, usage: [] });
+          } else {
+            const devices = await this.api.request<ListResponse<{ id: string }>>('/node/devices', undefined, headers());
+            const device = devices.items.find(item => item.id === this.config.device_id) ?? devices.items[0];
+            const engineName = this.config.assistant_engine ?? (this.config.codex.enabled ? 'codex' : 'grok');
+            if (!device) this.store.saveAssistant(message.id, { phase: 'reply', text: `还没有可用的执行电脑，所以没能开始「${earlier.content.slice(0, 80)}」。`, usage: [] });
+            else this.store.saveAssistant(message.id, { phase: 'start', plan_id: recovered.id, items: [withMessageMemoryScope({ item_key: 'primary', goal: earlier.content, title: earlier.content.slice(0, 80), deliverables: ['任务结果与执行说明'], engine: engineName, device_id: device.id }, (message as Message & { memory_scope?: unknown }).memory_scope)], text: `已按你刚才的目标开始：${earlier.content}`, usage: [] });
+          }
+        }
       } else {
         this.store.saveAssistant(message.id, { phase: 'reply', text: pending.length ? `请指定计划编号：${pending.map(p => `确认 ${p.id.slice(0, 8)}`).join('；')}。` : '当前没有等待确认的计划，请先说明希望完成的目标。', usage: [] });
       }
@@ -781,7 +799,8 @@ export class NodeAgent {
     const items = new Map<string, Obj>();
     const configEngine = this.config.assistant_engine ?? (this.config.codex.enabled ? 'codex' : 'grok');
     const modelId = (configEngine === 'codex' ? this.config.codex.model : this.config.grok.model) || 'configured-default';
-    const assistantCategory = (message as Message & { schedule_id?: string }).schedule_id ? 'proactive' as const : 'assistant' as const;
+    const scheduled = Boolean((message as Message & { schedule_id?: string }).schedule_id);
+    const assistantCategory = scheduled ? 'proactive' as const : 'assistant' as const;
     const messageScope = (message as Message & { memory_scope?: unknown }).memory_scope;
     let adapter: RuntimeAdapter;
     try { adapter = await this.runtime(configEngine); }
@@ -825,7 +844,7 @@ export class NodeAgent {
             return allBroker.execute(name, args);
           },
           budget: { beforeModelCall: () => assistantGuard.beforeModelCall(), noteUsage: usage => assistantGuard.noteUsage(usage) },
-          developerInstructions: 'You are the single coordinating assistant. Do not perform browser work yourself. Before doing any work, confirm the goal, deliverables, selected computer and engine with the user. Use devices_list and task_start only to propose stable item_key items with deliverables. These proposals MUST wait for a separate explicit human confirmation; this turn never dispatches tasks. If information is missing or uncertain, ask a concise clarification and do not call task_start. Use recent context to understand answers. For changes to a pending plan, propose a replacement and make the changed goal explicit. Ordinary conversation needs no task_start. Respect user-requested engine/device choices. Reply in the user language, concisely.',
+          developerInstructions: `You are the single coordinating assistant. Do not perform browser work yourself. A concrete user request is already authorized: call task_start once with the goal, deliverables, and the selected computer and engine, then say the work has started. Do not ask the user to confirm again. ${scheduled ? 'This message is a scheduled reminder: describe the goal and wait for a separate confirmation. Do not treat it as already authorized.' : 'Ask one short question and skip task_start only when a material choice is missing, such as which login, which of several conflicting goals, or a destructive action the user did not name.'} Use recent context to understand follow-ups, including a bare “确认” that refers to the previous goal. Ordinary conversation needs no task_start. Respect user-requested engine and device choices. Reply in the user language, concisely.`,
           emit: event => {
             if (event.type !== 'usage') return;
             const sample = { ...event.usage, occurred_at: event.usage.occurred_at ?? new Date().toISOString() };
@@ -834,13 +853,22 @@ export class NodeAgent {
           } });
         text = result.text;
       }
+      if (!scheduled && items.size === 0 && /确认后|请确认|回复[“"]确认/.test(text)) {
+        const devices = await this.api.request<ListResponse<{ id: string }>>('/node/devices', undefined, headers());
+        const preference = (message as Message & { execution_preference?: { engine?: string; device_id?: string } }).execution_preference;
+        const device = devices.items.find(item => item.id === (preference?.device_id ?? this.config.device_id)) ?? devices.items[0];
+        if (device) items.set('primary', withMessageMemoryScope({ item_key: 'primary', goal: message.content, title: message.content.slice(0, 80), deliverables: ['任务结果与执行说明'], engine: preference?.engine ?? configEngine, device_id: device.id }, messageScope));
+        text = text.replace(/确认后[\s\S]*$/u, '已按这个目标开始。').replace(/请确认[\s\S]*$/u, '已按这个目标开始。');
+      }
       if (items.size) {
         const devices = await this.api.request<ListResponse<{ id: string; name: string }>>('/node/devices', undefined, headers());
         const summary = describeProposals([...items.values()], devices.items);
-        text = `${text}\n\n${summary}\n\n回复“确认 ${plan.id.slice(0, 8)}”后开始；有修改或疑问可直接说明。`;
+        text = scheduled
+          ? `${text}\n\n${summary}\n\n这是定时提醒，点方案上的「开始」后才会执行。`
+          : `${text}\n\n${summary}\n\n已按这个目标开始。`;
       }
       // Persist before proposing/acknowledging so reconnect cannot duplicate plans or costs.
-      this.store.saveAssistant(message.id, { ...journal, phase: items.size ? 'propose' : 'reply', items: [...items.values()], text });
+      this.store.saveAssistant(message.id, { ...journal, phase: items.size ? (scheduled ? 'propose' : 'start') : 'reply', items: [...items.values()], text });
     } catch (error) {
       const stopped = error instanceof ApiFailure && error.status === 409 && ['budget_exhausted', 'budget_unknown', 'token_limit', 'model_call_limit', 'time_limit', 'tool_step_limit'].includes(error.code);
       const deadGrant = error instanceof Error && error.message.startsWith('grant_not_executable');
@@ -857,9 +885,15 @@ export class NodeAgent {
         payload.phase = 'reply'; payload.text = '上次目标理解已中断，没有自动重试模型或派发任务。请重新发送目标；已保留可取得的用量。';
         this.store.saveAssistant(item.messageId, payload);
       }
-      if (payload.phase === 'propose') {
+      if (payload.phase === 'propose' || payload.phase === 'start') {
         const plan = await this.api.request<{ state: string }>(`/assistant/plans/${String(payload.plan_id)}/propose`, { items: payload.items, summary: payload.text }, options);
-        if (plan.state !== 'awaiting_confirmation') {
+        if (payload.phase === 'start') {
+          const started = await this.api.request<{ state: string }>(`/assistant/plans/${String(payload.plan_id)}/start`, {}, options);
+          if (started.state && started.state !== 'committed') {
+            payload.phase = 'reply'; payload.text = '这个目标没有启动。请再发一次要做的事。';
+            this.store.saveAssistant(item.messageId, payload);
+          }
+        } else if (plan.state !== 'awaiting_confirmation') {
           payload.phase = 'reply'; payload.text = plan.state === 'committed' ? '该方案已经确认，未重复创建任务。' : '该方案已取消，没有创建或启动任务。';
           this.store.saveAssistant(item.messageId, payload);
         }

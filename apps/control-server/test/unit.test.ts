@@ -118,6 +118,18 @@ test('a message scope is part of the client id conflict and a proposed scope sur
   assert.deepEqual(publicTask(task!).memory_scope, proposed.items[0].memory_scope);
   assert.equal(publicTask(task!).budget, null);
   assert.match(proposed.summary, /实际生效的记忆范围/);
+  const direct = await put('messages', { role: 'user', content: '看下昨天美团股价走势', task_id: null, memory_scope: granted });
+  const directPlan = await put('plans', { source_message_id: direct.id, state: 'draft', tasks: [], items: [] });
+  await plans.propose(tx, directPlan.id, { summary: '查看股价', items: [{ item_key: 'quote', title: '股价', goal: direct.content, deliverables: ['开盘和收盘'], engine: 'codex', device_id: device.id }] });
+  const started = await plans.startFromSource(tx, directPlan.id);
+  assert.equal(started.state, 'committed');
+  assert.equal(started.confirmed_by_message_id, direct.id);
+  const reminder = await put('messages', { role: 'user', content: '提醒后确认', task_id: null, schedule_id: 'sched', memory_scope: granted });
+  const reminderPlan = await put('plans', { source_message_id: reminder.id, state: 'draft', tasks: [], items: [] });
+  await plans.propose(tx, reminderPlan.id, { summary: '提醒', items: [{ item_key: 'remind', title: '提醒', goal: reminder.content, deliverables: ['结果'], engine: 'codex', device_id: device.id }] });
+  await assert.rejects(() => plans.startFromSource(tx, reminderPlan.id), (error: unknown) => error instanceof ApiError && error.code === 'confirmation_required');
+  const clicked = await plans.confirmByClient(tx, reminderPlan.id);
+  assert.equal(clicked.state, 'committed');
   const widePlan = await put('plans', { source_message_id: source.id, state: 'draft', tasks: [], items: [] });
   await assert.rejects(() => plans.propose(tx, widePlan.id, { summary: '扩大范围', items: [{ item_key: 'wide', title: '扩大', goal: '读取另一个项目', deliverables: ['结果'], engine: 'codex', device_id: device.id, memory_scope: { project: 'beta', sites: ['b.example'], global_preference: true } }] }), (error: unknown) => error instanceof ApiError && error.code === 'memory_scope_exceeds_grant');
   const childPlan = await put('plans', { source_message_id: source.id, state: 'draft', tasks: [], items: [] });

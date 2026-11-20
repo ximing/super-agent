@@ -8,6 +8,7 @@ struct AssistantWorkspaceView: View {
     @State private var sending = false
     @State private var dispatching = false
     @State private var memoryScope = MemoryScopeDraft()
+    @State private var pendingPlans: [ChatPlan] = []
 
     init(searchText: String, selectedTaskID: Binding<String?>) {
         self.searchText = searchText
@@ -22,6 +23,52 @@ struct AssistantWorkspaceView: View {
 
     private var selectedTask: AgentTask? {
         model.tasks.first { $0.id == selectedTaskID }
+    }
+
+    private enum ThreadItem: Identifiable {
+        case message(Message)
+        case plan(AgentTask)
+        var id: String {
+            switch self {
+            case .message(let message): return "message-\(message.id)"
+            case .plan(let task): return "plan-\(task.id)"
+            }
+        }
+    }
+
+    private var thread: [ThreadItem] {
+        let messages = filteredMessages.map { (id: $0.id, createdAt: $0.createdAt) }
+        let plan = searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? selectedTask.map { (id: $0.id, createdAt: $0.createdAt) }
+            : nil
+        let byMessage = Dictionary(uniqueKeysWithValues: filteredMessages.map { ($0.id, $0) })
+        return assistantThreadSlots(messages: messages, plan: plan).compactMap { slot in
+            switch slot.kind {
+            case .message: return byMessage[slot.id].map(ThreadItem.message)
+            case .plan: return selectedTask.map(ThreadItem.plan)
+            }
+        }
+    }
+
+    private func loadPlans() async {
+        guard !model.isDemo else { pendingPlans = []; return }
+        if let result: Items<ChatPlan> = try? await model.api.request("/assistant/plans?state=awaiting_confirmation") {
+            pendingPlans = result.items
+        }
+    }
+
+    private func decide(_ plan: ChatPlan, _ action: String) async {
+        await model.operation {
+            let _: JSONValue = try await model.api.request("/plans/\(plan.id)/actions", method: "POST", body: ["action": .string(action)], version: plan.version, idempotencyKey: UUID().uuidString)
+            await loadPlans()
+            await model.refresh()
+        }
+    }
+
+    private func computerLabel(_ task: AgentTask) -> String {
+        if let name = task.deviceName, !name.isEmpty { return name }
+        if let id = task.deviceId, let device = model.devices.first(where: { $0.id == id }) { return device.name }
+        return task.deviceId == nil ? "等待分配电脑" : "已指定电脑"
     }
 
     private var draftIsEmpty: Bool {
@@ -91,13 +138,33 @@ struct AssistantWorkspaceView: View {
                         }
                     }
 
-                    ForEach(filteredMessages) { message in
-                        AssistantMessageRow(message: message).id(message.id)
+                    ForEach(thread) { item in
+                        switch item {
+                        case .message(let message):
+                            AssistantMessageRow(message: message).id(message.id)
+                        case .plan(let task):
+                            AssistantPlanOutline(task: task, tasks: model.tasks, computer: computerLabel(task), selectedTaskID: $selectedTaskID)
+                                .padding(.leading, 37)
+                                .id("plan-\(task.id)")
+                        }
                     }
 
-                    if let task = selectedTask {
-                        AssistantPlanOutline(task: task, tasks: model.tasks, selectedTaskID: $selectedTaskID)
-                            .padding(.leading, 37)
+                    ForEach(pendingPlans) { plan in
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(plan.summary?.isEmpty == false ? plan.summary! : "这个方案还没开始")
+                                .font(.callout)
+                                .fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 8) {
+                                Button("开始") { Task { await decide(plan, "confirm") } }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                Button("取消") { Task { await decide(plan, "cancel") } }
+                                    .controlSize(.small)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                        .id("plan-action-\(plan.id)")
                     }
 
                     Color.clear.frame(height: 1).id("assistant-thread-bottom")
@@ -108,8 +175,9 @@ struct AssistantWorkspaceView: View {
                 .padding(.bottom, 20)
                 .frame(maxWidth: .infinity)
             }
-            .onAppear { proxy.scrollTo("assistant-thread-bottom", anchor: .bottom) }
+            .onAppear { Task { await loadPlans() }; proxy.scrollTo("assistant-thread-bottom", anchor: .bottom) }
             .onChange(of: model.messages.count) { _, _ in
+                Task { await loadPlans() }
                 withAnimation { proxy.scrollTo("assistant-thread-bottom", anchor: .bottom) }
             }
             .onChange(of: searchText) { _, _ in
@@ -347,6 +415,13 @@ struct AssistantWorkspaceView: View {
     }
 }
 
+private struct ChatPlan: Decodable, Identifiable {
+    let id: String
+    let summary: String?
+    let version: Int
+    let state: String
+}
+
 private struct AssistantMessageRow: View {
     let message: Message
 
@@ -401,6 +476,7 @@ private struct AssistantMessageRow: View {
 private struct AssistantPlanOutline: View {
     let task: AgentTask
     let tasks: [AgentTask]
+    let computer: String
     @Binding var selectedTaskID: String?
 
     private var entries: [TaskTreeEntry] {
@@ -477,7 +553,7 @@ private struct AssistantPlanOutline: View {
 
             HStack(spacing: 6) {
                 Image(systemName: "desktopcomputer")
-                Text(task.deviceName ?? "等待分配电脑")
+                Text(computer)
                 Text("/")
                 Text(task.engine.rawValue.capitalized)
             }

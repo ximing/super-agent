@@ -204,6 +204,7 @@ test('explicit FakeRuntime proposals copy message memory scope without inventing
     if (path === '/assistant/context') return { messages: [], tasks: [], pending_plans: [] };
     if (path === '/assistant/plans') return { id: path, state: 'draft', tasks: [] };
     if (path.endsWith('/propose')) { const payload = body as { items: { memory_scope?: unknown }[]; summary?: string }; proposals.push({ id: '', items: payload.items, summary: String(payload.summary ?? '') }); return { state: 'awaiting_confirmation' }; }
+    if (path.endsWith('/start')) return { state: 'committed' };
     if (path === '/node/devices') return { items: [{ id: 'device1', name: 'Test Mac' }] };
     if (path === '/assistant/lease/claim' || path === '/assistant/lease/renew') return { epoch: 'epoch-1', lease_valid_for_ms: 60_000 };
     if (path === '/assistant/budget/reserve') { reserves.push(body); return {}; }

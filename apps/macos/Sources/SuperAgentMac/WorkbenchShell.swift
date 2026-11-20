@@ -213,14 +213,6 @@ private struct WorkbenchSidebar: View {
         model.questions.count + model.tasks.filter { $0.status == "awaiting_review" }.count
     }
 
-    private var recentSelection: Binding<String?> {
-        Binding(get: { section == .tasks ? selectedTaskID : nil }, set: { value in
-            guard let value else { return }
-            selectedTaskID = value
-            section = .tasks
-        })
-    }
-
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 9) {
@@ -242,20 +234,29 @@ private struct WorkbenchSidebar: View {
                 .padding(.bottom, 3)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            List(WorkspaceSection.allCases, selection: $section) { item in
-                HStack(spacing: 8) {
-                    Label(item.rawValue, systemImage: item.icon)
-                    Spacer()
-                    if item == .questions && pendingCount > 0 {
-                        Text("\(pendingCount)").font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 2) {
+                ForEach(WorkspaceSection.allCases) { item in
+                    Button { section = item } label: {
+                        HStack(spacing: 8) {
+                            Label(item.rawValue, systemImage: item.icon)
+                            Spacer(minLength: 0)
+                            if item == .questions && pendingCount > 0 {
+                                Text("\(pendingCount)").font(.caption).foregroundStyle(section == item ? Color.white.opacity(0.85) : .secondary)
+                            }
+                        }
+                        .font(.callout)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(section == item ? Color.white : Color.primary)
+                        .background(section == item ? Palette.accent : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(item.rawValue)
                 }
-                .padding(.vertical, 1)
-                .tag(item)
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-            .frame(height: 235)
+            .padding(.horizontal, 8)
 
             Text("最近任务")
                 .font(.caption2)
@@ -273,20 +274,33 @@ private struct WorkbenchSidebar: View {
                     .padding(.vertical, 12)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                List(selection: recentSelection) {
+                VStack(spacing: 2) {
                     ForEach(model.tasks.prefix(5)) { task in
-                        HStack(spacing: 8) {
-                            Circle().fill(statusColor(task.status)).frame(width: 5, height: 5)
-                            Text(task.title).lineLimit(1).font(.callout)
-                            Spacer()
+                        let selected = section == .tasks && selectedTaskID == task.id
+                        Button {
+                            selectedTaskID = task.id
+                            section = .tasks
+                        } label: {
+                            HStack(spacing: 8) {
+                                Circle().fill(statusColor(task.status)).frame(width: 5, height: 5)
+                                Text(task.title).lineLimit(1)
+                                Spacer(minLength: 0)
+                            }
+                            .font(.callout)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .foregroundStyle(selected ? Color.white : Color.primary)
+                            .background(selected ? Palette.accent : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+                            .contentShape(Rectangle())
                         }
-                        .tag(task.id)
+                        .buttonStyle(.plain)
                     }
                 }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 8)
             }
 
+            Spacer(minLength: 0)
             Divider()
             VStack(spacing: 0) {
                 Button { section = .devices } label: {
@@ -336,7 +350,7 @@ private struct WorkbenchSidebar: View {
                 .padding(.bottom, 10)
             }
         }
-        .frame(maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .sheet(isPresented: $showSettings) { WorkspaceSettingsSheet() }
     }
 

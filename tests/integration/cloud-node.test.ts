@@ -231,31 +231,13 @@ test('cloud PostgreSQL + selected assistant Mac: durable plan routes task to use
     const message = await client<Message>(app, owner.access_token, '/messages', 'POST', { client_message_id: randomUUID(), text: 'Inspect the controlled website on the second computer', execution_preference: { engine: 'grok', device_id: second.config.device_id, selection_mode: 'pinned' } });
     for (let i = 0; i < 40 && !assistant.store.get(`assistant:${message.id}`); i++) { await second.api.request('/node/heartbeat', {}); await assistant.tick(); await sleep(40); }
     assert.ok(assistant.store.get(`assistant:${message.id}`));
-    let tasks = (await client<ListResponse<Task>>(app, owner.access_token, '/tasks')).items;
-    assert.equal(tasks.length, 0, 'Ordinary chat must not execute before goal confirmation');
-    const plans = (await client<ListResponse<{ id: string; items: {deliverables:string[]}[]; summary:string }>>(app, owner.access_token, '/assistant/plans?state=awaiting_confirmation')).items;
-    assert.equal(plans.length,1); assert.ok(plans[0]!.summary.includes('引擎：grok')); assert.ok(plans[0]!.summary.includes(second.config.device_id!.slice(0,8)));
-    assert.deepEqual(plans[0]!.items[0]!.deliverables,['任务结果与执行说明']);
-    await assistant.stop(); assistant.close();
-    assistant = new NodeAgent(first.config,{api:first.api,log:()=>{}});
-    const confirmation = await client<Message>(app, owner.access_token, '/messages', 'POST', {client_message_id:randomUUID(),text:`确认 ${plans[0]!.id.slice(0,8)}`});
-    for (let i = 0; i < 40 && !assistant.store.get(`assistant:${confirmation.id}`); i++) { await second.api.request('/node/heartbeat', {}); await assistant.tick(); await sleep(40); }
-    tasks = (await client<ListResponse<Task>>(app, owner.access_token, '/tasks')).items;
-    assert.equal(tasks.length,1); assert.equal(tasks[0]!.device_id,second.config.device_id); assert.equal(tasks[0]!.engine,'grok');
-    await assistant.tick(); await sleep(50);
-    assert.equal((await client<ListResponse<Task>>(app, owner.access_token, '/tasks')).items.length, 1);
-    // Replayed confirm after a lost response returns the same task, never another run.
-    const replay = await client<{tasks:Task[]}>(app,owner.access_token,`/assistant/plans/${plans[0]!.id}/confirm`,'POST',{source_message_id:confirmation.id});
-    assert.equal(replay.tasks[0]!.id,tasks[0]!.id);
-    const revised = await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'Prepare another inspection proposal'});
-    for(let i=0;i<40&&!assistant.store.get(`assistant:${revised.id}`);i++){await second.api.request('/node/heartbeat',{});await assistant.tick();await sleep(40);}
-    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,1);
-    const cancelled = await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'取消'});
-    for(let i=0;i<40&&!assistant.store.get(`assistant:${cancelled.id}`);i++){await second.api.request('/node/heartbeat',{});await assistant.tick();await sleep(40);}
-    assert.equal((await client<ListResponse<{id:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation')).items.length,0);
-    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,1);
+    const tasks = (await client<ListResponse<Task>>(app, owner.access_token, '/tasks')).items;
+    assert.equal(tasks.length, 1, 'A concrete assignment starts without a second confirmation message');
+    assert.equal(tasks[0]!.device_id, second.config.device_id);
+    assert.equal(tasks[0]!.engine, 'grok');
+    assert.equal((await client<ListResponse<{ id: string }>>(app, owner.access_token, '/assistant/plans?state=awaiting_confirmation')).items.length, 0);
     const messages = (await client<ListResponse<Message>>(app, owner.access_token, '/messages')).items;
-    assert.equal(messages.filter(m => m.role === 'assistant').length, 4);
+    assert.equal(messages.filter(m => m.role === 'assistant').length, 1);
     assert.ok(log.some(r => r.path === '/v1/node/devices'));
     await first.api.request('/node/heartbeat', {});
     await second.api.request('/node/heartbeat', {});
@@ -333,7 +315,7 @@ test('cloud assistant clarification keeps conversation context and proposes work
     let turns=0;
     // Explicit scripted runtime fixture: tests assistant plumbing, never claims model quality.
     agent=new NodeAgent(paired.config,{api:paired.api,log:()=>{},runtimeFactory:async()=>({execute:async(context)=>{
-      turns++;assert.match(context.developerInstructions??'',/separate explicit human confirmation/);
+      turns++;assert.match(context.developerInstructions??'',/already authorized/);
       if(turns===1)return{text:'请明确要检查哪个网站？'};
       assert.match(context.goal,/请明确要检查哪个网站/);assert.match(context.goal,/Inspect a company website/);assert.match(context.goal,/portal.example.invalid/);
       await context.executeTool('task_start',{item_key:'inspect',goal:'Inspect https://portal.example.invalid',deliverables:['检查结果'],engine:'codex',device_id:paired.config.device_id});
@@ -346,8 +328,8 @@ test('cloud assistant clarification keeps conversation context and proposes work
     const answer=await client<Message>(app,owner.access_token,'/messages','POST',{client_message_id:randomUUID(),text:'https://portal.example.invalid'});
     for(let i=0;i<40&&!agent.store.get(`assistant:${answer.id}`);i++){await agent.tick();await sleep(40);}
     assert.ok(agent.store.get(`assistant:${answer.id}`));assert.equal(turns,2);
-    assert.equal((await client<ListResponse<{id:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation')).items.length,1);
-    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,0);
+    assert.equal((await client<ListResponse<{id:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation')).items.length,0);
+    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,1);
   }finally{if(agent){await agent.stop();agent.close();}await app.close();rmSync(directory,{recursive:true,force:true});}
 });
 
@@ -415,10 +397,10 @@ test('cloud assistant retries a durable successful proposal after usage transpor
     for(let i=0;i<80&&!agent.store.get(`assistant:${message.id}`);i++){await agent.tick();await sleep(40);}
     assert.ok(agent.store.get(`assistant:${message.id}`));assert.equal(turns,1);assert.equal(failUsage,false);
     const pending=await client<ListResponse<{summary:string}>>(app,owner.access_token,'/assistant/plans?state=awaiting_confirmation');
-    assert.equal(pending.items.length,1);assert.match(pending.items[0]!.summary,/脚本方案已准备/);
+    assert.equal(pending.items.length,0);
     const replies=(await client<ListResponse<Message>>(app,owner.access_token,'/messages')).items.filter(m=>m.role==='assistant');
-    assert.equal(replies.length,1);assert.match(replies[0]!.content,/脚本方案已准备/);assert.doesNotMatch(replies[0]!.content,/未完成/);
+    assert.equal(replies.length,1);assert.match(replies[0]!.content,/脚本方案已准备/);assert.match(replies[0]!.content,/已按这个目标开始/);assert.doesNotMatch(replies[0]!.content,/未完成/);
     assert.equal((await client<CostSummary>(app,owner.access_token,'/costs/summary')).request_count,1);
-    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,0);
+    assert.equal((await client<ListResponse<Task>>(app,owner.access_token,'/tasks')).items.length,1);
   }finally{if(agent){await agent.stop();agent.close();}await app.close();rmSync(directory,{recursive:true,force:true});}
 });

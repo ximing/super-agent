@@ -150,7 +150,9 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('POST','/tasks/:id/reviews','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{await graphLock(tx);const task=await tx.need('tasks',uuid(params(r).id),true);matchVersion(r.headers['if-match'],task);return service.team.review(tx,p,task.id,body(r));}));
   route('POST','/plans/:id/actions','client',async(r,p,tx)=>idempotent(r,p,tx,async()=>{
     await graphLock(tx);const plan=await tx.need('plans',uuid(params(r).id),true);matchVersion(r.headers['if-match'],plan);
-    if(body(r).action!=='cancel')throw new ApiError(422,'invalid_action','计划仅支持取消操作');
+    const action=text(body(r).action,'action',20);
+    if(action==='confirm')return plans.confirmByClient(tx,plan.id);
+    if(action!=='cancel')throw new ApiError(422,'invalid_action','计划只能开始或取消');
     await tx.put('plans',{...plan,cancellation_requested:true,state:['draft','awaiting_confirmation'].includes(plan.state)?'rejected':plan.state,execution_status:'cancelled'});
     if(plan.source_message_id)await tx.put('inbox_receipts',{source_message_id:plan.source_message_id},plan.source_message_id);
     const taskIds=(await tx.all('tasks')).filter(t=>t.plan_id===plan.id&&!['succeeded','failed','cancelled'].includes(t.status)).map(t=>t.id);
@@ -292,6 +294,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('GET','/assistant/plans/:id','device',async(r,p,tx)=>{await assistant(r,p,tx);return tx.need('plans',uuid(params(r).id));});
   route('POST','/assistant/plans/:id/propose','device',async(r,p,tx)=>{await assistant(r,p,tx);return plans.propose(tx,params(r).id,body(r));});
   route('POST','/assistant/plans/:id/confirm','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return plans.confirm(tx,params(r).id,body(r).source_message_id);});
+  route('POST','/assistant/plans/:id/start','device',async(r,p,tx)=>{await assistant(r,p,tx);return plans.startFromSource(tx,params(r).id);});
   route('POST','/assistant/plans/:id/reject','either',async(r,p,tx)=>{if(p.type==='device')await assistant(r,p,tx);return plans.reject(tx,params(r).id,body(r).source_message_id);});
   route('POST','/assistant/plans/:id/commit','device',async(r,p,tx)=>{await assistant(r,p,tx);const plan=await tx.need('plans',uuid(params(r).id));if(plan.state==='committed')return plan;throw new ApiError(409,'confirmation_required','请先提交目标方案并取得真实用户确认');});
   route('GET','/assistant/context','device',async(r,p,tx)=>{await assistant(r,p,tx);return{messages:(await tx.all('messages')).slice(-20),tasks:(await tx.all('tasks')).filter(t=>!['succeeded','failed','cancelled'].includes(t.status)),pending_plans:(await tx.all('plans')).filter(plan=>plan.state==='awaiting_confirmation'),pending_events:(await tx.all('coordinator_events')).filter(e=>e.status==='pending').map(publicCoordinatorEvent)};});

@@ -49,23 +49,46 @@ export class PlanService {
     if(!addressed&&!unambiguous)throw new ApiError(409,'confirmation_required',pending.length>1?`请明确回复“确认 ${prefix}”或“取消 ${prefix}”`:'需要明确的用户确认或拒绝');
     return message;
   }
-  async confirm(tx:Tx,id:string,messageId:string):Promise<Doc>{
-    await graphLock(tx);const plan=await tx.need('plans',uuid(id),true);
-    if(plan.cancellation_requested)throw new ApiError(409,'plan_cancelled','方案已被用户取消，不能再确认');
-    if(plan.state==='committed')return plan;
-    if(plan.state!=='awaiting_confirmation')throw new ApiError(409,'plan_not_confirmable','计划尚未等待确认或已经拒绝');
-    const message=await this.decision(tx,plan,messageId,'confirm'),tasks:Doc[]=[],ids=new Map<string,string>(plan.items.map((item:Doc)=>[item.item_key,randomUUID()]));
+  private async materialize(tx:Tx,plan:Doc,message:Doc):Promise<Doc>{
+    const tasks:Doc[]=[],ids=new Map<string,string>(plan.items.map((item:Doc)=>[item.item_key,randomUUID()]));
     const rootId=plan.source_message_id??plan.root_source_message_id;
     const root=rootId?await tx.get('messages',rootId):null;
     applyPlanScopes(plan.items,asMemoryScope(root?.memory_scope));
     validatePlanGraph(plan.items);
-    for(const item of plan.items)tasks.push(await this.service.createTask(tx,{...item,plan_id:plan.id,source_message_id:plan.source_message_id??plan.root_source_message_id,confirmation_message_id:message.id},ids.get(item.item_key)));
+    for(const item of plan.items)tasks.push(await this.service.createTask(tx,{...item,plan_id:plan.id,source_message_id:rootId,confirmation_message_id:message.id},ids.get(item.item_key)));
     for(let index=0;index<tasks.length;index++){const item=plan.items[index];tasks[index]=await tx.put('tasks',{...tasks[index],parent_task_id:item.parent_item_key?ids.get(item.parent_item_key):null});}
     for(let index=0;index<tasks.length;index++){const item=plan.items[index],task=tasks[index]!;tasks[index]=await this.service.team.attach(tx,task,task.parent_task_id,(item.depends_on_keys??[]).map((key:string)=>ids.get(key)));}
     await this.service.team.refreshBlocked(tx);
     const saved=await tx.put('plans',{...plan,state:'committed',tasks,confirmed_by_message_id:message.id});
     if(plan.source_message_id)await tx.put('inbox_receipts',{source_message_id:plan.source_message_id},plan.source_message_id);await tx.put('inbox_receipts',{source_message_id:message.id},message.id);
     await tx.emit('plan.confirmed',{id:saved.id,tasks:tasks.map(t=>t.id),version:saved.version});return saved;
+  }
+  async confirm(tx:Tx,id:string,messageId:string):Promise<Doc>{
+    await graphLock(tx);const plan=await tx.need('plans',uuid(id),true);
+    if(plan.cancellation_requested)throw new ApiError(409,'plan_cancelled','方案已被用户取消，不能再确认');
+    if(plan.state==='committed')return plan;
+    if(plan.state!=='awaiting_confirmation')throw new ApiError(409,'plan_not_confirmable','计划尚未等待确认或已经拒绝');
+    return this.materialize(tx,plan,await this.decision(tx,plan,messageId,'confirm'));
+  }
+  /** A clear user assignment is the authorization. Scheduled reminders and event follow-ups still wait. */
+  async startFromSource(tx:Tx,id:string):Promise<Doc>{
+    await graphLock(tx);const plan=await tx.need('plans',uuid(id),true);
+    if(plan.cancellation_requested)throw new ApiError(409,'plan_cancelled','方案已被用户取消，不能再确认');
+    if(plan.state==='committed')return plan;
+    if(plan.state!=='awaiting_confirmation')throw new ApiError(409,'plan_not_confirmable','计划尚未等待确认或已经拒绝');
+    if(!plan.source_message_id||plan.source_event_id)throw new ApiError(409,'confirmation_required','定时提醒和失败后的后续方案仍要单独确认');
+    const message=await this.source(tx,plan.source_message_id);
+    if(message.schedule_id)throw new ApiError(409,'confirmation_required','定时提醒仍要单独确认');
+    return this.materialize(tx,plan,message);
+  }
+  /** A button click by the signed-in user starts a plan that is still waiting. It does not send a chat message. */
+  async confirmByClient(tx:Tx,id:string):Promise<Doc>{
+    await graphLock(tx);const plan=await tx.need('plans',uuid(id),true);
+    if(plan.cancellation_requested)throw new ApiError(409,'plan_cancelled','方案已被用户取消');
+    if(plan.state==='committed')return plan;
+    if(plan.state!=='awaiting_confirmation')throw new ApiError(409,'plan_not_confirmable','计划当前不能开始');
+    const message=plan.source_message_id?await tx.need('messages',plan.source_message_id):{id:plan.id,role:'user'};
+    return this.materialize(tx,plan,message);
   }
   async reject(tx:Tx,id:string,messageId:string):Promise<Doc>{
     await graphLock(tx);const plan=await tx.need('plans',uuid(id),true);if(plan.state==='rejected')return plan;if(plan.state!=='awaiting_confirmation')throw new ApiError(409,'plan_not_rejectable','计划当前不能拒绝');
