@@ -40,6 +40,20 @@ test('proxy configuration fails closed on old Node, unsupported SOCKS/PAC or inv
   await assert.rejects(configureNetwork({proxy_url:'http://test-user:test-password@proxy.invalid:8080'},{env,setGlobalProxy:()=>{throw new Error('test-password');}}),error=>{assert.doesNotMatch(String(error),/test-user|test-password/);return true;});
 });
 
+test('reset replaces a wedged proxy dispatcher and leaves the process proxy in place', async () => {
+  let called = 0, undone = 0;
+  const env: NodeJS.ProcessEnv = {};
+  const setup = await configureNetwork({ proxy_url: 'http://127.0.0.1:7890' }, { env, platform: 'linux', setGlobalProxy: () => { called++; return () => { undone++; }; } });
+  assert.equal(called, 1);
+  setup.reset();
+  assert.equal(called, 2);
+  assert.equal(undone, 1);
+  assert.equal(env.HTTPS_PROXY, 'http://127.0.0.1:7890/');
+  setup.restore();
+  assert.equal(undone, 2);
+  assert.deepEqual(env, {});
+});
+
 test('setup configures fetch dispatcher and actual spawned child inherits the same proxy and local bypass',async()=>{
   let dispatcherConfigured=false;
   const setup=await configureNetwork({proxy_url:'http://127.0.0.1:7890'},{env:process.env,platform:'linux',setGlobalProxy:()=>{dispatcherConfigured=true;return()=>{};}});

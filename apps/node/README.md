@@ -38,7 +38,7 @@ launchctl print "gui/$(id -u)/com.superagent.node"
 
 本机 `browser.enabled=false` 时不启动 CSI、不列出浏览器工具。启用浏览器时，能力探测只读 CSI `/status`，必须扩展连接才广告 browser；文件/记忆任务不依赖它。真实模式每次 `start` 会检查已有 `~/.csi/bin/csi` 的可执行权限并调用官方幂等 `start`。不会自动 install、stop 或 restart。CSI 缺失或启动失败时只输出固定诊断，节点仍可处理非浏览器任务；FakeRuntime 完全跳过此步骤。CSI 安装器不注册登录自启，节点启动检查负责补上重启后的启动；扩展和已登录的 Chrome 仍需可用。
 
-保持正式 Mac 的用户会话登录、Chrome 扩展运行、网络与所需系统代理可用，并按需要配置系统电源设置避免任务期间休眠。LaunchAgent 属于用户登录会话，不能替代登录界面中的桌面会话。日志位于 `~/.super-agent/launchd/node.log` 和 `node-error.log`。
+保持正式 Mac 的用户会话登录、Chrome 扩展运行、网络与所需系统代理可用，并按需要配置系统电源设置避免任务期间休眠。LaunchAgent 属于用户登录会话，不能替代登录界面中的桌面会话。日志位于 `~/.super-agent/launchd/node.log` 和 `node-error.log`。控制请求超时会丢掉卡住的代理连接再试；连续 3 次心跳失败则进程退出，已安装的 KeepAlive 会拉起新进程。这样进程不会一直活着却让电脑显示离线。
 
 若用户要停止并取消该 Mac 的自动启动，可自行执行：
 

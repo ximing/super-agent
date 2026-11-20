@@ -21,6 +21,11 @@ import { readReviewArtifact, readReviewImage, reviewDelivery } from './coordinat
 import { MemoryCache } from './memory-cache.js';
 import { BudgetGuard } from './budget-guard.js';
 
+export const CONTROL_LINK_MISSES = 3;
+export function controlLinkShouldRestart(missedHeartbeats: number): boolean {
+  return missedHeartbeats >= CONTROL_LINK_MISSES;
+}
+
 type Obj = Record<string, unknown>;
 interface PendingPlan { id: string; state: string; items: Obj[]; summary: string; source_message_id: string }
 interface AssistantContext { messages: Message[]; tasks: Task[]; pending_plans: PendingPlan[] }
@@ -134,10 +139,11 @@ export class NodeAgent {
   private network?: NetworkSetup;
   private generation: number;
   private lastHeartbeat = 0;
+  private missedHeartbeats = 0;
   private readonly memoryCache = new MemoryCache();
   private readonly log: (message: string) => void;
   constructor(readonly config: NodeConfig, private readonly options: AgentOptions = {}) {
-    this.api = options.api ?? new NodeApi(config); this.browser = options.browser ?? new BrowserActor();
+    this.api = options.api ?? new NodeApi(config, fetch, () => this.network?.reset()); this.browser = options.browser ?? new BrowserActor();
     this.browserReady = config.fake_runtime || !!options.browser;
     this.store = new LocalStore(join(config.data_dir, 'state.sqlite'));
     this.generation = (this.store.get<number>('capability_generation') ?? 0) + 1;
@@ -171,7 +177,16 @@ export class NodeAgent {
     await this.recover();
     this.log(`Node online (${this.config.fake_runtime ? 'EXPLICIT FAKE TEST MODE' : 'local real runtimes'}), device=${this.config.device_id}`);
     while (!this.controller.signal.aborted) {
-      try { await this.tick(); } catch (error) { this.log(`Node connection/action error: ${this.safeError(error)}`); }
+      try { await this.tick(); }
+      catch (error) {
+        this.log(`Node connection/action error: ${this.safeError(error)}`);
+        // KeepAlive only restarts a dead process. A wedged proxy socket otherwise leaves this process up and the computer offline.
+        if (controlLinkShouldRestart(this.missedHeartbeats)) {
+          this.log('Control link missed 3 heartbeats; exiting so launchd can start a fresh process');
+          process.exitCode = 1;
+          return;
+        }
+      }
       await sleep(this.config.poll_interval_ms, this.controller.signal).catch(() => undefined);
     }
   }
@@ -191,7 +206,16 @@ export class NodeAgent {
     for (const command of this.store.pendingCommands()) await this.handleCommand(command, true);
   }
   async tick(): Promise<void> {
-    if (performance.now() - this.lastHeartbeat > 10_000) { await this.api.request('/node/heartbeat', {}); this.lastHeartbeat = performance.now(); }
+    if (performance.now() - this.lastHeartbeat > 10_000) {
+      try {
+        await this.api.request('/node/heartbeat', {});
+        this.lastHeartbeat = performance.now();
+        this.missedHeartbeats = 0;
+      } catch (error) {
+        this.missedHeartbeats += 1;
+        throw error;
+      }
+    }
     await this.flush();
     await this.syncMemoryInvalidations();
     const commands = await this.api.request<ListResponse<WireMessage>>('/node/commands');

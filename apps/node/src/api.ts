@@ -4,10 +4,14 @@ import type { NodeConfig } from './config.js';
 export class ApiFailure extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
 }
+export function transportFailed(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === 'TimeoutError' || error.name === 'AbortError' || error.message === 'fetch failed' || error.message.startsWith('The operation was aborted');
+}
 export class NodeApi {
   private token = '';
   private expires = 0;
-  constructor(readonly config: NodeConfig, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(readonly config: NodeConfig, private readonly fetcher: typeof fetch = fetch, private readonly onTransportFailure: () => void = () => {}) {}
   async authenticate(): Promise<void> {
     if (!this.config.device_id) throw new Error('Node is not paired; run pair and claim the code in your client');
     const challenge = await this.raw<{ nonce: string; challenge: string }>('/devices/auth/challenge', { device_id: this.config.device_id });
@@ -26,10 +30,16 @@ export class NodeApi {
   }
   async raw<T = Record<string, unknown>>(path: string, body?: unknown, options: { token?: string; runTicket?: string; assistantEpoch?: string; method?: string; idempotencyKey?: string; version?: number } = {}): Promise<T> {
     if (options.version !== undefined && (!Number.isSafeInteger(options.version) || options.version < 1)) throw new Error('invalid_entity_version');
-    const response = await this.fetcher(`${this.config.server_url}/v1${path}`, {
-      method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...(options.runTicket ? { 'x-run-ticket': options.runTicket } : {}), ...(options.assistantEpoch ? { 'x-assistant-epoch': options.assistantEpoch } : {}), ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}), ...(options.version === undefined ? {} : { 'if-match': `"${options.version}"` }) },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000),
-    });
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.config.server_url}/v1${path}`, {
+        method: options.method ?? (body === undefined ? 'GET' : 'POST'), headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...(options.token ? { authorization: `Bearer ${options.token}` } : {}), ...(options.runTicket ? { 'x-run-ticket': options.runTicket } : {}), ...(options.assistantEpoch ? { 'x-assistant-epoch': options.assistantEpoch } : {}), ...(options.idempotencyKey ? { 'idempotency-key': options.idempotencyKey } : {}), ...(options.version === undefined ? {} : { 'if-match': `"${options.version}"` }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(20_000),
+      });
+    } catch (error) {
+      if (transportFailed(error)) { try { this.onTransportFailure(); } catch { /* Keep the original transport error. */ } }
+      throw error;
+    }
     if (!response.ok) {
       let code = `http_${response.status}`, message = `Control API returned ${response.status}`;
       try { const data = await response.json() as { error?: { code: string; message: string } }; code = data.error?.code ?? code; message = data.error?.message ?? message; } catch { /* Keep non-sensitive fallback. */ }

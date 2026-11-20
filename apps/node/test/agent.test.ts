@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { RunContext, WireMessage } from '@super-agent/protocol';
-import { NodeAgent } from '../src/agent.js';
+import { NodeAgent, controlLinkShouldRestart } from '../src/agent.js';
 import type { NodeConfig } from '../src/config.js';
 import { ApiFailure, type NodeApi } from '../src/api.js';
 import { FakeRuntime } from '../src/fake-runtime.js';
@@ -401,4 +401,10 @@ test('new_attempt false does not execute a terminal grant and new_attempt true k
     assert.equal(releases.length, 1);
     assert.equal(runtime.turns, 1);
   } finally { await agent.stop(); agent.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('three missed heartbeats restart the process and fewer misses stay up', () => {
+  assert.equal(controlLinkShouldRestart(0), false);
+  assert.equal(controlLinkShouldRestart(2), false);
+  assert.equal(controlLinkShouldRestart(3), true);
 });

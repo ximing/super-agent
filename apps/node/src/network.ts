@@ -10,7 +10,7 @@ export interface NetworkOptions {
   readSystemProxy?: () => Promise<string>;
   setGlobalProxy?: ProxySetter | null;
 }
-export interface NetworkSetup { source: 'environment' | 'config' | 'macos-system' | 'direct'; proxied: boolean; restore: () => void }
+export interface NetworkSetup { source: 'environment' | 'config' | 'macos-system' | 'direct'; proxied: boolean; restore: () => void; reset: () => void }
 function proxyUrl(value: string): string {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error('Invalid local proxy URL; use an HTTP(S) proxy URL'); }
@@ -54,17 +54,22 @@ export async function configureNetwork(config: Pick<NodeConfig, 'proxy_url'>, op
   const bypass = [...new Set([...(env.NO_PROXY ?? '').split(','), ...(env.no_proxy ?? '').split(','), 'localhost', '127.0.0.1', '::1', '[::1]'].map(value => value.trim()).filter(Boolean))].join(',');
   const updates: NodeJS.ProcessEnv = { NO_PROXY: bypass, no_proxy: bypass };
   let undoGlobal: (() => void) | undefined;
-  if (httpProxy && httpsProxy) {
+  const install = () => {
+    if (!httpProxy || !httpsProxy) return;
     const setter = options.setGlobalProxy === undefined ? (http as typeof http & { setGlobalProxyFromEnv?: ProxySetter }).setGlobalProxyFromEnv : options.setGlobalProxy;
     if (!setter) throw new Error('Proxy networking requires Node.js 24.14+ with http.setGlobalProxyFromEnv; upgrade this Mac node before starting (proxy bypass is refused)');
     Object.assign(updates, { HTTP_PROXY: httpProxy, http_proxy: httpProxy, HTTPS_PROXY: httpsProxy, https_proxy: httpsProxy });
+    const previous = undoGlobal;
+    undoGlobal = undefined;
+    previous?.();
     try { undoGlobal = setter({ ...env, ...updates }); }
     catch { throw new Error('Local proxy initialization failed; verify the proxy configuration privately'); }
-  }
+  };
+  install();
   Object.assign(env, updates);
   let restored = false;
   return { source, proxied: !!httpProxy, restore: () => {
     if (restored) return; restored = true; undoGlobal?.();
     for (const key of Object.keys(updates)) if (original[key] === undefined) delete env[key]; else env[key] = original[key];
-  } };
+  }, reset: () => { if (!restored) install(); } };
 }

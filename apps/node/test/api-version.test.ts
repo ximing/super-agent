@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ApiFailure, NodeApi } from '../src/api.js';
+import { ApiFailure, NodeApi, transportFailed } from '../src/api.js';
 import type { NodeConfig } from '../src/config.js';
 
 test('review requests carry an optimistic version and never silently retry a conflicting verdict', async () => {
@@ -21,4 +21,16 @@ test('review requests carry an optimistic version and never silently retry a con
   assert.equal(calls, 2);
   await assert.rejects(api.raw('/assistant/tasks/task/reviews', {}, { version: NaN }), /invalid_entity_version/);
   assert.equal(calls, 2);
+});
+
+test('a timed-out control request drops the pooled connection once and an HTTP error does not', async () => {
+  let resets = 0;
+  const timeout = new Error('The operation was aborted due to timeout');
+  timeout.name = 'TimeoutError';
+  const api = new NodeApi({ server_url: 'https://control.example' } as NodeConfig, async () => { throw timeout; }, () => { resets++; });
+  await assert.rejects(api.raw('/node/heartbeat', {}), (error: unknown) => transportFailed(error));
+  assert.equal(resets, 1);
+  const httpError = new NodeApi({ server_url: 'https://control.example' } as NodeConfig, async () => new Response(JSON.stringify({ error: { code: 'http_500', message: 'Control API returned 500' } }), { status: 500 }), () => { resets++; });
+  await assert.rejects(httpError.raw('/node/heartbeat', {}), (error: unknown) => error instanceof ApiFailure && error.status === 500);
+  assert.equal(resets, 1);
 });
