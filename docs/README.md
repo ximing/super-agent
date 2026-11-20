@@ -8,7 +8,7 @@
 | --- | --- |
 | [实施状态与缺口](implementation-status.md) | 已验证证据、已部署资源、未实现功能与待验收项目 |
 | [交互体验改进需求](interaction-experience-requirements.md) | 发送、回执、进度、控制、连接恢复的需求、优先级与验收标准；代码已落地，真机与云端持久化待验收 |
-| [交互体验改进方案](interaction-experience-design.md) | 客户端、控制服务与执行节点的改造设计；代码已落地，迁移 004 待云端应用 |
+| [交互体验改进方案](interaction-experience-design.md) | 客户端、控制服务与执行节点的改造设计；生产 API 已含迁移 004，真机验收仍未完成 |
 | [技术设计](technical-design.md) | 架构、模块、数据模型、隔离、运行时、记忆、成本、部署与恢复 |
 | [实现集成契约](implementation-contract.md) | 当前可联调接口与共享类型、边界 |
 | [团队与交付验收](team-and-delivery.md) | 依赖 DAG、独立验收、冻结证据与 Coordinator 事件 |

@@ -1,6 +1,6 @@
 # 实现集成契约（开发共享）
 
-本文件固定当前跨组件接口形状。2026-11-19 及此前段落仍是当时已实现、且旧客户端继续使用的兼容接口。2026-11-20 交互回执见文末同名一节：代码已落地，迁移 004 尚未应用到云端数据库，生产部署与真机验收见[实施状态](implementation-status.md)。实现可修正文档，但跨模块变更先通知协调者；类型见 `packages/protocol/src/index.ts` 与 `packages/protocol/src/interaction.ts`，路径均有 `/v1` 前缀，JSON 字段统一 snake_case，列表响应 `{items:[]}`。时间 UTC，金额字符串。
+本文件固定当前跨组件接口形状。2026-11-19 及此前段落仍是当时已实现、且旧客户端继续使用的兼容接口。2026-11-20 交互回执见文末同名一节：代码已落地，测试库和生产库都已应用迁移 004。生产部署与真机验收见[实施状态](implementation-status.md)。实现可修正文档，但跨模块变更先通知协调者；类型见 `packages/protocol/src/index.ts` 与 `packages/protocol/src/interaction.ts`，路径均有 `/v1` 前缀，JSON 字段统一 snake_case，列表响应 `{items:[]}`。时间 UTC，金额字符串。
 
 ## 公共约定
 
