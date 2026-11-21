@@ -10,7 +10,7 @@ export interface User { id: string; email: string; name: string; tenant_id: stri
 export interface AuthSession { access_token: string; refresh_token: string; expires_in: number; user: User }
 export interface EngineCapability { engine: Engine; ready: boolean; models: string[]; local_profile_id?: string; reason?: string; vision?: 'unsupported' | 'available'; vision_reason?: string }
 export interface Capabilities { generation: number; engines: EngineCapability[]; tools: string[]; slots: { browser: number; worker: number } }
-export interface Device { id: string; name: string; status: 'online' | 'offline' | 'busy'; last_seen_at: string | null; capabilities: Capabilities; version: number; revoked?: boolean }
+export interface Device { id: string; name: string; status: 'online' | 'offline' | 'busy'; last_seen_at: string | null; capabilities: Capabilities; version: number; revoked?: boolean; model_proxy_url?: string | null }
 export interface ExecutionSettings { default_engine: Engine; default_device_id: string | null; assistant_device_id: string | null; memory_global_read?: boolean; version: number }
 export interface MemoryBinding { provider: 'agent-recall'; configured: boolean; url: string | null; project: string | null; account: { id: string; email: string | null } | null; version: number }
 export interface Task { id: string; title: string; goal: string; status: TaskStatus; reason_code: string | null; engine: Engine; model_id: string | null; device_id: string | null; device_name?: string | null; current_run_id: string | null; created_at: string; updated_at: string; version: number;
@@ -86,7 +86,7 @@ export interface MemoryAccess {
 }
 export interface Memory { id: string; title: string; content: string | null; type: MemoryType; site: string | null; status: MemoryStatus; version: number; updated_at: string; fresh?: boolean; stale?: boolean; stale_reason?: string | null }
 export type CostSource = 'supplier_reported' | 'estimated' | 'unavailable';
-export { canTransitionRun, canStartReplacement, moneyToTicks, ticksToMoney, summarizeCosts } from './invariants.js';
+export { canTransitionRun, canStartReplacement, moneyToTicks, ticksToMoney, summarizeCosts, normalizeModelProxyUrl } from './invariants.js';
 export interface CostTotal { currency: string; amount: string; source: CostSource }
 export interface CostSummary { totals: CostTotal[]; input_tokens: number; output_tokens: number; unknown_count: number; request_count: number; coverage: number; as_of: string; reserved_hold_usd?: string | null; reserved_unknown_count?: number }
 export interface CostPoint { date: string; currency: string; amount: string; source: CostSource; input_tokens: number; output_tokens: number }

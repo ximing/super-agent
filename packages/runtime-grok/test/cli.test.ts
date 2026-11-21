@@ -32,6 +32,23 @@ test('native ACP authenticates local login and uses a restricted bridge without 
   assert.equal(await readFile(f.auth, 'utf8'), 'TEST_AUTH_NOT_READ_BY_ADAPTER');
  } finally { await f.close(); }
 });
+test('grok cli receives the model proxy without replacing its managed home', async () => {
+  const f = await fixture(), record = join(f.dir, 'proxy-env.json');
+  const parent = process.env.HTTPS_PROXY;
+  const command = join(f.dir, 'grok-proxy');
+  await writeFile(command, `#!/bin/sh\n'${process.execPath}' -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({proxy:process.env.HTTPS_PROXY??null,home:process.env.GROK_HOME??""}))' '${record}'\nexec '${process.execPath}' '${new URL('./mock-acp.mjs', import.meta.url).pathname}'\n`, { mode: 0o700 });
+  try {
+    process.env.HTTPS_PROXY = 'http://parent.invalid:9';
+    await new GrokCliRuntime({ command, authPath: f.auth, env: { HTTPS_PROXY: 'http://127.0.0.1:7890/', NO_PROXY: 'localhost,127.0.0.1,::1' } }).execute(context([], []));
+    const saved = JSON.parse(await readFile(record, 'utf8')) as { proxy: string; home: string };
+    assert.equal(saved.proxy, 'http://127.0.0.1:7890/');
+    assert.match(saved.home, /super-agent-grok-/);
+    assert.equal(process.env.HTTPS_PROXY, 'http://parent.invalid:9');
+  } finally {
+    if (parent === undefined) delete process.env.HTTPS_PROXY; else process.env.HTTPS_PROXY = parent;
+    await f.close();
+  }
+});
 test('native ACP fails closed on effective external MCP, and provider RPC errors are redacted', async () => {
  const f = await fixture();
  try {

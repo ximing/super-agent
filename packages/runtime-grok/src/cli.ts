@@ -6,7 +6,7 @@ import { AcpClient, initializeParams, type Json } from './acp.js';
 import { managedArgs, managedProfile, prepareManagedHome } from './managed.js';
 
 export interface GrokCliDiagnostic { phase: 'spawn' | 'initialize' | 'authenticate' | 'session_new' | 'verify_mcp' | 'prompt' | 'completed' | 'notification' | 'client_request'; kind?: 'permission' | 'filesystem' | 'terminal' | 'other' | 'agent_message_chunk' | 'agent_thought_chunk' | 'tool_call' | 'tool_call_update' | 'usage_update'; tool?: string }
-export interface GrokCliOptions { command?: string; timeoutMs?: number; maxRunMs?: number; authPath?: string; onDiagnostic?: (diagnostic: GrokCliDiagnostic) => void }
+export interface GrokCliOptions { command?: string; timeoutMs?: number; maxRunMs?: number; authPath?: string; env?: NodeJS.ProcessEnv; onDiagnostic?: (diagnostic: GrokCliDiagnostic) => void }
 const compatibleVersion = (init: Json) => (init.agentInfo?.version ?? init._meta?.agentVersion) === '1.0.89';
 const number = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 
@@ -40,7 +40,7 @@ export class GrokCliRuntime implements RuntimeAdapter {
       bridge = await startRuntimeToolBridge({ ...context, signal });
       await managed.configureBridge({ command: process.execPath, script: fileURLToPath(import.meta.resolve('@super-agent/tool-broker/mcp')), url: bridge.url, token: bridge.token });
       this.options.onDiagnostic?.({ phase: 'spawn' });
-      this.client = client = new AcpClient(this.options.command ?? 'grok', [...managedArgs], managed.env, managed.cwd);
+      this.client = client = new AcpClient(this.options.command ?? 'grok', [...managedArgs], { ...managed.env, ...(this.options.env ?? {}) }, managed.cwd);
       signal.addEventListener('abort', onAbort, { once: true }); checkAbort(signal);
       client.onClientRequest = kind => this.options.onDiagnostic?.({ phase: 'client_request', kind });
       client.onNotification = (method, params) => {
@@ -104,10 +104,10 @@ export class GrokCliRuntime implements RuntimeAdapter {
 }
 
 /** No prompt/model turn. A readable owner-only local login and official ACP cached-token support are required. */
-export async function probeGrokCli(command = 'grok'): Promise<{ ready: boolean; models: string[]; reason?: string; version?: string }> {
+export async function probeGrokCli(command = 'grok', env?: NodeJS.ProcessEnv): Promise<{ ready: boolean; models: string[]; reason?: string; version?: string }> {
   let managed: Awaited<ReturnType<typeof prepareManagedHome>> | undefined, client: AcpClient | undefined;
   try {
-    managed = await prepareManagedHome(); client = new AcpClient(command, [...managedArgs], managed.env, managed.cwd);
+    managed = await prepareManagedHome(); client = new AcpClient(command, [...managedArgs], { ...managed.env, ...(env ?? {}) }, managed.cwd);
     const result = await client.request('initialize', initializeParams(), 20_000);
     if (!compatibleVersion(result)) return { ready: false, models: [], reason: 'grok_cli_version_incompatible' };
     if (result.protocolVersion !== 1 || !result.authMethods?.some((m: Json) => m.id === 'cached_token')) return { ready: false, models: [], reason: 'grok_cli_protocol_incompatible' };

@@ -23,6 +23,8 @@ export interface NodeConfig {
   assistant_engine?: 'codex' | 'grok';
   browser?: { enabled: boolean };
   proxy_url?: string;
+  /** Last model proxy accepted from this device. Loopback is dialed on this computer. */
+  model_proxy_url?: string | null;
 }
 export const defaultConfigPath = () => process.env.SUPER_AGENT_NODE_CONFIG ?? join(homedir(), '.super-agent', 'node.json');
 export async function loadConfig(path = defaultConfigPath()): Promise<NodeConfig> {

@@ -181,6 +181,14 @@ import SuperAgentCore
         do { try await api.revokeDevice(id: id); await refresh() }
         catch { self.error = error.localizedDescription }
     }
+    func saveModelProxy(id: String, version: Int, value: String) async {
+        await operation {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let body: [String: JSONValue] = ["model_proxy_url": trimmed.isEmpty ? .null : .string(trimmed)]
+            let updated: Device = try await self.api.request("/devices/\(id)", method: "PATCH", body: body, version: version)
+            if let index = self.devices.firstIndex(where: { $0.id == id }) { self.devices[index] = updated }
+        }
+    }
     func saveSettings(engine: Engine, device: String, assistant: String, memoryGlobalRead: Bool) async {
         await operation {
             let body = RequestBodies.executionSettings(engine: engine.rawValue, device: device, assistant: assistant, memoryGlobalRead: memoryGlobalRead)

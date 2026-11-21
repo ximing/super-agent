@@ -12,10 +12,10 @@ import { CodexRuntime } from '@super-agent/runtime-codex';
 import { GrokRuntime, GrokCliRuntime, probeGrokCli } from '@super-agent/runtime-grok';
 import { sleep } from '@super-agent/tool-broker/runtime';
 import { NodeApi, ApiFailure } from './api.js';
-import { type NodeConfig, grokKey } from './config.js';
+import { type NodeConfig, grokKey, writeConfig } from './config.js';
 import { LocalStore } from './store.js';
 import { FakeRuntime } from './fake-runtime.js';
-import { configureNetwork, type NetworkSetup } from './network.js';
+import { acceptCloudModelProxy, configureNetwork, grokProxyFetch, proxyEnvOverlay, type NetworkSetup } from './network.js';
 import { probeCsiBrowser } from './startup.js';
 import { readReviewArtifact, readReviewImage, reviewDelivery } from './coordinator.js';
 import { MemoryCache } from './memory-cache.js';
@@ -114,8 +114,10 @@ export interface AgentOptions {
   runtimeFactory?: (engine: string, config: NodeConfig) => Promise<RuntimeAdapter>;
   log?: (message: string) => void;
   artifactFetcher?: typeof fetch;
-  /** Tests supply this so start() does not read or change the machine proxy. */
+  /** Tests supply this so start() does not read the machine proxy. */
   network?: NetworkSetup;
+  /** When set, an accepted cloud model proxy is written back to this node.json. */
+  configPath?: string;
 }
 export function ticksToUsd(ticks: string): string {
   if (!/^\d+$/.test(ticks)) throw new Error('invalid_cost_ticks');
@@ -163,7 +165,7 @@ export class NodeAgent {
         codexReady = true;
       } catch { /* Never publish CLI stdout/stderr or authentication contents. */ }
     }
-    const cli = !this.config.fake_runtime && this.config.grok.mode === 'cli' && this.config.grok.enabled ? await probeGrokCli(this.config.grok.command ?? 'grok') : undefined;
+    const cli = !this.config.fake_runtime && this.config.grok.mode === 'cli' && this.config.grok.enabled ? await probeGrokCli(this.config.grok.command ?? 'grok', this.network ? proxyEnvOverlay(this.network.url) : undefined) : undefined;
     const key = !this.config.fake_runtime && this.config.grok.enabled && this.config.grok.mode !== 'cli' ? await grokKey(this.config).catch(() => undefined) : undefined;
     const grokReady = this.config.grok.mode === 'cli' ? !!cli?.ready : !!key && !!this.config.grok.model;
     this.browserReady = this.config.fake_runtime || !!this.options.browser || (await probeCsiBrowser({ enabled: this.config.browser?.enabled })).ready;
@@ -178,6 +180,11 @@ export class NodeAgent {
     this.network = this.options.network ?? await configureNetwork(this.config);
     await this.api.authenticate();
     await this.api.request(`/devices/${this.config.device_id}/capabilities`, await this.capabilities(), { method: 'PUT' });
+    try {
+      const beat = await this.api.request<{ model_proxy_url?: string | null }>('/node/heartbeat', {});
+      await this.rememberModelProxy(beat.model_proxy_url);
+      this.lastHeartbeat = performance.now();
+    } catch { /* The lease loop retries. Disk cache remains the model proxy until then. */ }
     await this.recover();
     this.log(`Node online (${this.config.fake_runtime ? 'EXPLICIT FAKE TEST MODE' : 'local real runtimes'}), device=${this.config.device_id}`);
     this.scheduleLoop('lease', () => this.leasePass());
@@ -239,7 +246,8 @@ export class NodeAgent {
   private async leasePass(): Promise<void> {
     if (performance.now() - this.lastHeartbeat <= 10_000) return;
     try {
-      await this.api.request('/node/heartbeat', {});
+      const beat = await this.api.request<{ model_proxy_url?: string | null }>('/node/heartbeat', {});
+      await this.rememberModelProxy(beat.model_proxy_url);
       this.lastHeartbeat = performance.now();
       this.missedHeartbeats = 0;
     } catch (error) {
@@ -317,13 +325,34 @@ export class NodeAgent {
       void execution.finally(() => this.executions.delete(context.run.id));
     } catch (error) { this.store.commandState(payload.command_id, 'rejected'); throw error; }
   }
+  private async rememberModelProxy(value: string | null | undefined): Promise<void> {
+    if (value === undefined) return;
+    let accepted: { changed: boolean; value?: string };
+    try { accepted = acceptCloudModelProxy(this.config.model_proxy_url ?? undefined, value); }
+    catch { this.log('Rejected model proxy from the control service'); return; }
+    if (!accepted.changed) return;
+    const draft: NodeConfig = { ...this.config };
+    if (accepted.value) draft.model_proxy_url = accepted.value; else delete draft.model_proxy_url;
+    let resolved = this.network;
+    if (!this.options.network) {
+      try { resolved = await configureNetwork(draft); }
+      catch { this.log('Rejected model proxy from the control service'); return; }
+    }
+    if (accepted.value) this.config.model_proxy_url = accepted.value; else delete this.config.model_proxy_url;
+    this.network = resolved;
+    if (!this.options.configPath) return;
+    try { await writeConfig(this.config, this.options.configPath); }
+    catch { this.log('Could not store the model proxy on this computer'); }
+  }
   private async runtime(engine: string): Promise<RuntimeAdapter> {
     if (this.options.runtimeFactory) return this.options.runtimeFactory(engine, this.config);
     if (this.config.fake_runtime) return new FakeRuntime();
-    if (engine === 'codex') return new CodexRuntime({ command: this.config.codex.command, sandbox: this.config.codex.sandbox });
+    const overlay = proxyEnvOverlay(this.network?.url);
+    if (engine === 'codex') return new CodexRuntime({ command: this.config.codex.command, sandbox: this.config.codex.sandbox, env: { ...process.env, ...overlay } });
     if (engine === 'grok') {
-      if (this.config.grok.mode === 'cli') return new GrokCliRuntime({ command: this.config.grok.command ?? 'grok' });
-      const key = await grokKey(this.config); if (!key) throw new Error('grok_key_unavailable'); return new GrokRuntime({ apiKey: key, baseUrl: this.config.grok.base_url });
+      if (this.config.grok.mode === 'cli') return new GrokCliRuntime({ command: this.config.grok.command ?? 'grok', env: overlay });
+      const key = await grokKey(this.config); if (!key) throw new Error('grok_key_unavailable');
+      return new GrokRuntime({ apiKey: key, baseUrl: this.config.grok.base_url, fetcher: grokProxyFetch(this.network?.url) });
     }
     throw new Error('unsupported_engine');
   }
@@ -1070,7 +1099,8 @@ export class NodeAgent {
   private safeError(error: unknown): string {
     // Never include arbitrary provider response objects/headers/config in server-visible errors.
     const message = error instanceof Error ? error.message : 'Unknown error';
-    return message.replace(/(sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,})/g, '[redacted]').slice(0, 500);
+    const hidden = this.network?.url ? message.split(this.network.url).join('[proxy]') : message;
+    return hidden.replace(/(sk-[A-Za-z0-9_-]{8,}|xai-[A-Za-z0-9_-]{8,})/g, '[redacted]').slice(0, 500);
   }
   async stop(): Promise<void> {
     this.controller.abort(); for (const timer of this.loopTimers) clearTimeout(timer); this.loopTimers.clear(); for (const controller of this.coordinatorControllers.values()) controller.abort();

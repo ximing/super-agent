@@ -3,7 +3,7 @@ export interface User { id: string; email: string; name: string; tenant_id: stri
 export interface Session { access_token: string; refresh_token: string; expires_in: number; user: User }
 export interface AuthConfig { mode: 'development' | 'oidc'; issuer?: string; client_id?: string; authorization_endpoint?: string; token_endpoint?: string; redirect_uri?: string }
 export interface EngineCapability { engine: Engine; ready: boolean; models: string[]; reason?: string; vision?: 'unsupported' | 'available'; vision_reason?: string }
-export interface Device { revoked?: boolean; id: string; name: string; status: string; last_seen_at: string | null; version: number; capabilities: { generation: number; engines: EngineCapability[]; tools: string[]; slots: { browser: number; worker: number } } }
+export interface Device { revoked?: boolean; id: string; name: string; status: string; last_seen_at: string | null; version: number; capabilities: { generation: number; engines: EngineCapability[]; tools: string[]; slots: { browser: number; worker: number } }; model_proxy_url?: string | null }
 export interface ExecutionSettings { default_engine: Engine; default_device_id: string | null; assistant_device_id: string | null; memory_global_read?: boolean; version: number }
 export interface MemoryScope { project?: string | null; sites?: string[]; global_preference?: boolean; statuses?: string[]; max_version?: number | null }
 export interface TaskBudget { max_total_tokens?: number; max_model_calls?: number; max_tool_steps?: number; max_runtime_ms?: number }

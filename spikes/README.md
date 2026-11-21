@@ -63,4 +63,4 @@ To reproduce, provide the trusted HTTP(S) proxy already configured on that Mac a
 node --import tsx spikes/codex-live-tool-probe.ts --default-model --existing-system-proxy --output /tmp/codex-live-tool-proxy-result.json
 ```
 
-The flag labels the network path in the report; it does not change proxy settings. The production node now configures the same proxy inheritance automatically (explicit environment → local `proxy_url` → macOS system HTTP/HTTPS settings). This acceptance covers a real read-only tool round trip; it does not validate arbitrary website workflows or Grok billing.
+The flag labels the network path in the report; it does not change proxy settings. The production node applies a model-client proxy only to new Grok and Codex processes: the cloud device `model_proxy_url` when set, otherwise explicit environment, then local `proxy_url`, then macOS system HTTP/HTTPS. Control-plane traffic stays direct. This acceptance covers a real read-only tool round trip; it does not validate arbitrary website workflows or Grok billing.

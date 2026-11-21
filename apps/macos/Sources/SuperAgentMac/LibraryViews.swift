@@ -33,7 +33,7 @@ struct DevicesView: View {
                         )
                     }
                     ForEach(model.devices) { device in
-                        HStack(spacing: 13) {
+                        HStack(alignment: .top, spacing: 13) {
                             Image(systemName: "desktopcomputer")
                                 .font(.system(size: 24, weight: .light))
                                 .foregroundStyle(.secondary)
@@ -42,6 +42,9 @@ struct DevicesView: View {
                                 Text(device.name).font(.system(size: 12, weight: .medium))
                                 Text(deviceRole(device)).font(.system(size: 10)).foregroundStyle(.secondary)
                                 Text(engineSummary(device)).font(.system(size: 10)).foregroundStyle(.secondary)
+                                if device.revoked != true {
+                                    ModelProxyEditor(device: device)
+                                }
                             }
                             Spacer(minLength: 12)
                             HStack(spacing: 6) {
@@ -206,6 +209,33 @@ struct DevicesView: View {
         }
     }
 }
+private struct ModelProxyEditor: View {
+    @EnvironmentObject var model: WorkspaceModel
+    let device: Device
+    @State private var value = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            TextField("127.0.0.1:7890", text: $value)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+            Text("这个地址由这台执行电脑连接。127.0.0.1 是电脑自己的代理。只用于 Grok 和 Codex。不要填写账号密码。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("保存模型代理") {
+                Task { await model.saveModelProxy(id: device.id, version: device.version, value: value) }
+            }
+            .controlSize(.small)
+            .disabled(model.busy)
+        }
+        .padding(.top, 8)
+        .onAppear { value = device.modelProxyUrl ?? "" }
+        .onChange(of: device.version) { _, _ in value = device.modelProxyUrl ?? "" }
+        .onChange(of: device.modelProxyUrl) { _, next in value = next ?? "" }
+    }
+}
+
 struct CostsView: View {
     @EnvironmentObject var model: WorkspaceModel
     @State private var group = "device"

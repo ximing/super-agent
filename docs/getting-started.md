@@ -33,7 +33,7 @@ node apps/node/dist/cli.js start
 
 配置与设备私钥仅在 `~/.super-agent/`。在控制端选择主助理电脑、默认执行电脑和引擎。普通聊天先提出目标、产出、执行引擎和电脑，明确确认后再执行；任务表单提交本身是明确交办。多计划待确认时使用回复中的编号。
 
-节点使用显式 HTTP(S)_PROXY 环境变量、`node.json` 本机 `proxy_url` 或 macOS 系统 HTTP(S) 代理，按此优先级选择；localhost 工具通信保持直连。PAC/SOCKS-only 配置需提供等效 HTTP 代理端点。代理设置不上传云端。
+每台执行电脑可以在控制端的「电脑」页填写一个模型代理，例如 `127.0.0.1:7890`。这个地址由该电脑上的 Worker 连接，手机和控制服务不连接它，并且只用于之后新启动的 Grok 和 Codex。留空会清除云端值，再按显式 HTTP(S)_PROXY、`node.json` 的 `proxy_url`、macOS 系统 HTTP(S) 代理的顺序回退。控制面、CSI 和 localhost 工具通信保持直连。PAC/SOCKS-only 配置需提供等效 HTTP 代理端点。地址按设备存在云端，不存账号密码。
 
 Grok支持复用本机已登录的官方CLI，具体adapter配置见[Grok说明](../packages/runtime-grok/README.md)。使用API模式时，在已有 `node.json` 的 `grok` 部分配置可用模型及本机 Key 来源：`keychain_service`、`key_file` 或 `key_env`。后台进程不继承交互终端中的 Key，推荐钥匙串。不要替换整个配置而丢失设备身份；不要把 Key 放进 plist、仓库或控制服务器。
 

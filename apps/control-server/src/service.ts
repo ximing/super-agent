@@ -8,7 +8,7 @@ import { observeDue } from './observations.js';
 import { normalizeMemoryScope, proposeRetrospective } from './memory-governance.js';
 import { activeHold, admitReservation, buildReservation, grantBlocked, remainingLimits, renewReservation, reservationInForce, settleReservation, type ReservationLiveness } from './budget-control.js';
 import { configuredLimits, dollarGate, holdFor, presentGrant, recovery, sanitizeLimits, spendFor, taskDollarStop, usageStop } from './budget-policy.js';
-import { BUDGET_RECOVERY, activityRootId, canonicalActivityId, grantExecutable, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
+import { BUDGET_RECOVERY, activityRootId, canonicalActivityId, grantExecutable, normalizeModelProxyUrl, type BudgetCategory, type BudgetStopReason, type RuntimeBudgetLimits } from '@super-agent/protocol';
 import { acceptControl, advanceActionReceipts, emitTaskProgress, noteActionProgress, runProgressPhase } from './interaction.js';
 
 export const ACTIVE = ['dispatched','starting','running','waiting_input','stopping'];
@@ -83,6 +83,24 @@ function workerRunReservation(reservation:Doc,runId:string):boolean{
   const canonical=canonicalActivityId('run',runId);
   if(reservation.activity_id===canonical)return reservation.activity_kind==null||reservation.activity_kind==='run';
   return (reservation.activity_kind==='run'||reservation.activity_kind==null)&&reservation.run_id===runId;
+}
+const MODEL_PROXY_MESSAGE = '模型代理需要带端口的 HTTP(S) 地址，不能包含账号、路径或 SOCKS';
+/** `undefined` leaves the stored value. `null` or a blank string clears it. The returned URL is canonical. */
+export function assignModelProxy(device: Doc, value: unknown): Doc {
+  if (value === undefined) return device;
+  if (value === null || (typeof value === 'string' && !value.trim())) return { ...device, model_proxy_url: null };
+  if (typeof value !== 'string') throw new ApiError(422, 'invalid_model_proxy', MODEL_PROXY_MESSAGE);
+  try { return { ...device, model_proxy_url: normalizeModelProxyUrl(value) }; }
+  catch { throw new ApiError(422, 'invalid_model_proxy', MODEL_PROXY_MESSAGE); }
+}
+/** Assistant and node device lists must not carry the proxy into model context. */
+export function nodeDeviceView(device: Doc): Doc {
+  const view = { ...device };
+  delete view.model_proxy_url;
+  return view;
+}
+export function heartbeatPayload(device: Doc, serverTime: string): Doc {
+  return { server_time: serverTime, heartbeat_interval_ms: 10000, model_proxy_url: typeof device.model_proxy_url === 'string' && device.model_proxy_url ? device.model_proxy_url : null };
 }
 export class Service {
   readonly team=new TeamService();

@@ -49,7 +49,7 @@ launchctl print "gui/$(id -u)/com.superagent.node"
 
 本机 `browser.enabled=false` 时不启动 CSI、不列出浏览器工具。启用浏览器时，能力探测只读 CSI `/status`，必须扩展连接才广告 browser；文件/记忆任务不依赖它。真实模式每次 `start` 会检查已有 `~/.csi/bin/csi` 的可执行权限并调用官方幂等 `start`。不会自动 install、stop 或 restart。CSI 缺失或启动失败时只输出固定诊断，节点仍可处理非浏览器任务；FakeRuntime 完全跳过此步骤。CSI 安装器不注册登录自启，节点启动检查负责补上重启后的启动；扩展和已登录的 Chrome 仍需可用。
 
-保持正式 Mac 的用户会话登录、Chrome 扩展运行、网络与所需系统代理可用，并按需要配置系统电源设置避免任务期间休眠。LaunchAgent 属于用户登录会话，不能替代登录界面中的桌面会话。日志位于 `~/.super-agent/launchd/node.log` 和 `node-error.log`。控制请求超时会丢掉卡住的代理连接再试；连续 3 次心跳失败则进程退出，已安装的 KeepAlive 会拉起新进程。这样进程不会一直活着却让电脑显示离线。
+保持正式 Mac 的用户会话登录、Chrome 扩展运行、网络可用，并按需要配置系统电源设置避免任务期间休眠。LaunchAgent 属于用户登录会话，不能替代登录界面中的桌面会话。日志位于 `~/.super-agent/launchd/node.log` 和 `node-error.log`。发往控制服务的连接保持直连，不使用模型代理。连续 3 次心跳失败则进程退出，已安装的 KeepAlive 会拉起新进程。这样进程不会一直活着却让电脑显示离线。
 
 若用户要停止并取消该 Mac 的自动启动，可自行执行：
 
@@ -62,11 +62,9 @@ rm "$HOME/Library/LaunchAgents/com.superagent.node.plist"
 
 ### 本机网络与代理
 
-启动、配对及 `probe` 会按“显式 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境变量 → 本机 `node.json` 的 `proxy_url` → macOS 系统 HTTP/HTTPS 代理”的顺序设置当前进程。小写环境变量优先；只指定一种 HTTP(S) 代理时用于两种请求协议。配置不会写入系统或 Codex 全局设置，也不会上传代理 URL 或凭据。`probe` 只输出来源及是否启用。
+Grok API、Grok CLI 和 Codex 共用这一台电脑的模型代理。控制端保存的 `model_proxy_url` 优先；留空时按显式 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`、本机 `node.json` 的 `proxy_url`、macOS 系统 HTTP/HTTPS 代理的顺序选择。小写环境变量优先；只指定一种 HTTP(S) 代理时同时用于 HTTP 和 HTTPS。云端值由心跳下发，并缓存在本机 `node.json` 的 `model_proxy_url`。只影响之后新启动的模型进程，进行中的回合保持启动时的代理。
 
-Codex 子进程继承相同代理环境；Grok 使用的 Node 原生 `fetch` 通过 `http.setGlobalProxyFromEnv()` 启用代理。已有 `NO_PROXY` 排除项保留，并加入 `localhost`、`127.0.0.1`、`::1`，确保 CSI 和本机工具桥保持本地连接。`proxy_url` 可设置 HTTP(S) 代理；仅有 SOCKS/PAC 时会明确要求 HTTP(S) 端点。
-
-官方 API 从 **Node 24.14.0** 起可用。检测到代理但缺少该 API 时节点明确要求升级，不会让 Grok 静默直连；没有代理时旧版 Node 24 仍可运行。云端控制服务不需要此配置。参见 [Node 24 HTTP 文档](https://nodejs.org/docs/latest-v24.x/api/http.html#httpsetglobalproxyfromenvproxyenv)。
+代理只写入模型子进程的环境，或 Grok API 这一路请求自己的代理。节点进程和发往控制服务的连接保持直连，不调用 `http.setGlobalProxyFromEnv()`。已有 `NO_PROXY` 排除项保留，并加入 `localhost`、`127.0.0.1`、`::1`、`[::1]`，确保 CSI 和本机工具桥保持本地连接。地址必须是带端口的 HTTP(S) URL，不能包含账号、路径或 SOCKS。`127.0.0.1:端口` 由这台执行电脑自己连接。`probe` 只输出来源及是否启用，不输出地址。配对不设置代理。
 
 已验证：此 Mac 通过已有系统代理完成一次真实 Codex 文件读取工具回合，28.476 秒，1 次工具调用、输出 9 Token。先前未继承代理时的失败和成功记录分别保存在 `spikes/codex-live-tool-result.json`、`spikes/codex-live-tool-proxy-result.json`。
 

@@ -44,6 +44,38 @@ export interface KnownOrUnknownCost {
   amount: string | null;
 }
 
+const MODEL_PROXY_ERROR = 'Model proxy requires an HTTP(S) URL with an explicit port and no credentials, path, query, or SOCKS proxy';
+
+/** The WHATWG parser hides a scheme's default port, so read the port the user actually wrote. */
+function writtenModelProxyPort(value: string): string {
+  const withScheme = /^https?:\/\//i.test(value) ? value : `http://${value}`;
+  const authority = withScheme.slice(withScheme.indexOf('://') + 3).split(/[/?#]/, 1)[0] ?? '';
+  if (authority.startsWith('[')) {
+    const end = authority.indexOf(']');
+    const tail = end >= 0 ? authority.slice(end + 1) : '';
+    return tail.startsWith(':') ? tail.slice(1) : '';
+  }
+  const hostport = authority.slice(authority.lastIndexOf('@') + 1);
+  const colon = hostport.lastIndexOf(':');
+  return colon >= 0 ? hostport.slice(colon + 1) : '';
+}
+
+/** Canonical `http(s)://host:port/` for Grok and Codex. Loopback is dialed by the worker, never rewritten. */
+export function normalizeModelProxyUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 300 || /[\u0000-\u0020]/.test(trimmed)) throw new Error(MODEL_PROXY_ERROR);
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) throw new Error(MODEL_PROXY_ERROR);
+  let url: URL;
+  try { url = new URL(/^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`); } catch { throw new Error(MODEL_PROXY_ERROR); }
+  if (url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error(MODEL_PROXY_ERROR);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(MODEL_PROXY_ERROR);
+  const portText = writtenModelProxyPort(trimmed);
+  const port = Number(portText);
+  if (!url.hostname || !/^\d+$/.test(portText) || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error(MODEL_PROXY_ERROR);
+  if (url.port && Number(url.port) !== port) throw new Error(MODEL_PROXY_ERROR);
+  return url.port ? url.href : `${url.protocol}//${url.host}:${port}/`;
+}
+
 /** Keep currencies and sources separate, and keep unavailable cost out of the zero bucket. */
 export function summarizeCosts(records: readonly KnownOrUnknownCost[]) {
   const groups = new Map<string, { currency: string; source: CostSource; ticks: bigint }>();

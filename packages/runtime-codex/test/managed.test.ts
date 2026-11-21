@@ -15,6 +15,7 @@ async function cliFixture(dir:string,features=expectedFeatures):Promise<{command
 const fs=require('node:fs');
 if(process.argv[2]==='features'){process.stdout.write(${JSON.stringify(features.map(name=>name+' stable true').join('\n'))});process.exit(0);}
 fs.writeFileSync(${JSON.stringify(record)},JSON.stringify(process.argv.slice(2)));
+fs.writeFileSync(${JSON.stringify(record)}+'.env',JSON.stringify({HTTPS_PROXY:process.env.HTTPS_PROXY??null,NO_PROXY:process.env.NO_PROXY??''}));
 const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
 const rl=require('node:readline').createInterface({input:process.stdin});
 rl.on('line',line=>{
@@ -45,6 +46,21 @@ test('default runtime spawn uses proven managed flags and disables global MCP wh
     const bridgeContext={...context(dir),mcp:{url:'http://127.0.0.1:1',token:'test-only-bridge',script:'/tmp/managed-mcp-fixture.js'}};
     assert.equal((await new CodexRuntime({command:fixture.command,toolsMode:'mcp',timeoutMs:1000,maxRunMs:3000}).execute(bridgeContext)).text,'managed');
   }finally{if(oldHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=oldHome;await rm(dir,{recursive:true,force:true});}
+});
+
+test('model proxy env reaches the codex child and stays off the parent process',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'super-agent-managed-proxy-')),parent=process.env.HTTPS_PROXY,oldHome=process.env.CODEX_HOME;
+  try{
+    process.env.CODEX_HOME=dir;
+    await writeFile(join(dir,'config.toml'),'model = "configured-default"\n');
+    const fixture=await cliFixture(dir);
+    const env={...process.env,HTTPS_PROXY:'http://127.0.0.1:7890/',HTTP_PROXY:'http://127.0.0.1:7890/',NO_PROXY:'localhost,127.0.0.1,::1'};
+    assert.equal((await new CodexRuntime({command:fixture.command,timeoutMs:1000,maxRunMs:3000,env}).execute(context(dir))).text,'managed');
+    const saved=JSON.parse(await readFile(`${fixture.record}.env`,'utf8')) as {HTTPS_PROXY:string;NO_PROXY:string};
+    assert.equal(saved.HTTPS_PROXY,'http://127.0.0.1:7890/');
+    assert.ok(saved.NO_PROXY.split(',').includes('127.0.0.1'));
+    assert.equal(process.env.HTTPS_PROXY,parent);
+  }finally{if(parent===undefined)delete process.env.HTTPS_PROXY;else process.env.HTTPS_PROXY=parent;if(oldHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=oldHome;await rm(dir,{recursive:true,force:true});}
 });
 
 test('unsupported managed feature fails explicitly before spawning an app-server',async()=>{

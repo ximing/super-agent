@@ -2,5 +2,5 @@
   "name": "@super-agent/node", "version": "0.1.0", "private": true, "type": "module",
   "bin": { "super-agent-node": "dist/cli.js" },
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit", "dev": "tsx src/cli.ts", "test": "node --import tsx --test test/*.test.ts" },
-  "dependencies": { "@super-agent/protocol": "workspace:*", "@super-agent/tool-broker": "workspace:*", "@super-agent/runtime-codex": "workspace:*", "@super-agent/runtime-grok": "workspace:*" }
+  "dependencies": { "@super-agent/protocol": "workspace:*", "@super-agent/tool-broker": "workspace:*", "@super-agent/runtime-codex": "workspace:*", "@super-agent/runtime-grok": "workspace:*", "undici": "^7.16.0" }
 }

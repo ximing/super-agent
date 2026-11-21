@@ -24,6 +24,8 @@ public struct Capabilities: Codable, Sendable { public let generation: Int; publ
 public struct Device: Codable, Identifiable, Sendable {
     public let id: String; public let name: String; public let status: String
     public let lastSeenAt: String?; public let capabilities: Capabilities; public let version: Int; public let revoked: Bool?
+    /// HTTP(S) proxy dialed by this computer for Grok and Codex. Empty means the worker keeps its local fallback.
+    public let modelProxyUrl: String?
     public func supports(_ engine: Engine) -> Bool { revoked != true && capabilities.engines.contains { $0.engine == engine && $0.ready } }
 }
 public struct ExecutionSettings: Codable, Sendable {

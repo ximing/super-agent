@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { Decimal } from 'decimal.js';
 import { Auth, type Config, type Principal, text, uuid, expires, now } from './auth.js';
 import { Store, Tx, ApiError, isDatabaseUnavailable, type Doc } from './store.js';
-import { Service, ACTIVE, engine, matchVersion, redactView, conflictingMessage, assistantUsageActivity, eventUsageActivity, replyActivityId, resolveReportedActivity } from './service.js';
+import { Service, ACTIVE, engine, matchVersion, redactView, conflictingMessage, assistantUsageActivity, eventUsageActivity, replyActivityId, resolveReportedActivity, assignModelProxy, nodeDeviceView, heartbeatPayload } from './service.js';
 import { normalizeMemoryScope, plannerAccess, relateMemory, setPreferenceEnabled, workerAccess } from './memory-governance.js';
 import { assertObservationCommand, configVersion, decideSuggestion, observationConfigChanged, observationInput, reportObservation } from './observations.js';
 import { readEvents, sseFrame } from './events-stream.js';
@@ -108,7 +108,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
   route('PUT','/settings/notifications','client',async(r,_p,tx)=>{const current=await notifications.preferences(tx);matchVersion(r.headers['if-match'],current,body(r).version);return notifications.updatePreferences(tx,{...body(r),version:current.version});});
 
   route('GET','/devices','client',async(_r,_p,tx)=>items(await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d)))));
-  route('PATCH','/devices/:id','client',async(r,_p,tx)=>{await graphLock(tx);const d=await tx.need('devices',uuid(params(r).id),true);matchVersion(r.headers['if-match'],d);const b=body(r),updated=await tx.put('devices',{...d,...(b.name?{name:text(b.name,'name',100)}:{}),...(Array.isArray(b.tags)?{tags:b.tags.slice(0,20)}:{})});await tx.emit('device.changed',updated);return service.deviceView(tx,updated);});
+  route('PATCH','/devices/:id','client',async(r,_p,tx)=>{await graphLock(tx);const d=await tx.need('devices',uuid(params(r).id),true);matchVersion(r.headers['if-match'],d);const b=body(r);const named={...d,...(b.name?{name:text(b.name,'name',100)}:{}),...(Array.isArray(b.tags)?{tags:b.tags.slice(0,20)}:{})};const updated=await tx.put('devices',assignModelProxy(named,'model_proxy_url' in b?b.model_proxy_url:undefined));await tx.emit('device.changed',updated);return service.deviceView(tx,updated);});
   route('DELETE','/devices/:id','client',async(r,p,tx)=>{
     await graphLock(tx);
     const id=uuid(params(r).id);const d=await tx.need('devices',id,true);matchVersion(r.headers['if-match'],d);
@@ -118,7 +118,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     await tx.emit('device.changed',updated);return{status:'revoked'};
   });
   route('PUT','/devices/:id/capabilities','device',async(r,p,tx)=>{await graphLock(tx);if(params(r).id!==p.device)throw new ApiError(404,'not_found','设备不存在');const d=await tx.need('devices',p.device!,true),caps=capabilities(body(r));if(caps.generation<(d.capabilities?.generation??0))throw new ApiError(409,'old_capabilities','设备能力版本过期');const updated=await tx.put('devices',{...d,capabilities:caps,last_seen_at:now()});await tx.emit('device.changed',updated);return service.deviceView(tx,updated);});
-  route('POST','/node/heartbeat','device',async(_r,p,tx)=>{const d=await tx.need('devices',p.device!,true);await tx.put('devices',{...d,last_seen_at:now()});return{server_time:now(),heartbeat_interval_ms:10000};});
+  route('POST','/node/heartbeat','device',async(_r,p,tx)=>{const d=await tx.need('devices',p.device!,true);await tx.put('devices',{...d,last_seen_at:now()});return heartbeatPayload(d,now());});
   route('GET','/settings/execution','client',async(_r,_p,tx)=>service.settings(tx));
   route('PUT','/settings/execution','client',async(r,_p,tx)=>{
     const old=await service.settings(tx),b=body(r);if(old.version)matchVersion(r.headers['if-match'],old,b.version);
@@ -333,7 +333,7 @@ export async function buildApp(config:Config):Promise<ControlApp>{
     await tx.put('inbox_receipts',{source_message_id:source.id},source.id);await service.releaseActivityRoot(tx,replyActivityId(source));await tx.emit('assistant.replied',message,b.task_id??null);await completeProcessing(tx,source,message,outcome);return message;
   });
   route('POST','/assistant/usage','device',async(r,p,tx)=>{await assistant(r,p,tx);await graphLock(tx);const b=body(r),message=await tx.need('messages',uuid(b.message_id));const device=await tx.need('devices',p.device!);const selectedEngine=engine(b.engine);if(!device.capabilities.engines.some((e:Doc)=>e.engine===selectedEngine&&e.models.includes(b.model_id)))throw new ApiError(422,'invalid_runtime','模型不属于当前电脑');await service.usage(tx,assistantUsageActivity(message,p.device!,selectedEngine,b.model_id,b,await tx.all('budget_reservations')),b);return{status:'recorded'};});
-  route('GET','/node/devices','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d))));});
+  route('GET','/node/devices','device',async(r,p,tx)=>{await assistant(r,p,tx);return items((await Promise.all((await tx.all('devices')).map(d=>service.deviceView(tx,d)))).map(nodeDeviceView));});
   route('GET','/node/tasks','device',async(r,p,tx)=>{await assistant(r,p,tx);return items(limit(await tx.all('tasks'),query(r)));});
   route('POST','/node/tasks','device',async(r,p,tx)=>{await assistant(r,p,tx);throw new ApiError(409,'confirmation_required','自由聊天派活需要先提交目标方案并确认');});
   route('GET','/node/settings','device',async(r,p,tx)=>{await assistant(r,p,tx);return service.settings(tx);});

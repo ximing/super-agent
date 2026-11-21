@@ -12,9 +12,9 @@ export class CodexRpc extends EventEmitter {
   private nextId = 0;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private child: ChildProcessWithoutNullStreams;
-  constructor(command = 'codex', args = ['app-server', '--stdio'], private timeoutMs = 120_000) {
+  constructor(command = 'codex', args = ['app-server', '--stdio'], private timeoutMs = 120_000, env?: NodeJS.ProcessEnv) {
     super();
-    this.child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    this.child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], ...(env ? { env } : {}) });
     const lines = createInterface({ input: this.child.stdout, crlfDelay: Infinity });
     lines.on('line', line => { try { this.receive(JSON.parse(line) as RpcMessage); } catch { /* Ignore non-protocol lines; never upload stderr or credential-bearing startup text. */ } });
     this.child.stderr.resume();
@@ -56,7 +56,7 @@ export function safeCodexError(params: Obj): CodexErrorInfo {
   const rawStatus = key && info && typeof info === 'object' ? ((info as Obj)[key] as Obj | undefined)?.httpStatusCode : undefined;
   return { code: key && known.has(key) ? key : 'unknown', http_status: typeof rawStatus === 'number' && Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : null, will_retry: params.willRetry === true };
 }
-export interface CodexOptions { command?: string; args?: string[]; timeoutMs?: number; maxRunMs?: number; sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; toolsMode?: 'dynamic' | 'mcp'; onProtocolEvent?: (method: string) => void; onErrorInfo?: (info: CodexErrorInfo) => void }
+export interface CodexOptions { command?: string; args?: string[]; env?: NodeJS.ProcessEnv; timeoutMs?: number; maxRunMs?: number; sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access'; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; toolsMode?: 'dynamic' | 'mcp'; onProtocolEvent?: (method: string) => void; onErrorInfo?: (info: CodexErrorInfo) => void }
 export class CodexRuntime implements RuntimeAdapter {
   private rpc?: CodexRpc;
   private threadId?: string;
@@ -73,7 +73,7 @@ export class CodexRuntime implements RuntimeAdapter {
     if (this.options.args === undefined) await verifyManagedCli(command);
     const args = this.options.args ?? await managedCodexArgs({ cwd: context.cwd });
     checkAbort(context.signal);
-    const rpc = this.rpc = new CodexRpc(command, args, this.options.timeoutMs);
+    const rpc = this.rpc = new CodexRpc(command, args, this.options.timeoutMs, this.options.env);
     let initialized = false;
     let text = '';
     let resolveDone!: (result: RuntimeResult) => void, rejectDone!: (error: Error) => void;

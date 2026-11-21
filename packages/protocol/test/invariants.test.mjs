@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activityRootId, canTransitionRun, canStartReplacement, moneyToTicks, observationActivityId, ticksToMoney, summarizeCosts } from '../dist/index.js';
+import { activityRootId, canTransitionRun, canStartReplacement, moneyToTicks, normalizeModelProxyUrl, observationActivityId, ticksToMoney, summarizeCosts } from '../dist/index.js';
 
 test('late progress cannot revive a completed or paused attempt', () => {
   assert.equal(canTransitionRun('succeeded', 'running'), false);
@@ -30,6 +30,20 @@ test('attempt ids keep a stable root and observation commands do not use the pag
   assert.equal(activityRootId('proactive:observation:cmd#10'), 'proactive:observation:cmd');
   assert.equal(activityRootId('event:abc#nope'), 'event:abc#nope');
   assert.equal(observationActivityId('cmd-1'), 'proactive:observation:cmd-1');
+});
+
+test('model proxy keeps an explicit port and drops credentials, paths, and SOCKS', () => {
+  assert.equal(normalizeModelProxyUrl('127.0.0.1:7890'), 'http://127.0.0.1:7890/');
+  assert.equal(normalizeModelProxyUrl('http://127.0.0.1:7890'), 'http://127.0.0.1:7890/');
+  assert.equal(normalizeModelProxyUrl('https://proxy.example:443'), 'https://proxy.example:443/');
+  assert.equal(normalizeModelProxyUrl('[::1]:7890'), 'http://[::1]:7890/');
+  for (const value of ['127.0.0.1', 'socks5://127.0.0.1:1080', 'http://127.0.0.1:7890/path', 'http://127.0.0.1:7890?x=1', 'http://test-user:test-password@127.0.0.1:7890']) {
+    assert.throws(() => normalizeModelProxyUrl(value), error => {
+      assert.match(String(error), /HTTP\(S\)/);
+      assert.doesNotMatch(String(error), /test-user|test-password|socks5:\/\/|7890\/path/);
+      return true;
+    });
+  }
 });
 
 test('unknown subscription cost stays unknown, known zero stays known', () => {

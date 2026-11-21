@@ -1,6 +1,6 @@
 # 实现集成契约（开发共享）
 
-本文件固定当前跨组件接口形状。2026-11-19 及此前段落仍是当时已实现、且旧客户端继续使用的兼容接口。2026-11-20 交互回执见文末同名一节：代码已落地，测试库和生产库都已应用迁移 004。生产部署与真机验收见[实施状态](implementation-status.md)。实现可修正文档，但跨模块变更先通知协调者；类型见 `packages/protocol/src/index.ts` 与 `packages/protocol/src/interaction.ts`，路径均有 `/v1` 前缀，JSON 字段统一 snake_case，列表响应 `{items:[]}`。时间 UTC，金额字符串。
+本文件固定当前跨组件接口形状。2026-11-19 及此前段落仍是当时已实现、且旧客户端继续使用的兼容接口。2026-11-20 交互回执见文末同名一节：代码已落地，测试库和生产库都已应用迁移 004。2026-11-21 模型代理见同名一节，不需要新迁移。生产部署与真机验收见[实施状态](implementation-status.md)。实现可修正文档，但跨模块变更先通知协调者；类型见 `packages/protocol/src/index.ts` 与 `packages/protocol/src/interaction.ts`，路径均有 `/v1` 前缀，JSON 字段统一 snake_case，列表响应 `{items:[]}`。时间 UTC，金额字符串。
 
 ## 公共约定
 
@@ -106,6 +106,14 @@
 - 事件 `message.processing.changed`、`task.progress.changed`、`action.changed` 与旧事件并存。`run.started` 的 payload 含 `state`；`dispatched` 表示等待电脑接受。游标按数值比较，非法游标 422 `invalid_cursor`。现有服务不返回 410；客户端不能假定游标过期已经实现。
 - 整句进度、暂停、继续、取消、重试在标志开启时由服务端确定性处理，不调用模型。多个任务先返回选择，不猜测最新任务。唯一匹配的“选择 <编号前缀>”只返回该任务状态，不执行控制；多个前缀匹配仍先选择。已有待确认方案时，“确认 / 开始执行 / 确认执行 / 取消 / 拒绝 / 不要执行 / 取消执行”仍交给原规划，不在快通道里取消任务。快通道回复写明请求已保存，执行电脑尚未完成该操作。
 - 节点在 `chat_fast_path` 为真且句子不是上述方案决定时直接返回，不调用模型，也不再本地执行同一句。能力查询失败不缓存，下一句会再问。标志关闭或查询失败时，节点可以用本机任务列表回答整句状态或控制，仍然不调用模型。
+
+## 模型代理（2026-11-21）
+
+- Device 增加可选 `model_proxy_url`。GET `/devices`、工作区快照和 bootstrap 把该字段返回给设备主人。PATCH `/devices/:id` 带 If-Match：请求里没有这个字段则保持原值；JSON `null` 或空白字符串清除；字符串由 `normalizeModelProxyUrl` 存成带端口的 `http(s)://host:port/`。缺端口、账号密码、路径、查询或 SOCKS 返回 422 `invalid_model_proxy`，错误不回显地址或凭据。版本冲突仍是 412 `version_conflict`，提示「数据已更新，请刷新后重试」。
+- 字段写在设备 jsonb 文档里，不新增迁移。
+- POST `/node/heartbeat {}` 仍更新当前设备的 `last_seen_at`。响应为 `{server_time, heartbeat_interval_ms:10000, model_proxy_url}`，只含这台设备自己的值；未设置时为 `null`。Worker 用它覆盖本机缓存。响应里没有该字段时，不改本机缓存。
+- GET `/node/devices`（助理 `devices_list`）不含 `model_proxy_url`。运行上下文、检查点、步骤和能力上报也不含这个地址。
+- `127.0.0.1` 必须带端口。这个地址由该执行电脑上的 Worker 连接，手机和控制服务不连接它。云端值优先于本机环境变量、`node.json` 的 `proxy_url` 和 macOS 系统 HTTP 代理；清空后才按这个顺序回退。只作用于之后新启动的 Grok API、Grok CLI 和 Codex。控制面、CSI 和本机工具桥保持直连。地址可以按设备存在云端，不存密码。
 
 ## 文件归属与开发规则
 

@@ -22,7 +22,6 @@ async function main(): Promise<void> {
   }
   if (command === 'pair') {
     const config = await loadConfig(configPath); if (config.device_id) throw new Error('This node is already paired');
-    await configureNetwork(config);
     const api = new NodeApi(config), pendingPath = join(config.data_dir, 'pairing-pending.json');
     let pairing: PairingStart | undefined;
     try { const saved = JSON.parse(await readFile(pendingPath, 'utf8')) as PairingStart; if (Date.parse(saved.expires_at) > Date.now()) pairing = saved; } catch { /* Start a fresh one-time pairing. */ }
@@ -41,7 +40,7 @@ async function main(): Promise<void> {
   if (command === 'start') {
     const config = await loadConfig(configPath);
     await ensureCsiStarted(config.fake_runtime || config.browser?.enabled === false, { log: message => process.stderr.write(`${message}\n`) });
-    const agent = new NodeAgent(config);
+    const agent = new NodeAgent(config, { configPath });
     let stopping = false;
     const stop = () => { if (!stopping) { stopping = true; void agent.stop(); } };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
@@ -49,7 +48,7 @@ async function main(): Promise<void> {
     return;
   }
   if (command === 'probe') {
-    const config = await loadConfig(configPath), network = await configureNetwork(config), agent = new NodeAgent(config);
+    const config = await loadConfig(configPath), network = await configureNetwork(config), agent = new NodeAgent(config, { network });
     try { process.stdout.write(`${JSON.stringify({ ...await agent.capabilities(), network: { proxy_source: network.source, proxied: network.proxied } }, null, 2)}\n`); } finally { agent.close(); network.restore(); }
     return;
   }
