@@ -1,4 +1,4 @@
-# Execute only on app server (222.128.65.91:11022).
+# Execute only on the app host. This file does not select a machine.
 services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.8.2

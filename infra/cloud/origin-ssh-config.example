@@ -1,0 +1,13 @@
+# Install on the entry host, outside this repository:
+#   /etc/ssh/ssh_config.d/super-agent-origin.conf
+# origin-tunnel.service connects to the alias super-agent-origin.
+# Replace the documentation address. Do not copy this example over the live file.
+
+Host super-agent-origin
+  HostName 192.0.2.1
+  Port 11022
+  User super-agent-proxy
+  IdentityFile /var/lib/super-agent-tunnel/id_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile /var/lib/super-agent-tunnel/known_hosts
+  StrictHostKeyChecking yes

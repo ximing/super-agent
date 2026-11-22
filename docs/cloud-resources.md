@@ -45,7 +45,7 @@ docker compose --env-file .env up -d api
 curl --fail http://127.0.0.1:13011/ready
 ```
 
-API 与 OIDC 的云容器端口均只绑定 app 的 `127.0.0.1`。独立 nginx 通过受限 SSH 隧道访问源站，不在公网链路明文发送登录、任务或画面数据；OpenResty 网络的宿主网关为已验证的 `192.168.0.1`。配置见 `origin-tunnel.service`、`origin-sshd.conf`、`api.nginx.conf`，SSH 私钥只留 nginx，目标 host key 固定校验，账户不能执行命令，转发端口有白名单。nginx 修改后先测试配置再 reload，最后验证 HTTPS `/ready`、`/v1/auth/config` 和未授权 API 拒绝访问。
+API 与 OIDC 的云容器端口均只绑定 app 的 `127.0.0.1`。独立 nginx 通过受限 SSH 隧道访问源站，不在公网链路明文发送登录、任务或画面数据；OpenResty 网络的宿主网关为已验证的 `192.168.0.1`。配置见 `origin-tunnel.service`、`origin-sshd.conf`、`api.nginx.conf`。隧道目标是 SSH 别名 `super-agent-origin`，地址写在入口机的 ssh 配置里，不进仓库；示例是 `origin-ssh-config.example`。SSH 私钥只留 nginx，目标 host key 固定校验，账户不能执行命令，转发端口有白名单。nginx 修改后先测试配置再 reload，最后验证 HTTPS `/ready`、`/v1/auth/config` 和未授权 API 拒绝访问。
 
 GitHub Actions 使用 secrets `TEST_DATABASE_URL`、`TEST_MIGRATION_DATABASE_URL` 和 `POSTGRES_CA_PEM`。CI 将 CA 写入 runner 临时目录并修正 URL 路径，在后续步骤使用前注册秘密遮罩，不向可见日志输出连接串。未配置时云端集成测试明确 skip，不能因此宣称已完成云端验收。`cloud-ci.yml` 包含 TypeScript、云库集成、Swift、Android APK 与原生 App 产物；`cloud-image.yml` 在云端构建并可手动发布 GHCR 镜像。公开仓库为 `ximing/super-agent`。
 
