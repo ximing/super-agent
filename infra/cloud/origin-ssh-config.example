@@ -1,6 +1,6 @@
 # Install on the entry host, outside this repository:
 #   /etc/ssh/ssh_config.d/super-agent-origin.conf
-# origin-tunnel.service connects to the alias super-agent-origin.
+# super-agent-origin-tunnel.service connects to the alias super-agent-origin.
 # Replace the documentation address. Do not copy this example over the live file.
 
 Host super-agent-origin
